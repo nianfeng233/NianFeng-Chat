@@ -60,7 +60,14 @@ const DEFAULTS = {
       headers: {},
     },
   },
-  network: { timeoutMs: 60000, proxy: '' },
+  network: {
+    timeoutMs: 60000,
+    proxy: '',
+    // WebUI 对外监听：host 可为 127.0.0.1 / 0.0.0.0；port 为 0 表示使用启动默认端口；token 为空则不校验。
+    webuiHost: '127.0.0.1',
+    webuiPort: 0,
+    webuiToken: '',
+  },
   // 前端界面偏好（签名 / 玻璃参数等），由 WebUI config 服务同步进来，
   // 与模型配置放在同一个 config.json 中，跨浏览器 / 桌面宿主都可恢复。
   preferences: {},

@@ -1,5 +1,9 @@
 # 第三方组件与许可证声明
 
+> 风语原创代码、文档、界面与资源使用 Apache License 2.0（见根目录 LICENSE 与 NOTICE）；release/publish 发布仓库同样适用。
+> 本文件仅列出第三方组件与相应许可证义务。
+
+
 本文件用于满足风语项目的第三方依赖署名与许可证声明义务。
 `docs/DEPENDENCIES.md` 由 `npm run audit:deps` 自动生成，包含完整依赖清单；
 本文件给出最重要的分发注意事项与通用许可证文本。

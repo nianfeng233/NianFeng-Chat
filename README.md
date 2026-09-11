@@ -1,83 +1,240 @@
-# 风语 · AI Chat
+# 风语 (Fengyu) · 万物皆插件的 AI 聊天程序
 
-> 万物皆插件的 AI 聊天程序。视觉 1:1 复刻工作区中的 `deepseek_html_20260910_f355e0.html`，
-> 内核使用**真实的 cordis v4**，并配有一套**可实际使用的本地后端**（模型接入 / 会话持久化）。
+> 真实 cordis v4 内核 · 本地后端 · 外部插件目录 · 桌面 / Web 双端 · Apache-2.0
 
-```
-84 个插件 · 6 层架构 · 真实 cordis v4 内核 · 本地后端（Node，零 Web 框架）· 无假数据
-```
+风语不是又一个"套壳聊天页"。它把聊天软件拆成一套可替换的插件系统：会话、消息、模型、
+工具、通知、背景、气泡、语言包……全部是可独立启停、可外部安装的插件；数据、插件、
+主题与模型都保存在本机，并且可以外置到任意目录。
+
+当前版本：**v0.41.0**（发布与版本规范见 [`docs/RELEASING.md`](docs/RELEASING.md)）
+
+---
+
+## 为什么选择风语
+
+### 框架层：一切皆插件、一切可替换
+
+| 能力 | 说明 |
+|---|---|
+| 真实 cordis v4 内核 | fiber 生命周期、依赖注入、事件总线、服务注册全部是 cordis 原生实现，不是自己仿的"插件感" |
+| 6 层插件架构 | kernel / foundation / domain / shell / views / features / extras，依赖拓扑加载，可运行时启停、卸载、恢复 |
+| 可选中服务 | 主题、背景、气泡样式、模型、语言都是 selectable：同一个接口可以注册多个实现，用户在设置里切换 |
+| 外部插件目录 | 插件不必再嵌入 exe：放在数据目录的 `plugins/` 或任意指定目录，扫描即可加载，升级 exe 不丢插件 |
+| 存储可外置 | 数据目录、插件目录都可在设置中切换；配置、会话、密钥、插件都跟着数据目录走 |
+| 桌面 / Web 同源 | 同一套源码生成 Web 部署版与 Windows 单文件 exe；exe 只是无边框 WebView2 容器 |
+| 本地优先 | 默认只监听 `127.0.0.1`；需要开放访问时可切换 `0.0.0.0` 并设置访问令牌 |
+
+### 对话模式：用「读工具 + 写工具」解决常规聊天软件的痛点
+
+传统聊天软件把一切都塞进消息文本，靠不断增长的上下文"记得住"。风语把对话拆成两类工具：
+
+- **读**：`read_messages`（按条件读取历史消息）、`read_document`（按 token 预算读取长资料）
+- **写**：`chat_send`（一条或分多条发送聊天消息）、`send_document`（发送长资料，只存引用与摘要）
+
+这套模型带来几个结构性优势：
+
+1. **长期记忆不再靠"撑上下文"**
+   模型需要回忆时主动调用 `read_messages` / `read_document`；不需要时，记忆不占当前上下文。
+   再叠加"角色级工作记忆 + 渠道级最近消息"的分层，长期记忆与当前对话互不挤占。
+
+2. **跨会话交互是原生能力**
+   每个会话就是一个渠道（`nova:web:<id>`，后续可扩展 QQ / Telegram 等）。
+   模型可以在权限允许时跨渠道读取或发送，实现同一角色在不同会话间的连续存在，
+   而不是每个会话一座信息孤岛。
+
+3. **消息分段天然成立**
+   模型需要发多段就调用多次 `chat_send`：每段是独立气泡、独立时间戳、独立发送状态；
+   工具调用过程本身不会展示成消息，不会出现"一大段 JSON 混在聊天记录里"。
+
+4. **长资料不污染聊天记录**
+   `send_document` 只在聊天记录里保存 `doc_id`、标题、摘要和 token 数；
+   需要细节时再用 `read_document` 按 token 预算读取。聊天上下文保持干净，原文完整保存在资料库。
+
+5. **每一条消息都可审计**
+   消息带稳定的 `message_id / seq / channel_id / timestamp / sender_id / sender_name / visibility / source`；
+   工具协议轨迹（tool_calls）单独保存并可在下一轮还原，方便排查"模型到底做了什么"。
+
+6. **权限与隐私是一等公民**
+   渠道读写权限表、跨渠道校验、敏感操作确认、审计日志；隐私渠道默认禁止跨渠道读写，
+   群聊与私聊的记忆策略分开，不靠"提示词自律"。
+
+### 与常规聊天软件对比
+
+| 常见痛点 | 常规做法 | 风语 |
+|---|---|---|
+| 记忆越长越贵、越容易丢 | 全文回灌上下文 | 读工具按需读取 + 工作记忆 / 渠道记忆分层 |
+| 不同会话互不相通 | 每个会话独立 | 渠道模型 + 跨渠道读写工具（受权限约束） |
+| 长回复挤在一个气泡 | 一段超长文本 | `chat_send` 可多次调用，天然分段 |
+| 长资料塞满历史 | 资料全文进消息 | 资料库 + `doc_id` 引用 + `read_document` 按需读取 |
+| 工具调用格式泄漏进界面 | 原始 JSON / 标记上屏 | 专门拦截与渲染，不进入气泡 |
+| 想换主题 / 气泡 / 模型只能等更新 | 写死在 UI 里 | selectable 服务，插件即可替换 |
+| 想装插件只能重发新版本 | 全部内置 | 外部插件目录，复制文件夹 + 重新扫描即可 |
+| 数据散落在 C 盘 / 浏览器 | 不可控 | 数据、插件、密钥全部可外置 |
 
 ---
 
 ## 快速开始
 
-环境要求：Node.js ≥ 20（ES Module 需要通过 http 加载，不能直接双击 `index.html`）。
+环境要求：Node.js ≥ 20（ES Module 需要通过 HTTP 加载，不能直接双击 `index.html`）。
 
 ```bash
-npm install        # 安装 cordis（已内置依赖，通常直接可用）
+npm install        # 安装 cordis（通常仓库已带 node_modules，可直接跳过）
 npm start          # 一键启动「后端 + WebUI」，并自动打开浏览器
 ```
 
-`npm start` 会做这些事：
+Windows 用户可直接双击 `start.cmd`。首次使用需要配置模型：
 
-```
-╭─────────────────────────────────────────────────────╮
-│ WebUI : http://127.0.0.1:5173                       │
-│ API   : http://127.0.0.1:8788/api/health            │
-│ 数据  : <项目目录>/user_data                        │
-│ 代理  : http://127.0.0.1:5173/api → 127.0.0.1:8788  │
-╰─────────────────────────────────────────────────────╯
-```
+1. 打开 `设置 → 模型`，关闭「使用风语内置模型」（官方服务端尚未发布，当前为空状态）；
+2. 在提供商列表新增 DeepSeek / OpenAI 兼容 / Anthropic / Gemini / Ollama；
+3. 填 Base URL 与 API Key，获取模型列表并设为默认模型；
+4. 回到会话开始聊天。
 
-| 命令 | 说明 |
+API Key 只保存在本机数据目录的 `config.json`，以 AES-256-GCM 密文存储，接口返回时始终打码。
+
+---
+
+## 插件系统
+
+### 内置插件
+
+内置插件位于 `plugins/`，随版本发布；`npm run sync-plugins` 会扫描插件目录并生成
+`plugins/registry.mjs`。当前包括：
+
+- kernel：事件总线、插件加载器、依赖解析、生命周期、服务容器
+- foundation：配置、日志、i18n、主题、通知、插槽、弹窗 / 菜单 / 提示宿主、后端连接
+- domain：会话、消息、渠道、模型、权限、队列、工具注册表、聊天记录库、资料库
+- shell / views：外壳、顶栏、侧栏、聊天视图、消息气泡、输入区、设置页
+- features / extras：聊天主链路、工具循环、角色编辑、Markdown、简体中文语言包等
+
+### 外部插件目录（不需要重新打包 exe）
+
+| 版本 | 默认外部插件目录 |
 |---|---|
-| `npm start` | 后端 + WebUI 一起启动（开发模式，推荐） |
-| `npm run stop` | 关闭占用 5173 / 8788 的风语实例（找不到就说明没在运行） |
-| `npm run serve` | 单端口模式：后端直接托管 WebUI（只开 5173） |
-| `npm run backend` | 只启动后端（8788，便于单独调试 API） |
-| `npm test` | 模块检查 + 后端 API 测试（63 项）+ 前端端到端测试（199 项）+ 对话链路测试（13 项）+ Nova 工具链路测试（101 项）+ 厂商协议测试（30 项） |
-| `npm run test:chat` | 本地 Mock OpenAI 兼容服务 → 真实 `/api/chat` SSE 的对话链路集成测试 |
-| `npm run test:vendors` | DeepSeek / Anthropic / Gemini 协议转换与通用 OpenAI 参数降级的集成测试 |
-| `npm run mock:openai` | 启动本地 Mock 提供商（无网络 / 无 Key 时验证聊天 UI 用） |
-| `npm run build:release` | 生成 `release/`：Web 源码版 + Web 部署版 + 桌面源码 + `风语.exe` |
-| `npm run build:desktop` | 只生成无边框桌面版 `release/desktop/deploy/风语.exe` |
-| `npm run sync-plugins` | 新增/删除插件目录后，重新生成 `plugins/registry.mjs` |
-### 插件目录与外部插件
+| 开发版 / Web 部署版 | `<数据目录>/plugins/`（默认 `user_data/plugins/`） |
+| Windows exe | `%LOCALAPPDATA%\FengyuChat\user_data\plugins\` |
 
-* **内置插件**：`plugins/`（随版本发布；exe 升级时 runtime 目录会被替换）。
-* **外部插件**：默认读取数据目录下的 `plugins/`：
-  * 开发版 / Web 版：`user_data/plugins/`
-  * exe 版：`%LOCALAPPDATA%\FengyuChat\user_data\plugins\`（数据目录改到别处时跟随数据目录）
-  * 也可以在「设置 → 插件 → 插件目录」里选择任意外部目录，或用环境变量 `FENGYU_PLUGINS_DIR` 指定。
-* 插件结构：`<外部目录>/<分层>/<插件id>/index.mjs`，例如 `views/my-plugin/index.mjs`；放好后点「重新扫描」并刷新页面即可，**不需要**重新生成 `registry.mjs`，升级 exe 也不会删除外部插件。
-* 外部插件与内置插件使用同一套插件协议：`export const name / version / displayName / depends / inject / provides` + `export function apply(ctx)`；相对引用可用 `../../../src/...`，同源绝对路径也可用 `/src/...`。
-* 从外部插件目录删除后点「重新扫描」即可卸载；「设置 → 插件」里也能单独删除外部插件文件。
+也可以在「设置 → 插件 → 插件目录」选择任意目录，或用环境变量 `FENGYU_PLUGINS_DIR` 指定。
 
-### Windows 用户（推荐）
+插件结构（推荐与内置保持一致的分层）：
 
-直接双击 `start.cmd` 即可：检查 Node → 缺依赖自动安装 → 启动后端 + WebUI → 自动打开浏览器。
+```
+<外部目录>/views/my-plugin/index.mjs
+```
 
-* 首次使用建议先双击 `install.cmd`（网络需要代理时填写，例如 `http://127.0.0.1:7890`）
-* 也可以双击 `start.ps1`（PowerShell 版，支持 `-NoOpen` / `-Serve` / `-WebPort` / `-Proxy` 参数）
-* 生成桌面快捷方式：`powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1`
-* 详细说明与排障见 [`docs/WINDOWS.md`](docs/WINDOWS.md)
+把目录放好后：
 
-### 第一次使用：配置模型（必须，否则聊天不可用）
+1. 点击「重新扫描」或重启应用；
+2. 前端启动时会请求 `/api/plugins`，后端合并「内置 + 外部」清单；
+3. 外部插件按 `/user-plugins/<相对路径>` 动态加载，升级 exe 不会删除外部目录。
 
-风语不提供任何"演示模型"。没有配置提供商时，发送消息会明确提示去配置：
+插件协议与内置完全一致：
 
-1. 打开 `设置 → 模型`，关闭顶层的「使用风语内置模型」（内置模型由尚未发布的官方服务端提供，当前为空状态）
-2. 在左侧提供商列表点「新增」，选择类型并填写配置：
-   * **DeepSeek 官方**：Base URL 默认 `https://api.deepseek.com`，填 API Key 后获取模型（如 `deepseek-v4-flash` / `deepseek-v4-pro`）
-   * **Anthropic Claude**：Base URL 默认 `https://api.anthropic.com`，原生支持 tools / tool_use
-   * **Google Gemini**：Base URL 默认 `https://generativelanguage.googleapis.com`，原生支持 functionDeclarations / functionCall
-   * **Ollama（本地，零成本）**：地址 `http://localhost:11434`
-   * **OpenAI 兼容接口**：填 Base URL 与 API Key（也适用于 DeepSeek / Moonshot / OneAPI / vLLM 等）
-3. 保存后点「测试连接」——这是真实请求，成功/失败都会给出服务端返回的原因
-4. 点「获取模型列表」拉取真实模型，或手动添加自定义模型；在「默认模型」里选一个，回到会话开始聊天
-5. 每个模型还能单独配置 temperature / max_tokens / 额外请求体，提供商支持超时、代理与请求头覆盖
+```js
+export const name = 'my-plugin'
+export const version = '1.0.0'
+export const displayName = '我的插件'
+export const description = '一句话说明'
+export const core = false
+export const inject = []
+export function apply(ctx) {
+  // ctx.provide / ctx.on / ctx.slots.register ...
+}
+```
 
-> API Key 只保存在本机 `user_data/config.json`，且以 AES-256-GCM 密文存储（密钥文件 `user_data/.secret-key`）；接口返回时始终打码，**不会**发送到浏览器。备份数据时请把 `.secret-key` 一起复制。接入系统凭据库（Keychain / DPAPI）仍是后续事项，已列入「未实现清单」。
+外置插件默认放在 `user_data/plugins`，因此数据目录外置到 D 盘 / 移动硬盘时，插件也跟着走。
+
+---
+
+## 数据、隐私与安全
+
+- **数据目录**：默认 `user_data/`，可在「设置 → 数据」中切换到任意目录；空目录 = 全新实例，
+  已有 `config.json / sessions.json` 的目录 = 加载该实例。
+- **插件目录**：作为数据目录的 `plugins/` 子目录，也可以独立指定。
+- **凭据保护**：API Key 与敏感请求头以 AES-256-GCM 密文存储，密钥文件 `.secret-key` 与数据同目录，
+  备份数据时需要一起复制。
+- **本地优先**：默认监听 `127.0.0.1`；只有在显式设置监听地址与访问令牌后才会开放到局域网 / 公网。
+- **发布安全门禁**：`scripts/prepare-publish.mjs` 会在发布前扫描用户名、本机绝对路径、API Key、
+  私钥、邮箱、手机号与 `user_data` 等内容，命中即中止发布。
+
+---
+
+## 桌面版与 Web 版
+
+| | Web 部署版 | Windows 桌面版 |
+|---|---|---|
+| 入口 | `release/web/deploy/启动风语.cmd`（自带便携 Node） | `release/desktop/deploy/风语.exe` |
+| 形态 | 本地服务 + 浏览器 | 无边框 WebView2 窗口，内置便携 Node |
+| 外部插件 | `user_data/plugins/` | `%LOCALAPPDATA%\FengyuChat\user_data\plugins\` |
+| 数据 | 部署目录 `user_data/`（可切换） | `%LOCALAPPDATA%\FengyuChat\user_data\`（可切换） |
+| 通知 | 浏览器 Notification + 右下角通知中心 | Rust 宿主直接发送 Windows 通知（带头像），不依赖浏览器权限 |
+| 升级 | 解压覆盖部署目录 | 替换 exe；`user_data` 与外部插件保留 |
+
+构建两个版本：
+
+```bash
+npm run build:release        # Web 源码 + Web 部署 + 桌面源码 + 风语.exe
+npm run build:desktop        # 只构建桌面版
+```
+
+---
+
+## WebUI 监听与访问令牌
+
+「设置 → 网络 → WebUI 访问」支持：
+
+- **监听地址**：`127.0.0.1`（仅本机）/ `0.0.0.0`（开放访问）
+- **监听端口**：Web 部署 / `npm start` 模式生效
+- **访问令牌**：非空时浏览器必须带令牌访问：
+  `http://<主机>:<端口>/?token=你的令牌`
+  验证通过后会写入本机 Cookie，后续直接访问即可；`/api/health` 与 `/api/version` 始终放行，
+  供宿主探活使用。
+
+保存后会弹出「是否立即重启」：确认后 Web 版由启动脚本自动拉起新进程，桌面版重启整个 exe；
+取消则配置已保存，下次启动生效。
+
+---
+
+## 通知与提示音
+
+- 通知分为三类：**系统通知**（风语 logo + 标题 + 内容）、**角色消息**（角色头像 + 角色名 + 预览）、
+  **其他通知**（通用图标 + 标题 + 内容），统一展示在右下角通知中心。
+- 角色消息在窗口后台或不在该会话时逐条提醒；桌面版由 Rust 宿主发送 Windows 通知，
+  并把角色头像作为通知大图标，不再受 WebView2 浏览器通知权限限制。
+- 提示音支持 4 种内置音色（默认 / 清脆 / 柔和 / 双响）与自定义音频上传（mp3 / wav / ogg）。
+- 语言包：内置简体中文语言包插件 `lang-zh-cn`；复制该插件目录、修改翻译表即可新增语种。
+
+---
+
+## 测试
+
+```bash
+npm test             # 模块检查 + 后端 API + 前端端到端 + 对话 / 工具 / 厂商协议
+npm run test:smoke   # 前端端到端（真实后端 + 真实 SSE）
+npm run test:chat    # 本地 Mock OpenAI 兼容服务 → 真实 /api/chat
+npm run test:vendors # DeepSeek / Anthropic / Gemini 协议转换
+```
+
+当前基线：前端端到端 **207 项全绿**，完整 `npm test` 通过。
+
+---
+
+## 版本管理与发布
+
+所有开发都在工作区完成；发布仓库由 `scripts/prepare-publish.mjs` 从
+`release/web/source` 同步生成，并强制通过敏感信息扫描。
+
+```powershell
+npm test
+npm run build:release
+node scripts/prepare-publish.mjs
+node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md
+```
+
+详细规范（语义化版本、分支模型、hotfix、回滚、发布 Checklist）见
+**[`docs/RELEASING.md`](docs/RELEASING.md)**。
+
+- 发布仓库：<https://github.com/nianfeng233/fengyu-chat>
+- 预编译 exe 与 Web 部署包：GitHub Releases 附件
 
 ---
 
@@ -85,166 +242,42 @@ npm start          # 一键启动「后端 + WebUI」，并自动打开浏览器
 
 ```
 .
-├── index.html                  # 只有 #app 挂载点 + cordis 的 import map
-├── start.mjs                   # 一键启动：后端 + WebUI + 反代 + 打开浏览器
+├── index.html                  # #app 挂载点 + cordis import map
+├── start.mjs                   # 后端 + WebUI + 反向代理 + 崩溃兜底
 ├── server/                     # 本地后端（真实 cordis 应用）
 │   ├── index.mjs               #   startBackend()：组装后端插件
-│   └── plugins/
-│       ├── settings.mjs        #   user_data/config.json 读写 + 凭据脱敏
-│       ├── sessions.mjs        #   user_data/sessions.json 真实持久化
-│       ├── models.mjs          #   OpenAI 兼容 / Anthropic / Ollama 真实接入
-│       ├── hub.mjs             #   SSE 实时事件总线
-│       └── http.mjs            #   REST + SSE API + 可选静态托管
+│   ├── data-dir.mjs            #   数据目录解析与 instance 指针
+│   └── plugins/                #   settings / sessions / models / hub / instance / plugin-registry / http
 ├── src/
-│   ├── main.mjs                # 启动引导（加载 84 个插件）
-│   ├── runtime/                # cordis 之上的风语运行时
-│   │   ├── app.mjs             #   插件清单 / 状态 / 启停 / 依赖图
-│   │   ├── compat.mjs          #   插件 ctx 兼容层（底层是真实 cordis fiber）
-│   │   ├── errors.mjs
-│   │   └── semver.mjs
-│   └── util/                   # 库（非插件）：dom / format / icons / style / settings
-├── plugins/                    # 所有前端功能都是插件
-│   ├── registry.mjs            #   自动生成的插件清单
-│   ├── kernel/  foundation/  domain/  shell/  views/  features/  extras/
-├── scripts/
-│   ├── smoke.mjs               # 前端端到端测试（会启动真实后端）
-│   ├── test-backend.mjs        # 后端 API 测试（真实 HTTP）
-│   ├── dom-shim.mjs            # 测试用极简 DOM
-│   ├── sync-plugins.mjs
-│   └── check-syntax.mjs
-├── docs/                       # 架构 / 插件开发 / 插件清单 / Demo 对照
-├── public/assets/logo.png
-├── user_data/                  # 运行后生成：config.json、sessions.json、.secret-key、外部插件 plugins/（已 gitignore）
-├── 文档.txt                     # 原始架构设计草稿（未改动）
-└── deepseek_html_20260910_f355e0.html   # 原始视觉 Demo（未改动）
+│   ├── main.mjs                # 启动引导（内置 + 外部插件清单）
+│   ├── runtime/                # 插件运行时（app / compat / errors / semver）
+│   └── util/                   # 库：dom / format / icons / style / identity / settings / glass
+├── plugins/                    # 内置插件（kernel / foundation / domain / shell / views / features / extras）
+├── scripts/                    # 构建、测试、发布与安全检查脚本
+├── docs/                       # 架构、插件指南、插件清单、发布规范
+├── public/assets/logo.png      # 品牌 logo
+└── user_data/                  # 运行后生成：配置、会话、密钥、外部插件（已忽略）
 ```
 
 ---
 
-## 架构
+## 许可证与第三方声明
 
-### 前端：真实 cordis + 风语运行时
-
-* 内核是 npm 包 **cordis v4**（`node_modules/cordis`），浏览器通过 import map 直接加载；
-  plugin fiber、依赖注入（`inject`）、事件总线、日志、`ctx.effect` 生命周期全部是 cordis 原生实现。
-* `src/runtime/compat.mjs` 是薄兼容层，让插件用统一、简洁的 ctx API，同时把所有权/状态暴露给插件管理器：
-  `inject()` 无需回调也能取值、`provide()` 带归属与冲突检测、`emit()` 支持拦截型事件、`effect()` 统一为"注册清理函数"。
-* 插件模块格式与 cordis 完全一致：`export const name/inject/provides` + `export function apply(ctx)`。
-
-六层结构（详细清单见 `docs/PLUGIN-LIST.md`）：
-
-| 层 | 职责 | 数量 |
-|---|---|---|
-| L6 可选扩展 | Markdown 渲染、简体中文语言包（其余扩展插件后续按需加入） | 2 |
-| L5 业务功能 | chat-flow、渠道基座、后端模型适配器、工具集、上下文构建、角色消息提醒 | 8 |
-| L4 视觉内容 | 三视图、列表、气泡、输入框、全局搜索、设置页等 | 31 |
-| L3 视觉框架 | 外壳、顶栏、侧栏、左右玻璃板、背景 | 9 |
-| L2 业务服务 | 会话、消息、模型、视图路由、渠道、插件管理、搜索、导出、渠道记录、资料库、聊天权限、串行队列、工具注册表 | 14 |
-| L1 基础服务 | 存储、配置、日志、主题、多语言、权限、插槽、弹窗/菜单/提示宿主、后端连接等 | 15 |
-| L0 内核 | event-bus、plugin-loader、dependency-resolver、lifecycle、service-container | 5 |
-
-### 后端：另一个 cordis 应用
-
-后端不是"假接口"，而是一个独立的 cordis Context，加载 `server/plugins/*`：
-
-* `settings` → 真实读写 `user_data/config.json`，接口返回时脱敏
-* `sessions` → 真实读写 `user_data/sessions.json`（原子写 + 防抖落盘）
-* `models` → 真实请求上游：OpenAI 兼容 `/chat/completions`（SSE）、Anthropic `/v1/messages`（SSE）、Ollama `/api/chat`（NDJSON）
-* `hub` → SSE 实时通道（提供商状态、聊天进度、会话变更）
-* `http` → REST + SSE，零 Web 框架手写路由；可选托管 WebUI（单端口模式）
-
-API 一览（全部有真实实现）：
-
-```
-GET    /api/health                     服务状态 / 提供商概览 / 数据规模
-GET    /api/config                     脱敏配置
-PUT    /api/config                     保存配置（可含明文 Key，仅本机）
-GET    /api/providers                  提供商 + 模型 + 最近测试结果
-PUT    /api/providers/:id              修改 Base URL / Key / 启用 / 默认模型
-POST   /api/providers/:id/test         真实连通性测试
-POST   /api/providers/:id/refresh      真实拉取模型列表
-POST   /api/chat                       真实流式补全（SSE：start/chunk/tool_call/done/error）
-GET    /api/sessions                   会话列表
-POST   /api/sessions                   新建会话
-PUT    /api/sessions/:id               更新会话（含消息）
-DELETE /api/sessions/:id               删除会话
-POST   /api/sessions/:id/messages      追加消息
-PUT    /api/sessions/:id/messages/:mid 更新消息
-GET    /api/rss?url=                   服务端代理抓取 RSS/Atom（保留给扩展插件）
-POST   /api/translate                  通过已配置模型真实翻译（保留给扩展插件）
-GET    /api/events                     SSE 实时事件
-GET    /api/logs                       近期请求与连接信息
-```
+- 风语原创代码、文档、界面与资源：**Apache License 2.0**（[`LICENSE`](LICENSE)，版权信息见 [`NOTICE`](NOTICE)）。
+- 第三方依赖：见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 与自动生成的
+  [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)；各依赖按其各自许可证授权。
+- `release/*/deploy` 中的便携 Node 运行时遵循 Node.js 及其内置组件的许可证；
+  Rust 桌面壳依赖的许可证审计结果同样记录在 `docs/DEPENDENCIES.md`。
 
 ---
 
-## 哪些是真的 / 哪些没做
+## 文档索引
 
-**真实可用**：模型接入与流式对话（OpenAI 兼容 / DeepSeek 官方 / Anthropic Claude / Google Gemini / Ollama，含各厂商原生工具调用与 reasoning 回传）、会话持久化（后端文件）、Markdown 渲染、全局搜索浮层（Ctrl+Shift+F）、
-导出（MD/JSON/TXT/HTML/CSV/PDF）、主题/背景/气泡热切换、玻璃板透明度调节、插件运行时启停与卸载恢复、
-插件自检与错误标红、外部插件目录（可指定任意目录 / 热扫描 / 删除，升级不丢失）、快捷键、三分类通知（系统通知 / 角色消息 / 其他；桌面端由宿主直发系统通知）、统一头像（默认风语 logo，可在顶栏更换）、错误上报、设置 → 聊天记录（图形逐条编辑 / JSON 源码双模式，草稿式保存）、**Nova 渠道工具调用循环（read_messages / chat_send / send_document / read_document）与工作记忆 / 渠道记忆 / 权限校验 / 敏感确认**；优先使用原生 `tool_calls`，模型只输出 `<tool_call>` JSON / DSML·DSLM 文本标记时也能解析并执行，标记不会进入气泡。
-（气泡扩展、音乐播放器、番茄钟、RSS、TTS、翻译、Telegram 渠道已移出内置，后续以扩展插件形式回归；见「未实现清单」。）
-
-**明确未实现（设置 → 未实现清单里也会列出）**：
-
-| 功能 | 状态与原因 |
-|---|---|
-| 官方服务登录（账户 / 官方模型 / 计费） | 未实现：官方服务端由**独立的官网项目**提供，尚未发布；本仓库是纯客户端，不内置也不模拟云服务。用户自带模型时无需登录 |
-| 多设备云同步 | 未实现：需要云端存储与冲突合并 |
-| 微信 / Discord / 邮箱 / Telegram 渠道 | 未实现：协议与权限问题（添加渠道菜单里会标注原因）；Telegram 已从内置移除，待扩展插件回归 |
-| 插件市场 / 在线安装 | 部分实现：本地外部插件目录已支持；市场与在线安装需要服务端索引与签名校验 |
-| 代码运行器 | 部分实现：JavaScript Web Worker 沙箱（无 DOM / 无网络 / 5 秒超时）；Python / Node / 系统命令需要 OS 级沙箱，未实现 |
-| 语音输入 | 部分实现：已接入浏览器 Web Speech API（Chrome / Edge）；不支持的浏览器仍提示插件扩展 |
-| API Key 加密 | 部分实现：已用 AES-256-GCM 密文本机存储；尚未接入 Keychain / DPAPI 系统凭据库 |
-| 桌面窗口控制 | 桌面端已实现：最小化 / 最大化 / 关闭与「关闭时最小化」；浏览器环境仅提供页面内提示 |
-
----
-
-## 调试
-
-```js
-__wind_debug.runtime          // 'cordis'
-__wind_debug.status()         // 84 个插件状态 / 原因 / 告警
-__wind_debug.services()       // 服务台账（含归属）
-__wind_debug.fibers()         // 每个插件对应的 cordis fiber 状态
-__wind_debug.trace(true)      // 打开事件追踪
-__wind_debug.enable('bg-solid')   // 运行时启用插件
-__wind_debug.graph()          // 依赖图与拓扑顺序
-```
-
-后端数据目录默认是 `user_data/`：`config.json`（配置与凭据）、`sessions.json`（全部会话与消息）。
-* 首次启动如果检测到旧版 `data/` 里有数据，会自动复制到 `user_data/`（只复制，不删除）
-* `设置 → 数据` 可以把实例切换到任意目录（不存在自动创建；目标已有数据则加载目标实例），并支持「恢复默认」
-* 指向的目录记录在 `user_data/instance.json`；删掉 `config.json` / `sessions.json` 即可恢复初始状态（`.secret-key` 用于加密凭据，备份时要保留）
-
----
-
-## 延伸阅读
-
-* [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows 双击脚本、代理安装与排障
-* [`docs/DESKTOP.md`](docs/DESKTOP.md) — 无边框桌面端与 `release/` 打包说明
-* [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) — 依赖与许可证清单（`npm run audit:deps`）
-* [`docs/COMMERCIAL-USE.md`](docs/COMMERCIAL-USE.md) — 商用可行性检查与合规清单
-* [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) — 第三方组件与许可证声明
-* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 架构实现（cordis + 后端）
-* [`docs/CHAT-FLOW.md`](docs/CHAT-FLOW.md) — 一条消息经过哪些插件：聊天链路复盘
-* [`docs/STATUS.md`](docs/STATUS.md) — 当前完成状态与遗留事项（交接用）
-* [`docs/PLUGIN-GUIDE.md`](docs/PLUGIN-GUIDE.md) — 插件开发指南
-* [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — 84 个插件清单与状态
-
-## 常见问题
-
-**聊天时提示"尚未配置模型提供商"？**
-这是预期行为：去 `设置 → 模型` 配置 DeepSeek 官方、OpenAI 兼容接口、Anthropic、Google Gemini 或本地 Ollama。
-
-**Ollama 测试连接失败？**
-先确认 `ollama serve` 正在运行、地址是 `http://localhost:11434`、并且至少 `ollama pull` 过一个模型。
-
-**后端离线会怎样？**
-WebUI 会出现「离线模式」提示条，会话暂存浏览器本地；后端恢复后可点「重试」同步。
-
-
-
-
-
-
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 架构与数据流
+- [`docs/CHAT-FLOW.md`](docs/CHAT-FLOW.md) — 一条消息经过哪些插件
+- [`docs/PLUGIN-GUIDE.md`](docs/PLUGIN-GUIDE.md) — 插件开发指南
+- [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — 插件清单与状态
+- [`docs/RELEASING.md`](docs/RELEASING.md) — 版本管理与发布规范
+- [`docs/DESKTOP.md`](docs/DESKTOP.md) — 桌面壳构建与运行
+- [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows 使用与排障
+- [`docs/STATUS.md`](docs/STATUS.md) — 当前功能状态

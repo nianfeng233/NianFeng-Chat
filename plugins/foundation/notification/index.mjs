@@ -8,15 +8,19 @@
  *   - other     其他通知：通用图标 + 标题 + 内容。
  *
  * 系统级通道：
- *   - 浏览器环境：Notification API（权限允许时）；
+ *   - 浏览器环境：Notification API（权限允许时），使用角色头像作为图标；
  *   - 桌面版：通过 window.windHost.notify 交给 Rust 宿主弹 Windows 通知，
- *     不再依赖 WebView2 的 Notification 权限，因此 exe 里不会出现“已拒绝”；
+ *     并把头像转成 64×64 PNG 交给宿主（Shell_NotifyIcon 大图标 / 操作中心头像）；
  *   - 无论系统级通道是否可用，右下角通知中心都会展示，保证用户能看到提醒。
+ *
+ * 提示音：
+ *   - 内置音色（默认 / 清脆 / 柔和 / 双响）；
+ *   - 支持上传自定义音频（data URL 存在 config，不依赖外部文件）。
  */
 export const name = 'notification'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const displayName = '消息通知'
-export const description = '基础服务 · 右下角通知中心（系统通知 / 角色消息 / 其他）、桌面通知与提示音。'
+export const description = '基础服务 · 右下角通知中心（系统通知 / 角色消息 / 其他）、系统通知头像、自定义提示音。'
 export const author = '风语内核'
 export const icon = '🔔'
 export const core = false
@@ -30,8 +34,35 @@ import { FENGYU_LOGO, avatarHtmlFromInfo } from '../../../src/util/identity.mjs'
 
 const MAX_CARDS = 5
 const CARD_DURATION = 6200
+const ICON_SIZE = 64
 
 const BELL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>'
+
+/** 内置提示音：不同音色/节奏，全部用 Web Audio 现场合成，不依赖音频文件 */
+const SOUND_PRESETS = {
+  default: {
+    label: '默认',
+    notes: [{ f: 880, type: 'sine', dur: 0.18, gain: 0.05 }],
+  },
+  clear: {
+    label: '清脆',
+    notes: [
+      { f: 1320, type: 'triangle', dur: 0.12, gain: 0.045 },
+      { f: 990, type: 'triangle', dur: 0.16, gain: 0.04, delay: 0.09 },
+    ],
+  },
+  soft: {
+    label: '柔和',
+    notes: [{ f: 660, type: 'sine', dur: 0.3, gain: 0.032 }],
+  },
+  double: {
+    label: '双响',
+    notes: [
+      { f: 980, type: 'sine', dur: 0.12, gain: 0.045 },
+      { f: 980, type: 'sine', dur: 0.12, gain: 0.045, delay: 0.2 },
+    ],
+  },
+}
 
 export function apply(ctx) {
   const config = ctx.inject('config')
@@ -129,34 +160,163 @@ export function apply(ctx) {
     return card
   }
 
-  const beep = (() => {
+  /* ---------------- 提示音 ---------------- */
+  const getAudioContext = (() => {
     let audioCtx = null
     return () => {
-      try {
-        const Ctx = window.AudioContext || window.webkitAudioContext
-        if (!Ctx) return
-        audioCtx = audioCtx || new Ctx()
-        const osc = audioCtx.createOscillator()
-        const gain = audioCtx.createGain()
-        osc.type = 'sine'
-        osc.frequency.value = 880
-        gain.gain.setValueAtTime(0.0001, audioCtx.currentTime)
-        gain.gain.exponentialRampToValueAtTime(0.05, audioCtx.currentTime + 0.01)
-        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.18)
-        osc.connect(gain).connect(audioCtx.destination)
-        osc.start()
-        osc.stop(audioCtx.currentTime + 0.2)
-      } catch (_) {
-        /* 音频不可用就算了 */
-      }
+      const Ctx = typeof window !== 'undefined' ? window.AudioContext || window.webkitAudioContext : null
+      if (!Ctx) return null
+      audioCtx = audioCtx || new Ctx()
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {})
+      return audioCtx
     }
   })()
 
+  const playPreset = presetId => {
+    const preset = SOUND_PRESETS[presetId] || SOUND_PRESETS.default
+    const audioCtx = getAudioContext()
+    if (!audioCtx) return false
+    try {
+      const startAt = audioCtx.currentTime
+      for (const note of preset.notes) {
+        const osc = audioCtx.createOscillator()
+        const gain = audioCtx.createGain()
+        osc.type = note.type || 'sine'
+        osc.frequency.value = note.f
+        const at = startAt + (note.delay || 0)
+        gain.gain.setValueAtTime(0.0001, at)
+        gain.gain.exponentialRampToValueAtTime(note.gain || 0.04, at + 0.01)
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + note.dur)
+        osc.connect(gain).connect(audioCtx.destination)
+        osc.start(at)
+        osc.stop(at + note.dur + 0.02)
+      }
+      return true
+    } catch (_) {
+      return false
+    }
+  }
+
+  const playCustomSound = dataUrl => {
+    try {
+      const audio = new Audio(String(dataUrl))
+      audio.volume = 1
+      audio.play().catch(() => {})
+      return true
+    } catch (_) {
+      return false
+    }
+  }
+
+  const customSound = () => String(config.get('notify.soundData', '') || '').trim()
+
+  const playSound = () => {
+    if (config.get('notify.sound', true) === false) return false
+    const custom = customSound()
+    if (custom) return playCustomSound(custom)
+    return playPreset(String(config.get('notify.soundPreset', 'default') || 'default'))
+  }
+
+  /* ---------------- 系统通知图标（头像） ---------------- */
+  const iconCache = new Map()
+
+  const imageToDataUrl = (src, { square = true } = {}) =>
+    new Promise(resolve => {
+      if (!src || typeof Image === 'undefined' || typeof document === 'undefined') return resolve('')
+      const key = `img:${square}:${src}`
+      if (iconCache.has(key)) return resolve(iconCache.get(key))
+      const image = new Image()
+      image.crossOrigin = 'anonymous'
+      image.onload = () => {
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width = ICON_SIZE
+          canvas.height = ICON_SIZE
+          const painter = canvas.getContext('2d')
+          if (!painter) throw new Error('canvas')
+          if (square) {
+            const side = Math.min(image.width || ICON_SIZE, image.height || ICON_SIZE)
+            painter.drawImage(
+              image,
+              ((image.width || side) - side) / 2,
+              ((image.height || side) - side) / 2,
+              side,
+              side,
+              0,
+              0,
+              ICON_SIZE,
+              ICON_SIZE,
+            )
+          } else {
+            painter.drawImage(image, 0, 0, ICON_SIZE, ICON_SIZE)
+          }
+          const dataUrl = canvas.toDataURL('image/png')
+          iconCache.set(key, dataUrl)
+          resolve(dataUrl)
+        } catch (_) {
+          resolve('')
+        }
+      }
+      image.onerror = () => resolve('')
+      image.src = src
+    })
+
+  /** 没有头像图片时，用角色首字 + 色板生成 64×64 头像（与聊天界面里的角色色块一致） */
+  const textAvatarToDataUrl = ({ text, c1, c2 }) => {
+    if (typeof document === 'undefined') return ''
+    const key = `text:${text}:${c1}:${c2}`
+    if (iconCache.has(key)) return iconCache.get(key)
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = ICON_SIZE
+      canvas.height = ICON_SIZE
+      const painter = canvas.getContext('2d')
+      if (!painter) return ''
+      const gradient = painter.createLinearGradient(0, 0, ICON_SIZE, ICON_SIZE)
+      gradient.addColorStop(0, c1 || '#a8b6ff')
+      gradient.addColorStop(1, c2 || '#5a8dff')
+      painter.fillStyle = gradient
+      painter.fillRect(0, 0, ICON_SIZE, ICON_SIZE)
+      painter.fillStyle = '#ffffff'
+      painter.font = 'bold 34px "Microsoft YaHei", sans-serif'
+      painter.textAlign = 'center'
+      painter.textBaseline = 'middle'
+      painter.fillText(String(text || '?').slice(0, 1), ICON_SIZE / 2, ICON_SIZE / 2 + 2)
+      const dataUrl = canvas.toDataURL('image/png')
+      iconCache.set(key, dataUrl)
+      return dataUrl
+    } catch (_) {
+      return ''
+    }
+  }
+
+  const buildIcon = async options => {
+    const kind = options.kind || 'system'
+    const imageSource = kind === 'character' ? options.avatarImage || '' : ''
+    if (imageSource) {
+      const dataUrl = await imageToDataUrl(imageSource)
+      if (dataUrl) return dataUrl
+    }
+    if (kind === 'character') {
+      const text = options.avatarText || options.avatar || String(options.title || '').slice(0, 1)
+      const dataUrl = textAvatarToDataUrl({ text, c1: options.c1, c2: options.c2 })
+      if (dataUrl) return dataUrl
+    }
+    return imageToDataUrl(new URL(FENGYU_LOGO, typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/').href)
+  }
+
   /** 系统级通知：桌面宿主优先，其次浏览器 Notification */
-  const nativeNotify = ({ kind, title, body, avatarImage, onClick }) => {
+  const nativeNotify = async ({ kind, title, body, avatarImage, avatarText, avatar, c1, c2, onClick }) => {
+    const iconDataUrl = await buildIcon({ kind, title, avatarImage, avatarText, avatar, c1, c2 })
     if (hostNotify) {
       try {
-        host.notify({ kind, title, body })
+        host.notify({
+          kind,
+          title,
+          body,
+          // 宿主只收纯 base64，避免超长 dataURL 前缀
+          icon: iconDataUrl ? iconDataUrl.split(',')[1] || '' : '',
+        })
         return true
       } catch (_) {
         return false
@@ -166,7 +326,7 @@ export function apply(ctx) {
       try {
         const n = new Notification(title, {
           body,
-          icon: kind === 'character' && avatarImage ? avatarImage : FENGYU_LOGO,
+          icon: iconDataUrl || FENGYU_LOGO,
           silent: true,
         })
         n.onclick = () => {
@@ -241,17 +401,27 @@ export function apply(ctx) {
       const gateKey = kind === 'character' ? 'notify.messages' : 'notify.system'
       if (config.get(gateKey, true) === false) return false
 
-      let native = false
       if (system && config.get('notify.system', true)) {
-        native = nativeNotify({ kind, title, body, avatarImage, onClick })
+        // 头像转换 + 宿主 IPC 是异步的；应用内卡片先同步显示，系统通知随后补上。
+        nativeNotify({ ...options, kind, title, body, avatarImage, onClick }).catch(() => {})
       }
       renderCard({ ...options, kind, title, body, duration })
-      if (sound && config.get('notify.sound', true)) beep()
-      ctx.emit('notification:sent', { kind, title, body, level, native })
-      return native || true
+      if (sound) playSound()
+      ctx.emit('notification:sent', { kind, title, body, level })
+      return true
     },
 
-    beep,
+    /** 播放提示音（设置页试听 / 插件调用） */
+    playSound,
+    /** 兼容旧调用名 */
+    beep: playSound,
+
+    soundPresets: () => Object.entries(SOUND_PRESETS).map(([id, preset]) => ({ id, label: preset.label })),
+    previewSound: presetId => {
+      if (presetId) return playPreset(presetId)
+      return playSound()
+    },
+    hasCustomSound: () => !!customSound(),
 
     /** 清空通知中心（调试 / 测试用） */
     clear: () => {

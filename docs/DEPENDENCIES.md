@@ -1,6 +1,6 @@
 # 依赖与许可证清单
 
-> 由 `scripts/audit-dependencies.mjs` 自动生成，生成时间：2026-09-11T16:12:38.149Z
+> 由 `scripts/audit-dependencies.mjs` 自动生成，生成时间：2026-09-11T18:32:07.521Z
 > 这份清单用于发布前的依赖审查；如升级依赖，请重新运行 `npm run audit:deps`。
 
 ## 结论摘要

@@ -117,6 +117,7 @@ export function apply(ctx) {
     pickPluginsDir: () => request('/plugins/pick-dir', { method: 'POST', timeoutMs: 200000 }),
     openPluginsDir: () => request('/plugins/open-dir', { method: 'POST' }),
     removeExternalPlugin: id => request(`/plugins/external/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
 
     sessions: () => request('/sessions'),
     createSession: conv => request('/sessions', { method: 'POST', body: conv }),

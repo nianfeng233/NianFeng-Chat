@@ -19,6 +19,5 @@ user_data/
 coverage/
 .npm-cache/
 
-# release/ 中的可部署产物（node_modules 体积很小，需要随仓库分发）
-!release/web/deploy/app/node_modules/
-!release/desktop/source/desktop/app/node_modules/
+# 发布产物由 npm run build:release 生成；exe / node.exe 等大文件走 GitHub Releases，不进源码仓库
+release/

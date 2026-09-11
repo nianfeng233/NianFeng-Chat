@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from './server/index.mjs'
+import { resolveDataDir } from './server/data-dir.mjs'
 import { ensurePortsFree } from './server/port-utils.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
@@ -51,10 +52,43 @@ function banner(lines) {
 }
 
 /** WebUI 静态服务器 + /api 反向代理（把 SSE 也原样透传） */
-function createWebServer({ backendPort }) {
+function createWebServer({ backendPort, accessToken = '' }) {
+  const token = String(accessToken || '').trim()
+  const cookieValue = (req, name) => {
+    for (const part of String(req.headers.cookie || '').split(';')) {
+      const [key, ...rest] = part.trim().split('=')
+      if (key === name) return decodeURIComponent(rest.join('='))
+    }
+    return ''
+  }
+  const authPage = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>
+<body style="font-family:system-ui,sans-serif;padding:48px;color:#1a1d21"><h2>需要访问令牌</h2>
+<p>这是一个受保护的 WebUI。请在地址后加上访问令牌：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://<主机>:<端口>/?token=你的令牌</pre>
+<p>验证通过后会写入本机 Cookie，后续直接访问即可。</p></body></html>`
   return createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
     const pathname = decodeURIComponent(url.pathname)
+
+    // 访问令牌：health / version 放行（供宿主探活），其余请求需要 query / cookie / header 中的 token
+    if (token && pathname !== '/api/health' && pathname !== '/api/version') {
+      const queryToken = url.searchParams.get('token') || ''
+      const cookieToken = cookieValue(req, 'fengyu_token')
+      const headerToken = String(req.headers['x-fengyu-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+      const ok = queryToken === token || cookieToken === token || headerToken === token
+      if (!ok) {
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(authPage)
+        return
+      }
+      if (queryToken === token && cookieToken !== token && req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
+        res.writeHead(302, {
+          'Set-Cookie': `fengyu_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+          Location: pathname || '/',
+        })
+        res.end()
+        return
+      }
+    }
 
     // 1) API 代理（外部插件模块也由后端提供，避免开发模式下 5173 找不到）
     if (pathname.startsWith('/api/') || pathname.startsWith('/user-plugins/')) {
@@ -135,31 +169,70 @@ async function logCrash(kind, error) {
 
 async function main() {
   const backendPort = Number(process.env.BACKEND_PORT || 8788)
-  const webPort = Number(process.env.WEB_PORT || (singlePort ? 5173 : 5173))
+
+  // WebUI 监听地址/端口/访问令牌来自数据目录 config.json 的 network 段。
+  // 优先级：环境变量 > config.json > 默认值；设置页保存后按提示重启生效。
+  const paths = process.env.FENGYU_DATA_DIR
+    ? { dataDir: resolve(process.env.FENGYU_DATA_DIR) }
+    : await resolveDataDir(ROOT)
+  let network = {}
+  try {
+    network = JSON.parse(await readFile(join(paths.dataDir, 'config.json'), 'utf8'))?.network || {}
+  } catch (_) {
+    network = {}
+  }
+  const webuiHost = String(process.env.WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
+  const webPort = Number(process.env.WEB_PORT || network.webuiPort || (singlePort ? 5173 : 5173))
+  const accessToken = String(network.webuiToken || '').trim()
 
   banner(singlePort ? ['风语 · 单端口模式', '后端同时托管 WebUI 与 API'] : ['风语 · 开发模式', '后端 + WebUI 一起启动'])
 
   // 重复双击启动时：如果端口上是旧的风语实例，自动关掉再启动；是别的程序则明确报错
   await ensurePortsFree(singlePort ? [webPort] : [backendPort, webPort], { autoStop: true, log: console })
 
-  const backend = await startBackend({
+  let backend = null
+  let web = null
+  let restarting = false
+
+  /** 一键重启：关闭当前服务后以相同参数拉起新进程（设置页保存监听地址后使用） */
+  const restart = async () => {
+    if (restarting) return
+    restarting = true
+    console.log('正在重启风语…')
+    try {
+      if (web) await new Promise(resolveClose => web.close(resolveClose))
+    } catch (_) {
+      /* ignore */
+    }
+    await backend?.close?.().catch(() => {})
+    const child = spawn(process.execPath, process.argv.slice(1), {
+      cwd: ROOT,
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    })
+    child.unref()
+    process.exit(0)
+  }
+
+  backend = await startBackend({
     port: singlePort ? webPort : backendPort,
-    host: '127.0.0.1',
+    host: singlePort ? webuiHost : '127.0.0.1',
     dataDir: process.env.FENGYU_DATA_DIR || undefined,
     staticDir: singlePort ? '.' : null,
+    accessToken,
+    onRestart: restart,
   })
-
-  let web = null
   let webUrl = backend.url
   if (!singlePort) {
-    web = createWebServer({ backendPort: backend.port })
+    web = createWebServer({ backendPort: backend.port, accessToken })
     await new Promise((resolve, reject) => {
       web.once('error', err =>
         reject(new Error(err?.code === 'EADDRINUSE' ? `WebUI 端口 ${webPort} 已被占用，请关闭占用程序或改用其他端口（WEB_PORT）` : err.message)),
       )
-      web.listen(webPort, '127.0.0.1', resolve)
+      web.listen(webPort, webuiHost, resolve)
     })
-    webUrl = `http://127.0.0.1:${webPort}`
+    webUrl = `http://${webuiHost === '0.0.0.0' ? '127.0.0.1' : webuiHost}:${webPort}` + (accessToken ? '/?token=你的访问令牌' : '')
   }
 
   banner([

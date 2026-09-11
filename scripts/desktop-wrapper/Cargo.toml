@@ -1,9 +1,9 @@
 [package]
 name = "fengyu-desktop"
-version = "0.40.0"
+version = "0.41.0"
 edition = "2021"
 description = "风语 AI Chat 无边框桌面壳（WebView2）"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 tao = "0.34.8"
@@ -13,6 +13,7 @@ wry = "0.53.5"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
+  "Win32_System_LibraryLoader",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

@@ -37,6 +37,8 @@ export function apply(ctx, config = {}) {
   const port = config.port ?? 8788
   const host = config.host ?? '127.0.0.1'
   const staticDir = config.staticDir ? resolve(config.staticDir) : null
+  const accessToken = String(config.accessToken || '').trim()
+  const onRestart = typeof config.onRestart === 'function' ? config.onRestart : null
   const startedAt = Date.now()
   const requestLog = []
 
@@ -56,6 +58,29 @@ export function apply(ctx, config = {}) {
   }
 
   const sendError = (res, status, message) => sendJson(res, status, { error: { status, message } })
+
+  /* ---- WebUI 访问令牌（可选）：空 token 表示不校验 ---- */
+  const cookieValue = (req, name) => {
+    for (const part of String(req.headers.cookie || '').split(';')) {
+      const [key, ...rest] = part.trim().split('=')
+      if (key === name) return decodeURIComponent(rest.join('='))
+    }
+    return ''
+  }
+  const requestTokens = (req, url) => ({
+    query: url.searchParams.get('token') || '',
+    cookie: cookieValue(req, 'fengyu_token') || '',
+    header: String(req.headers['x-fengyu-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
+  })
+  const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version'
+  const sendAuthPage = res => {
+    const body = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>
+<body style="font-family:system-ui,sans-serif;padding:48px;color:#1a1d21"><h2>需要访问令牌</h2>
+<p>这是一个受保护的 WebUI。请在地址后加上访问令牌：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://<主机>:<端口>/?token=你的令牌</pre>
+<p>验证通过后会写入本机 Cookie，后续直接访问即可。</p></body></html>`
+    res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(body)
+  }
 
   const readBody = req =>
     new Promise((resolveBody, reject) => {
@@ -142,7 +167,7 @@ export function apply(ctx, config = {}) {
       uptime: Date.now() - startedAt,
       time: new Date().toISOString(),
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
-      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs'],
+      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart'],
       dataDir: settings.dataDir,
       configFile: settings.file,
       providers: providerList.map(p => ({ id: p.id, type: p.type, configured: p.configured, status: p.status, models: p.models.length })),
@@ -155,6 +180,19 @@ export function apply(ctx, config = {}) {
   })
 
   route('GET', '/api/version', async (req, res) => sendJson(res, 200, { version: ctx.info.version, node: process.version }))
+
+  /** 重启：由宿主/启动脚本接管；桌面版请在设置页走 windHost.restart() */
+  route('POST', '/api/system/restart', async (req, res) => {
+    if (!onRestart) return sendError(res, 501, '当前运行方式不支持自动重启，请手动关闭后重新启动')
+    sendJson(res, 200, { ok: true, message: '正在重启风语…' })
+    setTimeout(() => {
+      try {
+        onRestart()
+      } catch (err) {
+        ctx.logger.error(`重启失败：${err.message}`)
+      }
+    }, 150)
+  })
 
   /* ---------------- 配置 ---------------- */
 
@@ -467,6 +505,22 @@ export function apply(ctx, config = {}) {
     }
 
     try {
+      /* WebUI 访问令牌：空 token 不启用；带 ?token= 的浏览器导航换 Cookie 后跳转；health/version 免校验 */
+      if (accessToken && !openRoute(pathname)) {
+        const tokens = requestTokens(req, url)
+        const ok = tokens.query === accessToken || tokens.cookie === accessToken || tokens.header === accessToken
+        if (!ok) return sendAuthPage(res)
+        const wantsHtml = String(req.headers.accept || '').includes('text/html')
+        if (tokens.query === accessToken && tokens.cookie !== accessToken && req.method === 'GET' && wantsHtml) {
+          res.writeHead(302, {
+            'Set-Cookie': `fengyu_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+            Location: pathname || '/',
+          })
+          res.end()
+          return
+        }
+      }
+
       if (pathname.startsWith('/api/')) {
         // API 路由用原始路径匹配，路由参数在 match() 里逐个解码
         const hit = match(req.method, rawPathname)

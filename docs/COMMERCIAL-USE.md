@@ -19,7 +19,7 @@
 
 | 事项 | 说明 | 建议 |
 |---|---|---|
-| 项目自身 LICENSE | 仓库当前使用声明式专有许可（见 `LICENSE`）；如希望开源，可替换为 MIT / Apache-2.0 | 由版权方确认 |
+| 项目自身 LICENSE | 原创代码、文档、界面与资源使用 **Apache-2.0**（见 `LICENSE` 与 `NOTICE`） | 分发时保留 `LICENSE` / `NOTICE` / `THIRD-PARTY-NOTICES.md` |
 | Logo / 图标 / UI 素材 | 需确认原创或已取得授权 | 保留设计源文件与授权记录 |
 | 产品名称 / 商标 | 风语、Fengyu 如用于商业名称，建议先做商标检索 | 咨询知识产权代理 |
 | 模型 API | DeepSeek / OpenAI / Anthropic / Gemini / Ollama 等各有服务条款 | 商用前核对对应条款、数据地域与内容政策 |

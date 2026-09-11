@@ -1,8 +1,8 @@
 {
   "name": "fengyu-chat",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "private": true,
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "风语 · 万物皆插件的 AI 聊天程序（真实 cordis 内核 + 本地后端）",
   "scripts": {
@@ -12,6 +12,8 @@
     "serve": "node start.mjs --serve",
     "backend": "node server/index.mjs",
     "sync-plugins": "node scripts/sync-plugins.mjs",
+    "prepare:publish": "node scripts/prepare-publish.mjs",
+    "release:publish": "node scripts/publish-release.mjs",
     "build:release": "node scripts/package-release.mjs",
     "build:desktop": "node scripts/package-release.mjs --desktop-only",
     "audit:deps": "node scripts/audit-dependencies.mjs",

@@ -5,9 +5,9 @@
  *   startBackend({ staticDir: 'dist' })   # 后端同时托管 WebUI（单端口部署）
  */
 import { Context } from 'cordis'
-import { readFile } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { resolveDataDir } from './data-dir.mjs'
 import { ensurePortsFree } from './port-utils.mjs'
@@ -21,7 +21,7 @@ import * as httpPlugin from './plugins/http.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
-export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel } = {}) {
+export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel, accessToken = '', onRestart = null } = {}) {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
   const ctx = new Context()
 
@@ -68,7 +68,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [modelsPlugin, {}],
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
-    [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null }],
+    [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)
 
@@ -110,12 +110,37 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
 
 // 直接运行：node server/index.mjs
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const port = Number(process.env.PORT || 8788)
+  // WebUI 监听与访问令牌来自当前数据目录的 config.json（明文 network 段）。
+  // 桌面壳会把 FENGYU_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
+  // 交给 Rust 在创建 WebView 时带 ?token= 打开，避免启用 token 后桌面白屏。
+  const resolved = await resolveDataDir(ROOT)
+  let network = {}
+  try {
+    network = JSON.parse(await readFile(join(resolved.dataDir, 'config.json'), 'utf8'))?.network || {}
+  } catch (_) {
+    network = {}
+  }
+  const accessToken = String(process.env.FENGYU_WEBUI_TOKEN ?? network.webuiToken ?? '').trim()
+  const host = String(process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
+  const configuredPort = Number(network.webuiPort) > 0 ? Number(network.webuiPort) : 0
+  const port = configuredPort || Number(process.env.PORT || 8788)
   await ensurePortsFree([port], { autoStop: true, log: console })
+  if (process.env.FENGYU_HOME_DIR) {
+    const tokenFile = join(resolve(process.env.FENGYU_HOME_DIR), '.webui-token')
+    try {
+      if (accessToken) await writeFile(tokenFile, accessToken, 'utf8')
+      else await rm(tokenFile, { force: true })
+    } catch (_) {
+      /* 写不了 token 文件不影响协议本身 */
+    }
+  }
+
   const backend = await startBackend({
     port,
+    host,
     staticDir: process.env.FENGYU_STATIC_DIR || undefined,
     dataDir: process.env.FENGYU_DATA_DIR || undefined,
+    accessToken,
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)
@@ -123,6 +148,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log(`  │  ${backend.url.padEnd(44, ' ')} │`)
   console.log(`  └──────────────────────────────────────────────┘`)
   console.log(`  数据目录：${backend.dataDir}`)
+  if (process.env.FENGYU_HOME_DIR) {
+    try {
+      await writeFile(join(resolve(process.env.FENGYU_HOME_DIR), '.webui-port'), String(backend.port), 'utf8')
+    } catch (_) {
+      /* 端口文件仅用于桌面壳导航，写不了不影响服务 */
+    }
+  }
   console.log('  按 Ctrl+C 停止')
   // 桌面壳 / 部署脚本通过这一行判断服务已就绪
   console.log(`FENGYU_READY ${backend.url}`)
