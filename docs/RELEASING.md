@@ -146,6 +146,7 @@ node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md 
 ## 9. 回滚
 
 * **代码回滚**：`git revert <commit>` 后发新版；不要重写已发布 tag。
+* 例外：如果某个版本被误发布、没有外部使用者，且许可证或发布内容存在严重问题，可以撤回对应的 Release 与 tag，并在下一个版本的发布说明中记录；常规情况不得删除或移动已发布的 tag。
 * **发布回滚**：保留旧 Release 资产，在 Release 说明中标注“已由 vX.Y.Z 取代”；
   严重问题可将对应 Release 标记为 pre-release 或删除附件，但必须补发新版本。
 * **数据兼容**：数据结构变更必须在发布说明中给出迁移说明；破坏性变更必须升 MAJOR。
