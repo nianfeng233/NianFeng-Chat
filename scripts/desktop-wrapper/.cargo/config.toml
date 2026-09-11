@@ -1,0 +1,5 @@
+# 桌面壳离线构建时使用 rsproxy 镜像；普通用户也可保留此配置。
+[source.crates-io]
+replace-with = "rsproxy"
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"

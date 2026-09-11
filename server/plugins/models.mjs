@@ -1,0 +1,1672 @@
+/**
+ * 后端 · models
+ * 真实的模型接入层：OpenAI 兼容接口 / Ollama / Anthropic。
+ * 所有请求都从服务端发出，API Key 只保存在本地 config，不会下发到浏览器。
+ *
+ * 能力：
+ *   - listModels(providerId)  真实拉取可用模型列表
+ *   - test(providerId)        真实连通性测试（延迟 / 错误信息）
+ *   - stream(...)             真实流式补全（SSE / NDJSON 解析）
+ *   - complete(...)           非流式聚合
+ *   - translate(...)          通过已配置模型做真实翻译
+ *   - 提供商 / 模型的增删改   （settings.providers，供设置页使用）
+ */
+import http from 'node:http'
+import https from 'node:https'
+import tls from 'node:tls'
+import { Readable } from 'node:stream'
+
+export const name = 'models'
+export const inject = ['settings', 'hub']
+
+/* ------------------------------------------------------------------ */
+/* 适配器                                                              */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* 适配器                                                              */
+/* ------------------------------------------------------------------ */
+
+/** DeepSeek 官方建议目录（API /models 不可用时作为兜底提示） */
+const DEEPSEEK_ADVISORY_MODELS = [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+  { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision (exp)' },
+]
+
+function isDeepseekProvider(provider, model) {
+  return provider?.type === 'deepseek' || /deepseek/i.test(provider?.baseURL || '') || /^deepseek/i.test(model || '')
+}
+
+const toFiniteNumber = value => {
+  if (value === null || value === undefined || value === '') return null
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
+}
+
+/**
+ * 把不同提供商返回的 usage 归一化为前端气泡可展示的字段。
+ * 兼容 OpenAI / DeepSeek / Anthropic / Gemini / Ollama 的常见字段名。
+ */
+function normalizeUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const promptDetails = raw.prompt_tokens_details || raw.input_tokens_details || {}
+  const completionDetails = raw.completion_tokens_details || raw.output_tokens_details || {}
+  const input =
+    toFiniteNumber(raw.prompt_tokens) ??
+    toFiniteNumber(raw.input_tokens) ??
+    toFiniteNumber(raw.inputTokens) ??
+    toFiniteNumber(raw.promptTokenCount) ??
+    toFiniteNumber(raw.prompt_eval_count)
+  const output =
+    toFiniteNumber(raw.completion_tokens) ??
+    toFiniteNumber(raw.output_tokens) ??
+    toFiniteNumber(raw.outputTokens) ??
+    toFiniteNumber(raw.candidatesTokenCount) ??
+    toFiniteNumber(raw.eval_count)
+  const cached =
+    toFiniteNumber(raw.prompt_cache_hit_tokens) ??
+    toFiniteNumber(promptDetails.cached_tokens) ??
+    toFiniteNumber(raw.cache_read_input_tokens) ??
+    toFiniteNumber(raw.cachedContentTokenCount) ??
+    toFiniteNumber(raw.cached_tokens) ??
+    toFiniteNumber(raw.cachedTokens)
+  const reasoning =
+    toFiniteNumber(completionDetails.reasoning_tokens) ??
+    toFiniteNumber(raw.reasoning_tokens) ??
+    toFiniteNumber(raw.reasoningTokens) ??
+    toFiniteNumber(raw.thoughtsTokenCount) ??
+    toFiniteNumber(completionDetails.thoughtsTokenCount)
+  const total =
+    toFiniteNumber(raw.total_tokens) ??
+    toFiniteNumber(raw.totalTokenCount) ??
+    toFiniteNumber(raw.totalTokens) ??
+    toFiniteNumber(raw.total) ??
+    (input !== null && output !== null ? input + output : null)
+  const cost =
+    toFiniteNumber(raw.cost) ??
+    toFiniteNumber(raw.total_cost) ??
+    toFiniteNumber(raw.totalCost) ??
+    toFiniteNumber(raw.cost_cny) ??
+    toFiniteNumber(raw.total_cost_cny)
+
+  if (input === null && output === null && cached === null && total === null && cost === null) return null
+  const usage = {
+    inputTokens: input ?? 0,
+    outputTokens: output ?? 0,
+    cachedTokens: cached ?? 0,
+    totalTokens: total ?? (input ?? 0) + (output ?? 0),
+  }
+  if (reasoning !== null) usage.reasoningTokens = reasoning
+  if (cost !== null) usage.cost = cost
+  return usage
+}
+
+/**
+ * 可选费用估算：模型参数里配置 priceInput / priceOutput / priceCached
+ * （元 / 百万 token）时，用本次 usage 算出本轮开销。提供商直接返回 cost 时优先使用。
+ */
+function applyUsagePricing(usage, params = {}) {
+  if (!usage) return usage
+  if (toFiniteNumber(usage.cost) !== null) return usage
+  const priceInput = toFiniteNumber(params.priceInput)
+  const priceOutput = toFiniteNumber(params.priceOutput)
+  const priceCached = toFiniteNumber(params.priceCached)
+  if (priceInput === null && priceOutput === null && priceCached === null) return usage
+  const effectiveInput = priceInput ?? 0
+  const effectiveOutput = priceOutput ?? effectiveInput
+  const effectiveCached = priceCached ?? effectiveInput
+  const input = Math.max(0, Number(usage.inputTokens) || 0)
+  const cached = Math.min(input, Math.max(0, Number(usage.cachedTokens) || 0))
+  const output = Math.max(0, Number(usage.outputTokens) || 0)
+  const cost = (Math.max(0, input - cached) * effectiveInput + cached * effectiveCached + output * effectiveOutput) / 1_000_000
+  return { ...usage, cost }
+}
+
+/**
+ * OpenAI 兼容 chat/completions 适配器工厂。
+ * DeepSeek 官方只是它的一个特化：thinking / reasoning_effort、reasoning_content
+ * 回传、不发送 tool_choice（官方 harness 明确不映射该字段）。
+ */
+function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false, advisoryModels = [] }) {
+  const adapter = {
+    label,
+    defaultBaseURL,
+    advisoryModels,
+
+    async listModels(provider, ctx) {
+      const base = trimSlash(provider.baseURL || defaultBaseURL)
+      const res = await request(ctx, `${base}/models`, {
+        headers: authHeaders(provider),
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+      })
+      const json = await res.json()
+      const list = (json.data || json.models || [])
+        .map(item => ({ id: item.id || item.name, name: item.name || item.id, ownedBy: item.owned_by || item.ownedBy }))
+        .filter(item => item.id)
+      // DeepSeek 等端点如果暂时无法给出目录，回退到官方建议模型，避免设置页空状态
+      return list.length ? list : advisoryModels.map(item => ({ ...item }))
+    },
+
+    async test(provider, ctx) {
+      const models = await adapter.listModels(provider, ctx)
+      return { detail: `${label} 可用模型 ${models.length} 个` }
+    },
+
+    async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
+      const base = trimSlash(provider.baseURL || defaultBaseURL)
+      const deepseekMode = deepseek || isDeepseekProvider(provider, model)
+      const toolDefs = options?.toolChoice === 'none' ? [] : Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      const flags = {
+        toolChoice: !!options?.toolChoice && !deepseekMode,
+        maxTokensField: 'max_tokens',
+        temperature: options?.temperature !== undefined,
+        streamOptions: true,
+        thinking: deepseekMode,
+      }
+      const buildBody = current => {
+        const body = {
+          model,
+          messages: toOpenAIMessages(messages, { keepReasoning: deepseekMode }),
+          stream: true,
+          ...(current.streamOptions ? { stream_options: { include_usage: true } } : {}),
+          ...(current.temperature ? { temperature: options.temperature } : {}),
+          ...(options?.maxTokens !== undefined && current.maxTokensField ? { [current.maxTokensField]: options.maxTokens } : {}),
+          ...(toolDefs.length ? { tools: toolDefs } : {}),
+          ...(toolDefs.length && current.toolChoice ? { tool_choice: options.toolChoice } : {}),
+          ...(current.thinking ? deepseekThinkingBody(provider, model, options) : {}),
+          ...extraBody(options),
+        }
+        return body
+      }
+
+      const res = await postChatWithParamFallbacks(ctx, `${base}/chat/completions`, provider, buildBody, flags, signal)
+      const toolCalls = new Map()
+      let finishReason = null
+      let usage = null
+      await readSSE(res, data => {
+        if (data?.usage) usage = normalizeUsage(data.usage) || usage
+        const choice = data?.choices?.[0]
+        const delta = choice?.delta
+        if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) onReasoning?.(delta.reasoning_content)
+        if (typeof delta?.reasoning === 'string' && delta.reasoning) onReasoning?.(delta.reasoning)
+        if (delta?.content) onChunk(delta.content)
+        for (const call of delta?.tool_calls || []) {
+          const index = Number.isFinite(call?.index) ? call.index : toolCalls.size
+          const record = toolCalls.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } }
+          if (call?.id) record.id = call.id
+          if (call?.type) record.type = call.type
+          if (call?.function?.name) record.function.name += call.function.name
+          const argDelta = call?.function?.arguments
+          if (typeof argDelta === 'string') record.function.arguments += argDelta
+          else if (argDelta && typeof argDelta === 'object') record.function.arguments += JSON.stringify(argDelta)
+          toolCalls.set(index, record)
+          onToolCall?.({
+            index,
+            id: record.id || undefined,
+            name: record.function.name || undefined,
+            argumentsDelta: typeof argDelta === 'string' ? argDelta : argDelta ? JSON.stringify(argDelta) : '',
+          })
+        }
+        if (choice?.finish_reason) finishReason = choice.finish_reason
+      })
+      onDone({ reason: finishReason, toolCalls: [...toolCalls.values()], usage })
+    },
+  }
+  return adapter
+}
+
+/**
+ * 参数兼容兜底：不同 OpenAI 兼容网关对 tool_choice / max_tokens /
+ * max_completion_tokens / temperature / stream_options 的支持差异很大。
+ * 遇到明确的 400/422 参数错误时，逐项降级重试，而不是直接宣告模型不可用。
+ */
+async function postChatWithParamFallbacks(ctx, url, provider, buildBody, flags, signal) {
+  let current = { ...flags }
+  let lastError = null
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      return await request(ctx, url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+        body: JSON.stringify(buildBody(current)),
+        signal,
+        stream: true,
+      })
+    } catch (err) {
+      lastError = err
+      const status = Number(err?.status)
+      const message = String(err?.message || err)
+      if (status !== 400 && status !== 422) throw err
+      if (current.toolChoice && /tool_choice/i.test(message)) {
+        current = { ...current, toolChoice: false }
+        continue
+      }
+      if (current.maxTokensField === 'max_tokens' && /max_completion_tokens/i.test(message)) {
+        current = { ...current, maxTokensField: 'max_completion_tokens' }
+        continue
+      }
+      if (current.maxTokensField && /max_tokens/i.test(message)) {
+        current = { ...current, maxTokensField: null }
+        continue
+      }
+      if (current.temperature && /temperature/i.test(message)) {
+        current = { ...current, temperature: false }
+        continue
+      }
+      // 部分 OpenAI 兼容网关不接受 stream_options；usage 是可选增强，去掉后重试一次。
+      if (current.streamOptions) {
+        current = { ...current, streamOptions: false }
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastError || new Error('模型请求失败')
+}
+
+/* ------------------------------------------------------------------ */
+/* Anthropic / Claude                                                  */
+/* ------------------------------------------------------------------ */
+
+function toAnthropicToolChoice(choice) {
+  if (choice === 'required') return { type: 'any' }
+  if (choice === 'none') return { type: 'none' }
+  return { type: 'auto' }
+}
+
+function anthropicThinkingBody(options) {
+  const level = options?.reasoningEffort
+  if (level !== 'low' && level !== 'high' && level !== 'max') return {}
+  const budget = level === 'low' ? 2048 : level === 'high' ? 8192 : 16384
+  const maxTokens = Number(options?.maxTokens) > 0 ? Number(options.maxTokens) : 8192
+  return { thinking: { type: 'enabled', budget_tokens: Math.min(budget, Math.max(1024, maxTokens - 1)) } }
+}
+
+function parseObject(value) {
+  if (value && typeof value === 'object') return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch (_) {
+      return {}
+    }
+  }
+  return {}
+}
+
+function toAnthropicMessages(messages = []) {
+  const out = []
+  const push = (role, blocks) => {
+    const normalized = Array.isArray(blocks) ? blocks : [{ type: 'text', text: stringifyContent(blocks) }]
+    const last = out[out.length - 1]
+    // Anthropic 的 tool_result 必须包在 user 消息里，且两条连续 user 消息需要合并
+    if (last && last.role === role && role === 'user') last.content.push(...normalized)
+    else out.push({ role, content: normalized })
+  }
+  for (const message of messages || []) {
+    if (!message || message.role === 'system') continue
+    if (message.role === 'tool') {
+      push('user', [
+        {
+          type: 'tool_result',
+          tool_use_id: message.tool_call_id || message.toolCallId || '',
+          content: stringifyContent(message.content) || '(no output)',
+        },
+      ])
+      continue
+    }
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+      const blocks = []
+      const text = stringifyContent(message.content)
+      if (text) blocks.push({ type: 'text', text })
+      for (const call of message.tool_calls) {
+        blocks.push({
+          type: 'tool_use',
+          id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+          name: call.function?.name || call.name || '',
+          input: parseObject(call.function?.arguments ?? call.arguments),
+        })
+      }
+      push('assistant', blocks)
+      continue
+    }
+    const role = message.role === 'assistant' ? 'assistant' : 'user'
+    const text = stringifyContent(message.content)
+    if (text || role === 'assistant') push(role, [{ type: 'text', text }])
+  }
+  return out.filter(item => item.content.length > 0)
+}
+
+/* ------------------------------------------------------------------ */
+/* Google Gemini                                                       */
+/* ------------------------------------------------------------------ */
+
+function geminiApiBase(provider) {
+  const base = trimSlash(provider?.baseURL || 'https://generativelanguage.googleapis.com')
+  return /\/(?:v\d+(?:beta)?)$/i.test(base) ? base : `${base}/v1beta`
+}
+
+function toGeminiToolMode(choice) {
+  if (choice === 'required') return 'ANY'
+  if (choice === 'none') return 'NONE'
+  return 'AUTO'
+}
+
+function toGeminiFunctionResponse(message) {
+  const name = message.name || message.tool_name || ''
+  const parsed = parseObject(message.content)
+  return {
+    functionResponse: {
+      name,
+      response: Object.keys(parsed).length ? parsed : { result: stringifyContent(message.content) },
+    },
+  }
+}
+
+function toGeminiContents(messages = []) {
+  const contents = []
+  let systemText = ''
+  const push = (role, parts) => {
+    const valid = parts.filter(Boolean)
+    if (!valid.length) return
+    const last = contents[contents.length - 1]
+    if (last && last.role === role) last.parts.push(...valid)
+    else contents.push({ role, parts: valid })
+  }
+
+  for (const message of messages || []) {
+    if (!message) continue
+    if (message.role === 'system') {
+      systemText += (systemText ? '\n\n' : '') + stringifyContent(message.content)
+      continue
+    }
+    if (message.role === 'tool') {
+      push('user', [toGeminiFunctionResponse(message)])
+      continue
+    }
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+      const parts = []
+      const text = stringifyContent(message.content)
+      if (text) parts.push({ text })
+      if (message.thoughtSignature) parts.push({ thought: true, thoughtSignature: message.thoughtSignature })
+      for (const call of message.tool_calls) {
+        const part = { functionCall: { name: call.function?.name || call.name || '', args: parseObject(call.function?.arguments ?? call.arguments) } }
+        if (call.thoughtSignature) part.thoughtSignature = call.thoughtSignature
+        parts.push(part)
+      }
+      push('model', parts)
+      continue
+    }
+    push(message.role === 'assistant' ? 'model' : 'user', [{ text: stringifyContent(message.content) }])
+  }
+
+  return { contents, systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined }
+}
+
+function geminiHeaders(provider) {
+  return {
+    ...(provider?.apiKey ? { 'x-goog-api-key': provider.apiKey } : {}),
+    ...customHeaders(provider),
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 适配器实例                                                          */
+/* ------------------------------------------------------------------ */
+
+const adapters = {
+  openai: createOpenAICompatibleAdapter({
+    label: 'OpenAI 兼容接口',
+    defaultBaseURL: 'https://api.openai.com/v1',
+  }),
+
+  deepseek: createOpenAICompatibleAdapter({
+    label: 'DeepSeek 官方',
+    defaultBaseURL: 'https://api.deepseek.com',
+    deepseek: true,
+    advisoryModels: DEEPSEEK_ADVISORY_MODELS,
+  }),
+
+  ollama: {
+    label: 'Ollama（本地）',
+    async listModels(provider, ctx) {
+      const base = trimSlash(provider.baseURL || 'http://localhost:11434')
+      const res = await request(ctx, `${base}/api/tags`, {
+        headers: authHeaders(provider),
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+      })
+      const json = await res.json()
+      return (json.models || []).map(m => ({ id: m.name, name: m.name, size: m.size }))
+    },
+    async test(provider, ctx) {
+      const models = await adapters.ollama.listModels(provider, ctx)
+      return { detail: `本地模型 ${models.length} 个` }
+    },
+    async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
+      const base = trimSlash(provider.baseURL || 'http://localhost:11434')
+      const toolDefs = options?.toolChoice === 'none' ? [] : Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      const res = await request(ctx, `${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+        body: JSON.stringify({
+          model,
+          messages: toOllamaMessages(messages),
+          stream: true,
+          ...(toolDefs.length ? { tools: toolDefs.map(tool => ({ type: 'function', function: tool.function })) } : {}),
+          options: {
+            ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+            ...(options?.maxTokens ? { num_predict: options.maxTokens } : {}),
+            ...extraBody(options),
+          },
+        }),
+        signal,
+        stream: true,
+      })
+      const toolCalls = []
+      let finishReason = null
+      let usage = null
+      await readNDJSON(res, data => {
+        if (typeof data?.message?.thinking === 'string' && data.message.thinking) onReasoning?.(data.message.thinking)
+        if (data?.message?.content) onChunk(data.message.content)
+        for (const call of data?.message?.tool_calls || []) {
+          const record = normalizeToolCallRecord(call, toolCalls.length)
+          toolCalls.push(record)
+          onToolCall?.({
+            index: record.index,
+            id: record.id || undefined,
+            name: record.function.name || undefined,
+            argumentsDelta: record.function.arguments || '',
+          })
+        }
+        if (data?.done) {
+          finishReason = data.done_reason || finishReason
+          usage =
+            normalizeUsage({
+              prompt_tokens: data.prompt_eval_count,
+              completion_tokens: data.eval_count,
+            }) || usage
+        }
+      })
+      onDone({ reason: finishReason, toolCalls, usage })
+    },
+  },
+
+  anthropic: {
+    label: 'Anthropic Claude',
+    async listModels(provider, ctx) {
+      const base = trimSlash(provider.baseURL || 'https://api.anthropic.com')
+      const res = await request(ctx, `${base}/v1/models`, {
+        headers: anthropicHeaders(provider),
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+      })
+      const json = await res.json()
+      return (json.data || []).map(m => ({ id: m.id, name: m.display_name || m.id }))
+    },
+    async test(provider, ctx) {
+      const models = await adapters.anthropic.listModels(provider, ctx)
+      return { detail: `可用模型 ${models.length} 个` }
+    },
+    async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
+      const base = trimSlash(provider.baseURL || 'https://api.anthropic.com')
+      const system = (messages || [])
+        .filter(message => message?.role === 'system')
+        .map(message => stringifyContent(message.content))
+        .filter(Boolean)
+        .join('\n\n')
+      const toolDefs = Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      const disableTools = options?.toolChoice === 'none'
+      const thinking = anthropicThinkingBody(options)
+      const body = {
+        model,
+        max_tokens: Number(options?.maxTokens) > 0 ? Number(options.maxTokens) : 4096,
+        ...(system ? { system } : {}),
+        messages: toAnthropicMessages(messages),
+        stream: true,
+        // Claude 扩展思考开启时必须使用 temperature=1，直接省略让官方默认值生效
+        ...(options?.temperature !== undefined && !thinking.thinking ? { temperature: options.temperature } : {}),
+        ...(!disableTools && toolDefs.length
+          ? {
+              tools: toolDefs.map(tool => ({
+                name: tool.function?.name || tool.name,
+                description: tool.function?.description || '',
+                input_schema: tool.function?.parameters || { type: 'object', properties: {} },
+              })),
+              ...(options?.toolChoice && options.toolChoice !== 'auto' ? { tool_choice: toAnthropicToolChoice(options.toolChoice) } : {}),
+            }
+          : {}),
+        ...thinking,
+        ...extraBody(options),
+      }
+      const res = await request(ctx, `${base}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...anthropicHeaders(provider) },
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+        body: JSON.stringify(body),
+        signal,
+        stream: true,
+      })
+      const toolCalls = new Map()
+      let finishReason = null
+      let streamError = null
+      const anthropicUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 }
+      await readSSE(res, data => {
+        if (!data || typeof data !== 'object') return
+        if (data.type === 'error') {
+          streamError = new Error(data.error?.message || 'Anthropic 返回错误')
+          return
+        }
+        if (data.type === 'message_start') {
+          const raw = data.message?.usage || data.usage
+          if (raw) {
+            const cacheRead = toFiniteNumber(raw.cache_read_input_tokens) || 0
+            const cacheCreate = toFiniteNumber(raw.cache_creation_input_tokens) || 0
+            const baseInput = toFiniteNumber(raw.input_tokens) || 0
+            anthropicUsage.inputTokens = baseInput + cacheRead + cacheCreate
+            anthropicUsage.cachedTokens = cacheRead
+            const cost = toFiniteNumber(raw.cost) ?? toFiniteNumber(data.message?.cost)
+            if (cost !== null) anthropicUsage.cost = cost
+          }
+          return
+        }
+        if (data.type === 'content_block_start') {
+          const block = data.content_block
+          if (block?.type === 'tool_use') {
+            toolCalls.set(data.index, {
+              index: data.index,
+              id: block.id || `call_claude_${data.index}`,
+              type: 'function',
+              function: { name: block.name || '', arguments: '' },
+            })
+          }
+          return
+        }
+        if (data.type === 'content_block_delta') {
+          const delta = data.delta || {}
+          if (delta.type === 'text_delta' && delta.text) onChunk(delta.text)
+          else if (delta.type === 'thinking_delta' && delta.thinking) onReasoning?.(delta.thinking)
+          else if (delta.type === 'input_json_delta') {
+            const record = toolCalls.get(data.index)
+            if (record) {
+              const fragment = delta.partial_json || ''
+              record.function.arguments += fragment
+              onToolCall?.({ index: data.index, id: record.id, name: record.function.name, argumentsDelta: fragment })
+            }
+          }
+          return
+        }
+        if (data.type === 'message_delta') {
+          if (data.delta?.stop_reason) finishReason = data.delta.stop_reason
+          const raw = data.usage
+          if (raw) {
+            const output = toFiniteNumber(raw.output_tokens)
+            if (output !== null) anthropicUsage.outputTokens = output
+            const cost = toFiniteNumber(raw.cost)
+            if (cost !== null) anthropicUsage.cost = cost
+          }
+        }
+      })
+      if (streamError) throw streamError
+      onDone({
+        reason: finishReason,
+        toolCalls: [...toolCalls.values()],
+        usage: normalizeUsage({
+          prompt_tokens: anthropicUsage.inputTokens,
+          completion_tokens: anthropicUsage.outputTokens,
+          prompt_tokens_details: { cached_tokens: anthropicUsage.cachedTokens },
+          ...(anthropicUsage.cost !== undefined ? { cost: anthropicUsage.cost } : {}),
+        }),
+      })
+    },
+  },
+
+  gemini: {
+    label: 'Google Gemini',
+    async listModels(provider, ctx) {
+      const apiBase = geminiApiBase(provider)
+      const res = await request(ctx, `${apiBase}/models`, {
+        headers: geminiHeaders(provider),
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+      })
+      const json = await res.json()
+      return (json.models || [])
+        .filter(model => !model.supportedGenerationMethods || model.supportedGenerationMethods.includes('generateContent'))
+        .map(model => ({ id: String(model.name || '').replace(/^models\//, ''), name: model.displayName || String(model.name || '').replace(/^models\//, '') }))
+        .filter(model => model.id)
+    },
+    async test(provider, ctx) {
+      const models = await adapters.gemini.listModels(provider, ctx)
+      return { detail: `可用模型 ${models.length} 个` }
+    },
+    async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
+      const apiBase = geminiApiBase(provider)
+      const toolDefs = Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      const disableTools = options?.toolChoice === 'none'
+      const { contents, systemInstruction } = toGeminiContents(messages)
+      const body = {
+        contents,
+        ...(systemInstruction ? { systemInstruction } : {}),
+        generationConfig: {
+          ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options?.maxTokens ? { maxOutputTokens: options.maxTokens } : {}),
+        },
+        ...(!disableTools && toolDefs.length
+          ? {
+              tools: [
+                {
+                  functionDeclarations: toolDefs.map(tool => ({
+                    name: tool.function?.name || tool.name,
+                    description: tool.function?.description || '',
+                    parameters: tool.function?.parameters || { type: 'object', properties: {} },
+                  })),
+                },
+              ],
+              ...(options?.toolChoice ? { toolConfig: { functionCallingConfig: { mode: toGeminiToolMode(options.toolChoice) } } } : {}),
+            }
+          : {}),
+        ...extraBody(options),
+      }
+      const res = await request(ctx, `${apiBase}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...geminiHeaders(provider) },
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+        body: JSON.stringify(body),
+        signal,
+        stream: true,
+      })
+      const toolCalls = new Map()
+      let finishReason = null
+      let streamError = null
+      let usage = null
+      await readSSE(res, data => {
+        if (data?.error) {
+          streamError = new Error(data.error.message || 'Gemini 返回错误')
+          return
+        }
+        if (data?.usageMetadata) {
+          usage =
+            normalizeUsage({
+              prompt_tokens: data.usageMetadata.promptTokenCount,
+              completion_tokens: data.usageMetadata.candidatesTokenCount,
+              total_tokens: data.usageMetadata.totalTokenCount,
+              cached_tokens: data.usageMetadata.cachedContentTokenCount,
+              reasoning_tokens: data.usageMetadata.thoughtsTokenCount,
+            }) || usage
+        }
+        const candidate = data?.candidates?.[0]
+        for (const part of candidate?.content?.parts || []) {
+          if (typeof part?.text === 'string' && part.text) {
+            if (part.thought === true) onReasoning?.(part.text)
+            else onChunk(part.text)
+          }
+          if (part?.functionCall) {
+            const call = part.functionCall
+            const index = toolCalls.size
+            const record = {
+              index,
+              id: call.id || `call_gemini_${index}`,
+              type: 'function',
+              function: { name: call.name || '', arguments: JSON.stringify(call.args || {}) },
+              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+            }
+            toolCalls.set(index, record)
+            onToolCall?.({ index, id: record.id, name: record.function.name, argumentsDelta: record.function.arguments })
+          }
+        }
+        if (candidate?.finishReason) finishReason = candidate.finishReason
+      })
+      if (streamError) throw streamError
+      onDone({ reason: finishReason, toolCalls: [...toolCalls.values()], usage })
+    },
+  },
+}
+
+/* ------------------------------------------------------------------ */
+/* 插件主体                                                            */
+/* ------------------------------------------------------------------ */
+
+export function apply(ctx) {
+  const settings = ctx.settings
+  const hub = ctx.hub
+  const statusCache = new Map() // providerId -> { ok, at, latency, detail, error }
+  const runtimeProviders = new Map() // 运行时提供商：预留给未来的托管服务（官方服务端是独立项目）
+
+  /** 提供商没单独填代理 / 超时时，回落到 设置 → 网络 里的全局值 */
+  const withNetworkDefaults = provider => {
+    const network = settings.get().network || {}
+    const providerTimeout = Number(provider.timeoutMs)
+    const networkTimeout = Number(network.timeoutMs)
+    return {
+      ...provider,
+      proxy: provider.proxy || network.proxy || '',
+      timeoutMs: Number.isFinite(providerTimeout) && providerTimeout > 0 ? providerTimeout : Number.isFinite(networkTimeout) && networkTimeout > 0 ? networkTimeout : 60000,
+    }
+  }
+
+  const getProvider = id => {
+    if (runtimeProviders.has(id)) return runtimeProviders.get(id)
+    const provider = settings.get().providers[id]
+    if (!provider || provider.deleted) throw createError(404, `提供商不存在：${id}`)
+    return withNetworkDefaults(provider)
+  }
+
+  /** 只允许编辑本地配置里的提供商（托管运行时提供商走另一条路） */
+  const requireLocalProvider = id => {
+    if (runtimeProviders.has(id)) throw createError(400, `「${id}」是托管提供商（由登录的官方服务提供），不能直接编辑`)
+    const provider = settings.get().providers[id]
+    if (!provider || provider.deleted) throw createError(404, `提供商不存在：${id}`)
+    return provider
+  }
+
+  const needsKey = type => type === 'openai' || type === 'anthropic' || type === 'deepseek' || type === 'gemini'
+
+  const summarizeProvider = (id, p, managed) => ({
+    id,
+    type: p.type,
+    name: p.name || adapters[p.type]?.label || id,
+    baseURL: p.baseURL,
+    enabled: p.enabled !== false,
+    configured: managed ? p.configured !== false : !needsKey(p.type) || !!p.apiKey,
+    hasKey: managed ? false : !!p.apiKey,
+    maskedKey: managed ? '' : maskKey(p.apiKey),
+    managed,
+    editable: !managed,
+    description: p.description || '',
+    models: (p.models || []).map(m => ({ enabled: m.enabled !== false, custom: m.custom === true, ...m })),
+    defaultModel: p.defaultModel || '',
+    timeoutMs: Number(p.timeoutMs) > 0 ? Number(p.timeoutMs) : 0,
+    proxy: p.proxy || '',
+    headers: sanitizeHeaders(p.headers),
+    status: statusCache.get(id) || { ok: null, detail: '尚未测试' },
+  })
+
+  const service = {
+    /** 提供商概览（含配置状态与最近一次测试结果） */
+    list() {
+      const data = settings.get()
+      const local = Object.entries(data.providers)
+        .filter(([, p]) => !p.deleted)
+        .map(([id, p]) => summarizeProvider(id, p, false))
+      const runtime = [...runtimeProviders.entries()].map(([id, p]) => summarizeProvider(id, p, true))
+      return [...runtime, ...local]
+    },
+
+    /**
+     * 真实拉取模型列表并写入配置。
+     * 与已有模型按 id 合并：用户配置过的显示名 / 参数 / 启停状态不会被覆盖，
+     * 远端新增的模型自动追加，远端删除的模型保留（避免误删用户的配置）。
+     */
+    async refresh(id) {
+      const provider = getProvider(id)
+      const adapter = requireAdapter(provider.type)
+      try {
+        const fetched = await adapter.listModels(provider, ctx)
+        const existing = provider.models || []
+        const seen = new Set(existing.map(m => m.id))
+        const merged = existing.map(m => ({ ...m }))
+        let added = 0
+        for (const remote of fetched) {
+          if (!remote?.id || seen.has(remote.id)) continue
+          seen.add(remote.id)
+          merged.push({
+            id: remote.id,
+            name: remote.name || remote.id,
+            enabled: true,
+            custom: false,
+            ...(remote.ownedBy ? { ownedBy: remote.ownedBy } : {}),
+            ...(remote.size ? { size: remote.size } : {}),
+          })
+          added++
+        }
+        if (runtimeProviders.has(id)) service.updateRuntimeProvider(id, { models: merged })
+        else await settings.update({ providers: { [id]: { models: merged } } })
+        const status = {
+          ok: true,
+          at: Date.now(),
+          detail: added ? `新增 ${added} 个模型，共 ${merged.length} 个` : `没有新模型，共 ${merged.length} 个`,
+        }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status, models: merged })
+        return { ok: true, models: merged, added, detail: status.detail }
+      } catch (err) {
+        const detail = normalizeError(err)
+        const status = { ok: false, at: Date.now(), detail }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        ctx.logger.warn(`[${id}] 拉取模型失败：${detail}`)
+        return { ok: false, detail, models: [] }
+      }
+    },
+
+    /** 真实连通性测试 */
+    async test(id) {
+      const provider = getProvider(id)
+      const adapter = requireAdapter(provider.type)
+      if (needsKey(provider.type) && !provider.apiKey) {
+        const status = { ok: false, at: Date.now(), detail: '尚未配置 API Key' }
+        statusCache.set(id, status)
+        return status
+      }
+      const started = Date.now()
+      try {
+        const result = await adapter.test(provider, ctx)
+        const status = { ok: true, at: Date.now(), latency: Date.now() - started, detail: result?.detail || '连接正常' }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        return status
+      } catch (err) {
+        const detail = normalizeError(err)
+        const status = { ok: false, at: Date.now(), latency: Date.now() - started, detail }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        return status
+      }
+    },
+
+    /* ---------------- 提供商 / 模型的增删改 ---------------- */
+
+    /** 新增提供商（写 user_data/config.json） */
+    async addProvider(descriptor = {}) {
+      const entry = normalizeProviderDescriptor(descriptor)
+      requireAdapter(entry.provider.type)
+      const data = settings.get()
+      const existing = data.providers[entry.id]
+      if (existing && !existing.deleted) throw createError(409, `提供商 ID 已存在：${entry.id}`)
+      if (runtimeProviders.has(entry.id)) throw createError(409, `提供商 ID 与托管提供商冲突：${entry.id}`)
+      await settings.update({ providers: { [entry.id]: { ...entry.provider, deleted: false } } })
+      statusCache.set(entry.id, { ok: null, detail: '尚未测试' })
+      hub.broadcast('provider/status', { id: entry.id, status: { ok: null, detail: '已新增' } })
+      ctx.logger.info(`已新增模型提供商：${entry.id}（${entry.provider.type}）`)
+      return summarizeProvider(entry.id, settings.get().providers[entry.id], false)
+    },
+
+    /** 修改提供商（名称 / 类型 / 地址 / Key / 启停 / 默认模型 / 高级配置） */
+    async updateProvider(id, patch = {}) {
+      const provider = requireLocalProvider(id)
+      const next = {}
+      if (patch.name !== undefined) next.name = String(patch.name || '').trim() || provider.name || id
+      if (patch.type !== undefined) {
+        requireAdapter(String(patch.type))
+        next.type = String(patch.type)
+      }
+      if (patch.baseURL !== undefined) next.baseURL = String(patch.baseURL || '').trim()
+      if (patch.apiKey !== undefined && String(patch.apiKey) !== '') next.apiKey = String(patch.apiKey)
+      if (patch.enabled !== undefined) next.enabled = patch.enabled !== false
+      if (patch.timeoutMs !== undefined) next.timeoutMs = normalizeTimeout(patch.timeoutMs)
+      if (patch.proxy !== undefined) next.proxy = String(patch.proxy || '').trim()
+      if (patch.headers !== undefined) {
+        const incoming = normalizeHeaders(patch.headers)
+        const current = provider.headers || {}
+        // 敏感请求头在接口里是打码值；原样提交表示"保持不变"
+        for (const key of Object.keys(incoming)) {
+          const oldKey = Object.keys(current).find(name => name.toLowerCase() === key.toLowerCase())
+          if (oldKey && isSensitiveHeader(oldKey) && incoming[key] === maskKey(String(current[oldKey]))) {
+            incoming[key] = current[oldKey]
+          }
+        }
+        next.headers = incoming
+      }
+
+      const globalPatch = {}
+      if (patch.defaultModel !== undefined) {
+        next.defaultModel = String(patch.defaultModel || '')
+        if (next.defaultModel) {
+          const known = (provider.models || []).some(m => m.id === next.defaultModel)
+          if (!known) throw createError(400, `模型不存在：${next.defaultModel}`)
+          globalPatch.defaultProvider = id
+          globalPatch.defaultModel = next.defaultModel
+        }
+      }
+      await settings.replaceProvider(id, next)
+      if (Object.keys(globalPatch).length) await settings.update(globalPatch)
+      if (patch.apiKey !== undefined && String(patch.apiKey) !== '') {
+        statusCache.set(id, { ok: null, detail: '凭据已更新，尚未测试' })
+      }
+      hub.broadcast('provider/status', { id, status: statusCache.get(id) || { ok: null, detail: '已更新' } })
+      return summarizeProvider(id, settings.get().providers[id], false)
+    },
+
+    /** 删除提供商（打 deleted 标记，重启后不会复活） */
+    async removeProvider(id) {
+      requireLocalProvider(id)
+      await settings.removeProvider(id)
+      statusCache.delete(id)
+      hub.broadcast('provider/status', { id, status: { ok: false, detail: '已删除' } })
+      ctx.logger.info(`已删除模型提供商：${id}`)
+      return true
+    },
+
+    /** 新增自定义模型 */
+    async addModel(id, model = {}) {
+      const provider = requireLocalProvider(id)
+      const entry = normalizeModelEntry({ ...model, custom: model.custom !== false })
+      const models = [...(provider.models || [])]
+      if (models.some(m => m.id === entry.id)) throw createError(409, `模型已存在：${entry.id}`)
+      models.push(entry)
+      await settings.update({ providers: { [id]: { models } } })
+      hub.broadcast('provider/status', { id, status: statusCache.get(id) || { ok: null, detail: '模型已新增' } })
+      return entry
+    },
+
+    /** 修改模型（显示名 / 启停 / 参数） */
+    async updateModel(id, modelId, patch = {}) {
+      const provider = requireLocalProvider(id)
+      const models = [...(provider.models || [])]
+      const index = models.findIndex(m => m.id === modelId)
+      if (index < 0) throw createError(404, `模型不存在：${modelId}`)
+      const next = { ...models[index] }
+      if (patch.name !== undefined) next.name = String(patch.name || '').trim() || next.id
+      if (patch.enabled !== undefined) next.enabled = patch.enabled !== false
+      if (patch.params !== undefined) next.params = mergeModelParams(next.params, patch.params)
+      models[index] = next
+      await settings.update({ providers: { [id]: { models } } })
+      hub.broadcast('provider/status', { id, status: statusCache.get(id) || { ok: null, detail: '模型已更新' } })
+      return next
+    },
+
+    /** 删除模型 */
+    async removeModel(id, modelId) {
+      const provider = requireLocalProvider(id)
+      const list = provider.models || []
+      const models = list.filter(m => m.id !== modelId)
+      if (models.length === list.length) throw createError(404, `模型不存在：${modelId}`)
+      const patch = { models }
+      if (provider.defaultModel === modelId) patch.defaultModel = ''
+      await settings.update({ providers: { [id]: patch } })
+      const data = settings.get()
+      if (data.defaultProvider === id && data.defaultModel === modelId) {
+        await settings.update({ defaultProvider: '', defaultModel: '' })
+      }
+      hub.broadcast('provider/status', { id, status: statusCache.get(id) || { ok: null, detail: '模型已删除' } })
+      return true
+    },
+
+    /** 内置模型：官方服务端（独立官网项目）尚未发布，这里如实返回空列表 */
+    builtin() {
+      return {
+        available: false,
+        provider: 'fengyu-official',
+        loginRequired: true,
+        fetchedAt: Date.now(),
+        reason:
+          '「风语内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未发布，所以这里还没有可用的内置模型。可以关闭上方开关，在本页配置自定义提供商。',
+        models: [],
+      }
+    },
+
+    /**
+     * 真实流式补全。
+     * 模型级参数（temperature / max_tokens / 额外请求体）在这里生效：
+     * 请求里显式传入的 options 优先，其次是模型配置里的参数，最后才是适配器默认值。
+     * @returns {Promise<{text: string}>}
+     */
+    async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning }) {
+      const providerId = provider
+      const cfg = getProvider(providerId)
+      const adapter = requireAdapter(cfg.type)
+      if (needsKey(cfg.type) && !cfg.apiKey) throw createError(400, `提供商「${cfg.name}」尚未配置 API Key`)
+      const useModel = model || cfg.defaultModel
+      if (!useModel) throw createError(400, `请先为「${cfg.name}」选择一个模型`)
+
+      const modelConfig = (cfg.models || []).find(m => m.id === useModel)
+      const params = modelConfig?.params || {}
+      const effectiveOptions = {
+        ...options,
+        ...(options?.temperature === undefined && params.temperature !== undefined ? { temperature: params.temperature } : {}),
+        ...(options?.maxTokens === undefined && params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
+        ...(options?.extraBody === undefined && params.extraBody !== undefined ? { extraBody: params.extraBody } : {}),
+      }
+
+      let text = ''
+      let adapterSummary = null
+      const controller = new AbortController()
+      const timeoutMs = Number(cfg.timeoutMs) > 0 ? Number(cfg.timeoutMs) : settings.get().network.timeoutMs || 60000
+      const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
+      signal?.addEventListener?.('abort', () => controller.abort(new Error('已取消')), { once: true })
+
+      hub.broadcast('chat/start', { provider: providerId, model: useModel })
+      try {
+        await adapter.stream(
+          {
+            provider: cfg,
+            model: useModel,
+            messages: messages || [],
+            options: effectiveOptions,
+            signal: controller.signal,
+            onChunk: delta => {
+              text += delta
+              onChunk?.(delta)
+            },
+            onToolCall: call => onToolCall?.(call),
+            onReasoning: delta => onReasoning?.(delta),
+            // 适配器流读完后回传完整 tool_calls / finish_reason
+            onDone: summary => {
+              if (summary) adapterSummary = summary
+            },
+          },
+          ctx,
+        )
+        hub.broadcast('chat/done', { provider: providerId, model: useModel, length: text.length })
+        return {
+          text,
+          toolCalls: adapterSummary?.toolCalls || [],
+          finishReason: adapterSummary?.reason || null,
+          usage: applyUsagePricing(normalizeUsage(adapterSummary?.usage) || adapterSummary?.usage || null, params),
+        }
+      } catch (err) {
+        hub.broadcast('chat/error', { provider: providerId, model: useModel, detail: normalizeError(err) })
+        throw createError(502, normalizeError(err))
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+
+    /** 非流式聚合 */
+    async complete({ provider, model, messages, options, signal }) {
+      let text = ''
+      await service.stream({ provider, model, messages, options, signal, onChunk: delta => (text += delta) })
+      return text
+    },
+
+    /** 真实翻译（通过已配置模型；没有模型就明确报错） */
+    async translate({ text, target = 'en', provider, model }) {
+      const data = settings.get()
+      const providerId = provider || data.defaultProvider
+      const useModel = model || data.defaultModel || data.providers[providerId]?.defaultModel
+      const content = await service.complete({
+        provider: providerId,
+        model: useModel,
+        messages: [
+          {
+            role: 'system',
+            content: `You are a professional translator. Translate the user's content into ${target}. Output the translation only, without explanation.`,
+          },
+          { role: 'user', content: text },
+        ],
+        options: { temperature: 0.2 },
+      })
+      return { text: content.trim(), provider: providerId, model: useModel }
+    },
+
+    adapters: () => Object.keys(adapters),
+    statuses: () => Object.fromEntries(statusCache),
+
+    /** 运行时提供商：预留给未来的托管服务（官方服务端为独立项目，本仓库不含云逻辑） */
+    registerProvider(id, descriptor = {}) {
+      runtimeProviders.set(id, {
+        id,
+        type: descriptor.type || 'runtime',
+        name: descriptor.name || id,
+        baseURL: descriptor.baseURL || '',
+        description: descriptor.description || '',
+        enabled: descriptor.enabled !== false,
+        configured: descriptor.configured !== false,
+        managed: true,
+        models: descriptor.models || [],
+        defaultModel: descriptor.defaultModel || '',
+      })
+      hub.broadcast('provider/status', { id, status: { ok: null, detail: '已注册' } })
+      return () => {
+        runtimeProviders.delete(id)
+        statusCache.delete(id)
+        hub.broadcast('provider/status', { id, status: { ok: false, detail: '已移除' } })
+      }
+    },
+    updateRuntimeProvider(id, patch = {}) {
+      const current = runtimeProviders.get(id)
+      if (!current) return false
+      Object.assign(current, patch)
+      hub.broadcast('provider/status', { id, status: statusCache.get(id) || { ok: null, detail: '已更新' } })
+      return true
+    },
+    runtimeProviders: () => [...runtimeProviders.keys()],
+
+    /**
+     * 注册自定义适配器（供插件生态 / 测试使用）。
+     * adapter: { label, listModels(provider, ctx), test(provider, ctx), stream(args, ctx) }
+     */
+    registerAdapter(type, adapter) {
+      if (adapters[type]) throw new Error(`适配器已存在：${type}`)
+      adapters[type] = adapter
+      ctx.logger.info(`已注册自定义模型适配器：${type}`)
+      return () => delete adapters[type]
+    },
+  }
+
+  ctx.provide('models', service)
+  ctx.logger.info('模型接入层就绪（openai / anthropic / ollama）')
+}
+
+/* ------------------------------------------------------------------ */
+/* 工具                                                                */
+/* ------------------------------------------------------------------ */
+
+function requireAdapter(type) {
+  const adapter = adapters[type]
+  if (!adapter) throw createError(400, `不支持的提供商类型：${type}`)
+  return adapter
+}
+
+function trimSlash(url) {
+  return String(url).replace(/\/+$/, '')
+}
+
+/** 提供商自定义请求头覆盖（Authorization 也可以覆盖） */
+function customHeaders(provider) {
+  return provider?.headers && typeof provider.headers === 'object' && !Array.isArray(provider.headers) ? provider.headers : {}
+}
+
+function authHeaders(provider) {
+  return { ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}), ...customHeaders(provider) }
+}
+
+function anthropicHeaders(provider) {
+  return {
+    'x-api-key': provider.apiKey || '',
+    'anthropic-version': '2023-06-01',
+    ...customHeaders(provider),
+  }
+}
+
+function providerTimeout(provider) {
+  const ms = Number(provider?.timeoutMs)
+  return Number.isFinite(ms) && ms > 0 ? ms : 30000
+}
+
+/**
+ * DeepSeek 官方思考参数：
+ *   off  -> thinking:{type:'disabled'}
+ *   low/high/max -> thinking:{type:'enabled'} + reasoning_effort:<level>
+ * 只对 DeepSeek 兼容的提供商 / 模型附加，避免其他 OpenAI 兼容服务收到未知字段。
+ */
+function deepseekThinkingBody(provider, model, options) {
+  const level = options?.reasoningEffort
+  if (!level) return {}
+  const isDeepseek = provider?.type === 'deepseek' || /deepseek/i.test(provider?.baseURL || '') || /deepseek/i.test(model || '')
+  if (!isDeepseek) return {}
+  if (level === 'off') return { thinking: { type: 'disabled' } }
+  if (['low', 'high', 'max'].includes(level)) return { thinking: { type: 'enabled' }, reasoning_effort: level }
+  return {}
+}
+
+/** 模型配置里的「额外请求体」，不允许覆盖核心字段 */
+function extraBody(options) {
+  const extra = options?.extraBody
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return {}
+  const copy = { ...extra }
+  for (const reserved of ['model', 'messages', 'stream', 'system']) delete copy[reserved]
+  return copy
+}
+
+const PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/
+
+function defaultBaseURL(type) {
+  if (type === 'anthropic') return 'https://api.anthropic.com'
+  if (type === 'ollama') return 'http://localhost:11434'
+  if (type === 'deepseek') return 'https://api.deepseek.com'
+  if (type === 'gemini') return 'https://generativelanguage.googleapis.com'
+  return 'https://api.openai.com/v1'
+}
+
+function normalizeTimeout(value) {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms <= 0) return 0
+  return Math.min(Math.round(ms), 30 * 60 * 1000)
+}
+
+function normalizeHeaders(input) {
+  if (!input) return {}
+  let data = input
+  if (typeof input === 'string') {
+    try {
+      data = JSON.parse(input)
+    } catch (_) {
+      throw createError(400, '请求头覆盖不是合法 JSON')
+    }
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw createError(400, '请求头覆盖必须是 JSON 对象')
+  const out = {}
+  for (const [key, value] of Object.entries(data)) {
+    const name = String(key).trim()
+    if (!name) continue
+    out[name] = String(value ?? '')
+  }
+  return out
+}
+
+function normalizeProviderDescriptor(descriptor = {}) {
+  const id = String(descriptor.id || '').trim()
+  if (!PROVIDER_ID_RE.test(id)) throw createError(400, '提供商 ID 只能包含字母、数字、点、下划线、短横线，且必须以字母或数字开头')
+  const type = String(descriptor.type || 'openai').trim() || 'openai'
+  const name = String(descriptor.name || '').trim() || id
+  const baseURL = String(descriptor.baseURL || '').trim() || defaultBaseURL(type)
+  return {
+    id,
+    provider: {
+      type,
+      name,
+      baseURL,
+      apiKey: String(descriptor.apiKey || ''),
+      enabled: descriptor.enabled !== false,
+      models: [],
+      defaultModel: '',
+      timeoutMs: normalizeTimeout(descriptor.timeoutMs),
+      proxy: String(descriptor.proxy || '').trim(),
+      headers: normalizeHeaders(descriptor.headers),
+    },
+  }
+}
+
+const NUMERIC_PARAMS = ['temperature', 'maxTokens', 'contextLength', 'priceInput', 'priceOutput', 'priceCached']
+
+function normalizeModelParams(params) {
+  const out = {}
+  if (!params || typeof params !== 'object') return out
+  for (const key of NUMERIC_PARAMS) {
+    const raw = params[key]
+    if (raw === undefined || raw === null || raw === '') continue
+    const num = Number(raw)
+    if (Number.isFinite(num)) out[key] = num
+  }
+  const extra = params.extraBody
+  if (extra !== undefined && extra !== null && extra !== '') {
+    let data = extra
+    if (typeof extra === 'string') {
+      try {
+        data = JSON.parse(extra)
+      } catch (_) {
+        throw createError(400, '额外请求体不是合法 JSON')
+      }
+    }
+    if (data && typeof data === 'object' && !Array.isArray(data)) out.extraBody = data
+  }
+  return out
+}
+
+/** 用 patch 更新参数：显式传 null / 空字符串表示清除该参数 */
+function mergeModelParams(base = {}, patch = {}) {
+  const next = normalizeModelParams(base)
+  if (!patch || typeof patch !== 'object') return next
+  for (const key of NUMERIC_PARAMS) {
+    if (!(key in patch)) continue
+    if (patch[key] === null || patch[key] === '') {
+      delete next[key]
+      continue
+    }
+    const num = Number(patch[key])
+    if (Number.isFinite(num)) next[key] = num
+    else delete next[key]
+  }
+  if ('extraBody' in patch) {
+    if (patch.extraBody === null || patch.extraBody === '') {
+      delete next.extraBody
+    } else {
+      let data = patch.extraBody
+      if (typeof data === 'string') {
+        try {
+          data = JSON.parse(data)
+        } catch (_) {
+          throw createError(400, '额外请求体不是合法 JSON')
+        }
+      }
+      if (data && typeof data === 'object' && !Array.isArray(data)) next.extraBody = data
+      else delete next.extraBody
+    }
+  }
+  return next
+}
+
+function normalizeModelEntry(model = {}) {
+  const id = String(model.id || '').trim()
+  if (!id) throw createError(400, '模型 ID 不能为空')
+  const entry = {
+    id,
+    name: String(model.name || '').trim() || id,
+    enabled: model.enabled !== false,
+    custom: model.custom === true,
+    params: normalizeModelParams(model.params),
+  }
+  if (model.ownedBy) entry.ownedBy = model.ownedBy
+  if (model.size) entry.size = model.size
+  return entry
+}
+
+function maskKey(key) {
+  if (!key) return ''
+  return key.length <= 8 ? '••••' : `${key.slice(0, 3)}…${key.slice(-4)}`
+}
+
+function isSensitiveHeader(name) {
+  return /authorization|api[-_]?key|token|secret|cookie|password/i.test(String(name))
+}
+
+/** 请求头覆盖返回给前端时，敏感项打码（与 API Key 同一策略） */
+function sanitizeHeaders(headers) {
+  const out = {}
+  if (!headers || typeof headers !== 'object') return out
+  for (const [key, value] of Object.entries(headers)) {
+    out[key] = isSensitiveHeader(key) ? maskKey(String(value)) : String(value)
+  }
+  return out
+}
+
+/* ---------------- 工具调用 / 多模态消息转换 ---------------- */
+
+function stringifyContent(content) {
+  if (content === null || content === undefined) return ''
+  return typeof content === 'string' ? content : JSON.stringify(content)
+}
+
+function normalizeArguments(args) {
+  if (args === null || args === undefined) return '{}'
+  if (typeof args === 'string') return args || '{}'
+  try {
+    return JSON.stringify(args)
+  } catch (_) {
+    return '{}'
+  }
+}
+
+/** 前端上下文 -> OpenAI 兼容 messages（保留 assistant.tool_calls / role=tool） */
+function toOpenAIMessages(messages = [], { keepReasoning = false } = {}) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    if (!message || typeof message !== 'object') return { role: 'user', content: '' }
+    if (message.role === 'tool') {
+      return {
+        role: 'tool',
+        tool_call_id: message.tool_call_id || message.toolCallId || '',
+        content: stringifyContent(message.content),
+      }
+    }
+    if (message.role === 'assistant') {
+      const reasoning = message.reasoning_content ?? message.meta?.reasoningContent
+      const out = { role: 'assistant', content: stringifyContent(message.content) }
+      if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
+        out.tool_calls = message.tool_calls.map(call => ({
+          id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+          type: call.type || 'function',
+          function: {
+            name: call.function?.name || call.name || '',
+            arguments: normalizeArguments(call.function?.arguments ?? call.arguments),
+          },
+        }))
+      }
+      // DeepSeek thinking 模式要求把历史 assistant 的 reasoning_content 原样传回；
+      // 其它 OpenAI 兼容厂商不认这个字段，由适配器按需保留。
+      if (keepReasoning && reasoning) out.reasoning_content = String(reasoning)
+      return out
+    }
+    return { role: message.role || 'user', content: stringifyContent(message.content) }
+  })
+}
+
+/** 前端上下文 -> Ollama /api/chat messages */
+function toOllamaMessages(messages = []) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    if (!message || typeof message !== 'object') return { role: 'user', content: '' }
+    if (message.role === 'tool') {
+      return {
+        role: 'tool',
+        content: stringifyContent(message.content),
+        ...(message.name ? { tool_name: message.name } : {}),
+      }
+    }
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length) {
+      return {
+        role: 'assistant',
+        content: message.content ?? '',
+        tool_calls: message.tool_calls.map(call => {
+          let args = call.function?.arguments ?? call.arguments ?? {}
+          if (typeof args === 'string') {
+            try {
+              args = JSON.parse(args)
+            } catch (_) {
+              args = {}
+            }
+          }
+          return { function: { name: call.function?.name || call.name || '', arguments: args } }
+        }),
+      }
+    }
+    return { role: message.role || 'user', content: stringifyContent(message.content) }
+  })
+}
+
+function normalizeToolCallRecord(call = {}, index = 0) {
+  const fn = call.function || call
+  let args = fn.arguments ?? call.arguments ?? {}
+  if (typeof args !== 'string') {
+    try {
+      args = JSON.stringify(args ?? {})
+    } catch (_) {
+      args = '{}'
+    }
+  }
+  return {
+    index: Number.isFinite(call.index) ? call.index : index,
+    id: call.id || `call_${index}`,
+    type: 'function',
+    function: { name: fn.name || call.name || '', arguments: args || '{}' },
+  }
+}
+
+function createError(status, message) {
+  const err = new Error(message)
+  err.status = status
+  return err
+}
+
+function normalizeError(err) {
+  if (!err) return '未知错误'
+  if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return '请求超时或被取消'
+  // Node fetch 的网络错误会被包成 TypeError('fetch failed')，真实原因在 cause 链里
+  let cause = err.cause
+  while (cause?.cause) cause = cause.cause
+  if (cause || /fetch failed/i.test(err.message || '')) {
+    const code = cause?.code || err.code || (cause?.errors?.[0]?.code ?? '')
+    const detail = cause?.errors?.[0]?.message || cause?.message || err.message
+    return `无法连接远端服务${code ? `（${code}）` : ''}：${detail}`
+  }
+  const status = err.status || err.statusCode
+  return status ? `HTTP ${status} · ${err.message}` : err.message || String(err)
+}
+
+/**
+ * 带超时的请求，返回 Response（流式时 body 由调用方继续消费）。
+ * - 默认走全局 fetch；
+ * - provider.proxy 配置了 http(s) 代理时，走真实代理隧道（CONNECT / absolute-form），
+ *   轻量实现，无第三方依赖。
+ */
+async function request(ctx, url, { method = 'GET', headers = {}, body, signal, timeoutMs = 30000, proxy = '' } = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
+  const onAbort = () => controller.abort(signal?.reason || new Error('已取消'))
+  signal?.addEventListener?.('abort', onAbort, { once: true })
+  try {
+    const res = proxy
+      ? await proxyRequest(url, { method, headers, body, signal: controller.signal, proxy })
+      : await fetch(url, { method, headers, body, signal: controller.signal })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 200) : ''}`)
+      err.status = res.status
+      throw err
+    }
+    return res
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener?.('abort', onAbort)
+  }
+}
+
+/** 把 Node IncomingMessage 包成 fetch Response 的最小可用子集 */
+function wrapNodeResponse(res) {
+  const body = Readable.toWeb(res)
+  const tiny = {
+    ok: res.statusCode >= 200 && res.statusCode < 300,
+    status: res.statusCode,
+    statusText: res.statusMessage || '',
+    headers: { get: name => res.headers[String(name).toLowerCase()] ?? null },
+    body,
+    text() {
+      return new Promise((resolve, reject) => {
+        const chunks = []
+        res.on('data', chunk => chunks.push(chunk))
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+        res.on('error', reject)
+      })
+    },
+  }
+  tiny.json = async () => JSON.parse(await tiny.text())
+  return tiny
+}
+
+function proxyAuthorization(proxy) {
+  if (!proxy.username && !proxy.password) return ''
+  const token = Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64')
+  return `Basic ${token}`
+}
+
+/** 通过 http(s) 代理发起请求：http 目标用 absolute-form，https 目标用 CONNECT 隧道 */
+function proxyRequest(url, { method = 'GET', headers = {}, body, signal, proxy } = {}) {
+  const target = new URL(url)
+  let proxyURL
+  try {
+    proxyURL = new URL(String(proxy))
+  } catch (_) {
+    return Promise.reject(new Error(`代理地址不合法：${proxy}`))
+  }
+  if (proxyURL.protocol !== 'http:' && proxyURL.protocol !== 'https:') {
+    return Promise.reject(new Error(`不支持的代理协议：${proxyURL.protocol}`))
+  }
+  const proxyModule = proxyURL.protocol === 'https:' ? https : http
+  const proxyPort = proxyURL.port || (proxyURL.protocol === 'https:' ? 443 : 80)
+  const auth = proxyAuthorization(proxyURL)
+  const proxyHeaders = { Host: proxyURL.host, ...(auth ? { 'Proxy-Authorization': auth } : {}) }
+
+  return new Promise((resolve, reject) => {
+    const fail = err => reject(err instanceof Error ? err : new Error(String(err)))
+
+    if (target.protocol === 'http:') {
+      // 明文 HTTP 通过 absolute-form 直接发给代理；Host 用目标站点的
+      const targetHeaders = { ...headers }
+      if (!Object.keys(targetHeaders).some(key => key.toLowerCase() === 'host')) targetHeaders.Host = target.host
+      const req = proxyModule.request(
+        {
+          host: proxyURL.hostname,
+          port: proxyPort,
+          method,
+          path: url,
+          headers: { ...proxyHeaders, ...targetHeaders },
+          signal,
+        },
+        res => resolve(wrapNodeResponse(res)),
+      )
+      req.on('error', fail)
+      if (body) req.write(body)
+      req.end()
+      return
+    }
+
+    if (target.protocol !== 'https:') return fail(new Error(`不支持的协议：${target.protocol}`))
+    const targetPort = target.port || 443
+    const connectReq = proxyModule.request({
+      host: proxyURL.hostname,
+      port: proxyPort,
+      method: 'CONNECT',
+      path: `${target.hostname}:${targetPort}`,
+      headers: proxyHeaders,
+      signal,
+    })
+    connectReq.on('error', fail)
+    connectReq.on('connect', (res, socket, head) => {
+      if (res.statusCode !== 200) return fail(new Error(`代理 CONNECT 失败：HTTP ${res.statusCode}`))
+      if (head?.length) socket.unshift(head)
+      const tlsSocket = tls.connect({ socket, servername: target.hostname }, () => {
+        const req = https.request(
+          {
+            createConnection: () => tlsSocket,
+            method,
+            host: target.hostname,
+            port: targetPort,
+            path: `${target.pathname}${target.search}`,
+            headers: { ...headers, Host: target.host },
+            signal,
+          },
+          r => resolve(wrapNodeResponse(r)),
+        )
+        req.on('error', fail)
+        if (body) req.write(body)
+        req.end()
+      })
+      tlsSocket.on('error', fail)
+    })
+    connectReq.end()
+  })
+}
+
+/** 解析 SSE：`data: {...}` 行 */
+async function readSSE(res, onData) {
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const payload = trimmed.slice(5).trim()
+      if (!payload || payload === '[DONE]') continue
+      try {
+        onData(JSON.parse(payload))
+      } catch (_) {
+        /* 忽略无法解析的行 */
+      }
+    }
+  }
+}
+
+/** 解析 NDJSON（Ollama） */
+async function readNDJSON(res, onData) {
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        onData(JSON.parse(line))
+      } catch (_) {
+        /* 忽略半行 */
+      }
+    }
+  }
+  if (buffer.trim()) {
+    try {
+      onData(JSON.parse(buffer))
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+

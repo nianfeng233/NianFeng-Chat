@@ -1,0 +1,490 @@
+/**
+ * V21 · settings-item-plugins
+ * 插件管理器：不只是列表，而是"可验证的运行状态"。
+ *
+ *  - 自检：调用 runtime 的 selfCheck()，验证每个插件是否真的在工作
+ *    （状态 / 服务是否注册 / 插槽是否挂载 / 冲突与缺依赖）
+ *  - 错误与冲突插件标红，未激活与提示标黄，并在卡片里直接写出原因
+ *  - 「详情」弹窗展示 manifest、fiber 状态、依赖、提供的服务、告警
+ *  - 禁用 / 启用 / 卸载（运行时生效，无需重启）
+ */
+export const name = 'settings-item-plugins'
+export const version = '3.0.0'
+export const displayName = '设置项 · 插件'
+export const description = '设置页 · 插件自检、健康状态、启停与详情。'
+export const author = '风语内核'
+export const icon = '🧰'
+export const core = true
+export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
+export const inject = ['settings-container', 'plugin-manager', 'toast', 'modal', 'api']
+
+import { page, section, card, row } from '../../../src/util/settings.mjs'
+import { useStyle } from '../../../src/util/style.mjs'
+import { PLUGIN_PAGE_CSS } from './style.mjs'
+import { escapeHtml } from '../../../src/util/format.mjs'
+import { icons } from '../../../src/util/icons.mjs'
+
+const STATUS_TAG = {
+  active: { cls: 'enabled', text: '运行中' },
+  disabled: { cls: 'disabled', text: '已禁用' },
+  inactive: { cls: 'warn', text: '未激活' },
+  error: { cls: 'error', text: '加载失败' },
+  pending: { cls: 'warn', text: '加载中' },
+}
+
+export function apply(ctx) {
+  const pages = ctx.inject('settings-container')
+  const manager = ctx.inject('plugin-manager')
+  const toast = ctx.inject('toast')
+  const modal = ctx.inject('modal')
+
+  useStyle(ctx, PLUGIN_PAGE_CSS)
+
+  let sortKey = 'status'
+  let sortOrder = 'asc'
+
+  pages.register({
+    id: 'plugins',
+    group: '核心',
+    groupOrder: 20,
+    label: '插件',
+    icon: icons.plugin,
+    order: 30,
+    render(container) {
+      container.innerHTML = page('插件', '风语的一切功能都由插件提供。这里可以查看每个插件是否真的在正常工作。', `
+        <div class="plugin-toolbar">
+          <button class="plugin-toolbar-btn primary" data-action="selfcheck">
+            ${icons.check} 重新自检
+          </button>
+          <button class="plugin-toolbar-btn" data-action="export">导出诊断</button>
+          <div class="plugin-toolbar-right">
+            <span>排序</span>
+            <select class="plugin-sort-select" data-sort-key>
+              <option value="status">按状态</option>
+              <option value="name">按名称</option>
+              <option value="health">按问题数</option>
+            </select>
+            <button class="plugin-sort-order" data-sort-order title="切换正序 / 倒序">↑</button>
+          </div>
+        </div>
+        <div id="pluginDirsContainer"></div>
+          <div data-plugin-summary class="plugin-summary"></div>
+        <div id="pluginListContainer" data-plugin-list></div>
+        <div class="plugin-footnote">外部插件放进「插件目录」里的子文件夹（每个插件一个目录，包含 index.mjs），点「重新扫描」并刷新页面后生效；内置插件随版本发布，升级 exe 时会被替换。</div>`)
+
+      const listEl = container.querySelector('[data-plugin-list]')
+      const dirsEl = container.querySelector('#pluginDirsContainer')
+      const summaryEl = container.querySelector('[data-plugin-summary]')
+      const sortKeyEl = container.querySelector('[data-sort-key]')
+      const sortOrderEl = container.querySelector('[data-sort-order]')
+
+      /* ---------------- 自检 ---------------- */
+      const issues = () => {
+        try {
+          return manager.selfCheck() || []
+        } catch (err) {
+          ctx.logger.warn('自检失败', err)
+          return []
+        }
+      }
+      const issuesOf = (id, list) => list.filter(i => i.id === id)
+
+      /* ---------------- 状态与样式 ---------------- */
+      const severityOf = (plugin, list) => {
+        const own = issuesOf(plugin.id, list)
+        if (plugin.status === 'error' || plugin.conflict || own.some(i => i.severity === 'error')) return 'error'
+        if (plugin.unavailable && plugin.status === 'active') return 'warning'
+        if (plugin.status === 'inactive' || plugin.warnings?.length || own.length) return 'warning'
+        if (plugin.status === 'disabled') return 'disabled'
+        return 'ok'
+      }
+
+      const tagOf = (plugin, severity) => {
+        if (plugin.conflict) return '<span class="plugin-tag error">服务冲突</span>'
+        if (severity === 'error') return '<span class="plugin-tag error">加载失败</span>'
+        if (plugin.unavailable && plugin.status === 'active') return '<span class="plugin-tag warn">暂不可用</span>'
+        if (plugin.status === 'inactive') return '<span class="plugin-tag warn">未激活</span>'
+        if (severity === 'warning') return '<span class="plugin-tag warn">有提示</span>'
+        const tag = STATUS_TAG[plugin.status] || STATUS_TAG.pending
+        return `<span class="plugin-tag ${tag.cls}">${tag.text}</span>`
+      }
+
+      const reasonHtml = (plugin, list) => {
+        const own = issuesOf(plugin.id, list)
+        const lines = []
+        if (plugin.status === 'error') lines.push(`<div class="plugin-issue error">✕ 运行失败：${escapeHtml(plugin.error || plugin.reason || '未知错误')}</div>`)
+        else if (plugin.conflict) lines.push(`<div class="plugin-issue error">✕ 冲突：${escapeHtml(plugin.reason || '服务被占用')}</div>`)
+        else if (plugin.status === 'inactive') lines.push(`<div class="plugin-issue warning">! 未激活：${escapeHtml(plugin.reason || '依赖未就绪')}</div>`)
+        else if (plugin.status === 'disabled') lines.push(`<div class="plugin-issue muted">已禁用${plugin.reason ? '：' + escapeHtml(plugin.reason) : ''}</div>`)
+        if (plugin.unavailable && plugin.status === 'active') {
+          lines.push(`<div class="plugin-issue warning">! ${escapeHtml(plugin.unavailableReason || '该插件依赖的官方服务暂未制作，功能暂不可用。')} 禁用后账号页与相关入口会一起隐藏。</div>`)
+        }
+        for (const issue of own) {
+          if (issue.severity === 'error') continue
+          lines.push(`<div class="plugin-issue ${issue.severity === 'warning' ? 'warning' : 'muted'}">! ${escapeHtml(issue.message)}</div>`)
+        }
+        for (const warning of plugin.warnings || []) {
+          if (own.some(i => i.message === warning.message)) continue
+          lines.push(`<div class="plugin-issue ${warning.severity === 'warning' ? 'warning' : 'muted'}">! ${escapeHtml(warning.message)}</div>`)
+        }
+        return lines.join('')
+      }
+
+      /* ---------------- 渲染 ---------------- */
+      const itemHtml = (plugin, list) => {
+        const severity = severityOf(plugin, list)
+        const disabled = plugin.status !== 'active'
+        const actions = plugin.core
+          ? `<span class="plugin-core-hint">系统内置</span>`
+          : `
+            <button class="plugin-action-btn" data-plugin-action="detail" data-plugin-id="${plugin.id}">详情</button>
+            <button class="plugin-action-btn" data-plugin-action="toggle" data-plugin-id="${plugin.id}">${plugin.status === 'active' ? '禁用' : '启用'}</button>
+            <button class="plugin-action-btn danger" data-plugin-action="remove" data-plugin-id="${plugin.id}">卸载</button>
+            ${plugin.external ? `<button class="plugin-action-btn danger" data-plugin-action="delete-external" data-plugin-id="${plugin.id}">删除文件</button>` : ''}`
+        return `
+          <div class="plugin-item ${severity === 'ok' ? '' : severity} ${plugin.core ? 'core' : ''} ${disabled ? 'disabled' : ''}" data-plugin-id="${plugin.id}">
+            <div class="plugin-icon ${plugin.core ? 'core' : ''} ${severity === 'error' ? 'error' : ''}">${plugin.icon || icons.plugin}</div>
+            <div class="plugin-info">
+              <div class="plugin-name">
+                <span>${escapeHtml(plugin.name)}</span>
+                <span class="plugin-id">${escapeHtml(plugin.id)}${plugin.version ? '@' + plugin.version : ''}</span>
+                ${tagOf(plugin, severity)}
+                ${plugin.external ? '<span class="plugin-tag">外部</span>' : ''}
+                ${severity === 'ok' && plugin.status === 'active' ? '<span class="plugin-health">● 正常</span>' : ''}
+              </div>
+              <div class="plugin-desc">${escapeHtml(plugin.description || '')}</div>
+              ${reasonHtml(plugin, list)}
+            </div>
+            <div class="plugin-actions">${actions}</div>
+          </div>`
+      }
+
+      /** 已卸载插件：数据保留，因此必须给用户一个恢复入口 */
+      const removedHtml = plugin => `
+        <div class="plugin-item disabled removed" data-plugin-id="${plugin.id}">
+          <div class="plugin-icon">${plugin.icon || icons.plugin}</div>
+          <div class="plugin-info">
+            <div class="plugin-name">
+              <span>${escapeHtml(plugin.name)}</span>
+              <span class="plugin-id">${escapeHtml(plugin.id)}${plugin.version ? '@' + plugin.version : ''}</span>
+              <span class="plugin-tag disabled">已卸载</span>
+            </div>
+            <div class="plugin-desc">${escapeHtml(plugin.description || '')}</div>
+            <div class="plugin-issue muted">数据已保留；恢复后会重新加载插件。</div>
+          </div>
+          <div class="plugin-actions">
+            <button class="plugin-action-btn" data-plugin-action="detail" data-plugin-id="${plugin.id}">详情</button>
+            <button class="plugin-action-btn primary" data-plugin-action="restore" data-plugin-id="${plugin.id}">恢复</button>
+          </div>
+        </div>`
+
+      const sortList = (list, issueList) => {
+        const arr = [...list]
+        arr.sort((a, b) => {
+          let cmp = 0
+          if (sortKey === 'name') cmp = a.name.localeCompare(b.name, 'zh-Hans-CN')
+          else if (sortKey === 'health') {
+            const rank = p => (p.status === 'error' || p.conflict ? 0 : p.status === 'inactive' ? 1 : issuesOf(p.id, issueList).length ? 2 : p.status === 'active' ? 3 : 4)
+            cmp = rank(a) - rank(b) || a.name.localeCompare(b.name, 'zh-Hans-CN')
+          } else {
+            const order = { error: 0, inactive: 1, disabled: 2, active: 3 }
+            cmp = (order[a.status] ?? 9) - (order[b.status] ?? 9) || a.name.localeCompare(b.name, 'zh-Hans-CN')
+          }
+          return sortOrder === 'asc' ? cmp : -cmp
+        })
+        return arr
+      }
+
+      const render = () => {
+        const list = manager.list({ includeCore: true, includeRemoved: true })
+        const issueList = issues()
+        const stats = manager.stats()
+        const removed = sortList(list.filter(p => p.removed), issueList)
+        const external = sortList(list.filter(p => p.external && !p.removed), issueList)
+        const third = sortList(list.filter(p => !p.core && !p.external && !p.removed), issueList)
+        const core = sortList(list.filter(p => p.core), issueList)
+        const errorCount = list.filter(p => p.status === 'error' || p.conflict).length
+
+        summaryEl.innerHTML = `
+          <span class="plugin-chip">共 <b>${stats.total}</b></span>
+          <span class="plugin-chip ok">运行中 <b>${stats.active}</b></span>
+          <span class="plugin-chip ${errorCount ? 'error' : ''}">错误 / 冲突 <b>${errorCount}</b></span>
+          <span class="plugin-chip ${stats.inactive ? 'warn' : ''}">未激活 <b>${stats.inactive}</b></span>
+          <span class="plugin-chip ${stats.warnings ? 'warn' : ''}">自检提示 <b>${stats.warnings}</b></span>
+          <span class="plugin-chip">服务 <b>${stats.services}</b></span>
+          ${removed.length ? `<span class="plugin-chip">已卸载 <b>${removed.length}</b></span>` : ''}`
+
+        listEl.innerHTML = `
+          ${
+            external.length
+              ? `<div class="settings-section-title" style="margin-top:22px">外部插件</div>
+                 <div class="plugin-list">${external.map(p => itemHtml(p, issueList)).join('')}</div>`
+              : ''
+          }
+          <div class="plugin-list">${third.map(p => itemHtml(p, issueList)).join('')}</div>
+          <div class="settings-section-title" style="margin-top:22px">核心插件（不可禁用）</div>
+          <div class="plugin-list">${core.map(p => itemHtml(p, issueList)).join('')}</div>
+          ${
+            removed.length
+              ? `<div class="settings-section-title" style="margin-top:22px">已卸载（数据保留，可恢复）</div>
+                 <div class="plugin-list">${removed.map(removedHtml).join('')}</div>`
+              : ''
+          }`
+        bindActionButtons()
+        loadPluginDirs()
+      }
+
+      /**
+       * 逐项直接绑定 click：极简 DOM 垫片没有事件冒泡，浏览器里也避免
+       * “直接监听 + 容器委托”同时触发导致卸载/恢复执行两次。
+       */
+      const bindActionButtons = () => {
+        const bind = el => {
+          if (!el || el.dataset.clickBound === '1') return
+          el.dataset.clickBound = '1'
+          el.addEventListener('click', onClick)
+        }
+        container.querySelectorAll('[data-plugin-action]').forEach(bind)
+        container.querySelectorAll('.plugin-toolbar [data-action]').forEach(bind)
+      }
+
+      /* ---------------- 详情 ---------------- */
+      const showDetail = async id => {
+        const plugin = manager.describe(id)
+        if (!plugin) return
+        const owns = ctx.registry.list().filter(s => s.owner === `plugin:${id}`).map(s => `${s.name}(${s.type})`)
+        const detail = [
+          `id        ${plugin.id}@${plugin.version}`,
+          `作者      ${plugin.author || '未标注'}`,
+          `状态      ${plugin.statusLabel}${plugin.conflict ? '（服务冲突）' : ''}`,
+          plugin.reason ? `原因      ${plugin.reason}` : '',
+          `fiber     ${plugin.fiberState === null ? '—' : plugin.fiberState}（0=PENDING 2=ACTIVE 3=FAILED 4=DISPOSED）`,
+          `来源      ${plugin.external ? '外部插件（可删除文件）' : '内置插件（随版本发布）'}`,
+          `路径      ${plugin.path || plugin.dir || '—'}`,
+          '',
+          `依赖插件  ${Object.entries(plugin.depends).map(([k, v]) => `${k}@${v}`).join('、') || '无'}`,
+          `注入服务  ${plugin.inject.join('、') || '无'}`,
+          `提供声明  ${plugin.provides.map(p => (typeof p === 'string' ? p : p.name)).join('、') || '无'}`,
+          `实际持有  ${owns.join('、') || '无'}`,
+          `使用插槽  ${plugin.slots.join('、') || '未声明'}`,
+          plugin.warnings?.length ? `\n告警\n${plugin.warnings.map(w => `· [${w.severity}] ${w.message}`).join('\n')}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+        await modal.open({ title: `插件详情 · ${plugin.name}`, description: detail, confirmText: '关闭', hideCancel: true })
+      }
+
+      /* ---------------- 插件目录（内置 + 外部） ---------------- */
+    let dirsInfo = null
+    const reloadPage = () => {
+      try {
+        location.reload()
+      } catch (_) {
+        /* dom-shim / 旧环境忽略 */
+      }
+    }
+    const renderPluginDirs = () => {
+      if (!dirsEl) return
+      const api = ctx.inject('api')
+      if (!api) {
+        dirsEl.innerHTML = ''
+        return
+      }
+      if (dirsInfo?.error) {
+        dirsEl.innerHTML = section('插件目录', card(
+          row('读取失败', escapeHtml(dirsInfo.error), '<button class="outline-btn" data-dir-action="reload">重试</button>'),
+        ))
+        dirsEl.querySelector('[data-dir-action="reload"]')?.addEventListener('click', () => loadPluginDirs())
+        return
+      }
+      if (!api.supports?.('plugin-dirs')) {
+        dirsEl.innerHTML = section('插件目录', card(
+          row('后端未提供外部插件能力', '当前运行的后端是旧进程：请完全关闭风语后重新启动（更新后的后端才会扫描外部插件目录）。', '<span class="plugin-tag warn">需要重启</span>'),
+        ))
+        return
+      }
+      if (!dirsInfo) {
+        dirsEl.innerHTML = section('插件目录', card(row('正在读取插件目录…', '稍候', '')))
+        return
+      }
+      const external = dirsInfo.externalDir || ''
+      const warnings = (dirsInfo.warnings || []).map(w => `${w.id}: ${w.message}`).join('；')
+      dirsEl.innerHTML = section('插件目录', card(
+        row('内置插件目录', '随版本发布，升级 exe 时会被整体替换；不要在这里长期放自己的插件',
+          `<span class="mono plugin-path">${escapeHtml(dirsInfo.builtinDir || '—')}</span>`) +
+        row('外部插件目录',
+          dirsInfo.envOverride
+            ? '当前由环境变量 FENGYU_PLUGINS_DIR 指定，设置页的修改不会生效'
+            : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs）；升级 exe / 应用不会删除此目录',
+          `<input class="setting-input plugin-dir-input" id="pluginDirInput" value="${escapeHtml(external)}" style="width:260px" />
+           <button class="outline-btn" data-dir-action="pick">选择目录</button>
+           <button class="outline-btn" data-dir-action="apply">应用并刷新</button>
+           <button class="outline-btn" data-dir-action="open">打开目录</button>
+           <button class="outline-btn" data-dir-action="rescan">重新扫描</button>`) +
+        row('扫描结果', '外部插件数量 / 插件总数', `<span class="mono">外部 ${dirsInfo.externalCount ?? 0} 个 / 共 ${dirsInfo.count ?? 0} 个</span>`) +
+        (warnings ? row('扫描提示', escapeHtml(warnings), '') : ''),
+      ))
+      dirsEl.querySelector('[data-dir-action="pick"]')?.addEventListener('click', async () => {
+        try {
+          const result = await api.pickPluginsDir()
+          const input = dirsEl.querySelector('#pluginDirInput')
+          if (result?.path && input) {
+            input.value = result.path
+            toast.info('已选择目录，点「应用并刷新」保存')
+          } else {
+            toast.info('没有选择目录')
+          }
+        } catch (err) {
+          toast.error(`打开目录选择器失败：${err.message}。也可以手动填写路径。`)
+        }
+      })
+      dirsEl.querySelector('[data-dir-action="apply"]')?.addEventListener('click', async () => {
+        const input = dirsEl.querySelector('#pluginDirInput')
+        const dir = String(input?.value || '').trim()
+        try {
+          await api.setPluginsDir(dir)
+          toast.success('插件目录已保存，正在刷新页面…')
+          reloadPage()
+        } catch (err) {
+          toast.error(`保存失败：${err.message}`)
+        }
+      })
+      dirsEl.querySelector('[data-dir-action="open"]')?.addEventListener('click', async () => {
+        try {
+          const result = await api.openPluginsDir()
+          toast.info(`插件目录：${result?.dir || external}`)
+        } catch (err) {
+          toast.error(`打开目录失败：${err.message}`)
+        }
+      })
+      dirsEl.querySelector('[data-dir-action="rescan"]')?.addEventListener('click', async () => {
+        try {
+          const result = await api.rescanPlugins()
+          dirsInfo = result
+          toast.success(`已重新扫描：外部 ${result?.externalCount ?? 0} 个插件，正在刷新页面…`)
+          reloadPage()
+        } catch (err) {
+          toast.error(`重新扫描失败：${err.message}`)
+        }
+      })
+    }
+    const loadPluginDirs = async () => {
+      const api = ctx.inject('api')
+      if (!api) return
+      try {
+        await api.health()
+      } catch (err) {
+        dirsInfo = { error: `后端未连接：${err.message}` }
+        renderPluginDirs()
+        return
+      }
+      if (!api.supports?.('plugin-dirs')) {
+        renderPluginDirs()
+        return
+      }
+      try {
+        dirsInfo = await api.pluginDirs()
+      } catch (err) {
+        dirsInfo = { error: err.message }
+      }
+      renderPluginDirs()
+    }
+    /* ---------------- 交互 ---------------- */
+      const onClick = async e => {
+        const btn = e.target.closest('[data-plugin-action]')
+        if (btn) {
+          const { pluginAction: action, pluginId: id } = btn.dataset
+          if (action === 'toggle') {
+            const ok = await manager.toggle(id)
+            if (ok) render()
+          } else if (action === 'remove') {
+            await manager.uninstall(id)
+            render()
+          } else if (action === 'delete-external') {
+            const plugin = manager.describe(id)
+            const answer = await modal.open({
+              title: `删除外部插件「${plugin?.name || id}」`,
+              description: '将删除外部插件目录中的文件，且不可恢复；内置插件不受影响。',
+              confirmText: '删除',
+            })
+            if (answer?.ok) {
+              try {
+                await ctx.inject('api').removeExternalPlugin(id)
+                toast.success('外部插件文件已删除，正在刷新页面…')
+                reloadPage()
+              } catch (err) {
+                toast.error(`删除失败：${err.message}`)
+              }
+            }
+            return
+          } else if (action === 'restore') {
+            const ok = await manager.restore(id)
+            if (ok) toast.success(`已恢复插件「${manager.describe(id)?.name || id}」`)
+            render()
+          } else if (action === 'detail') {
+            await showDetail(id)
+          }
+          return
+        }
+        const action = e.target.closest('[data-action]')?.dataset.action
+        if (action === 'selfcheck') {
+          const found = issues()
+          const errors = found.filter(i => i.severity === 'error').length
+          const warns = found.length - errors
+          render()
+          errors ? toast.error(`自检完成：${errors} 个错误、${warns} 个提示`) : toast.success(`自检完成：一切正常（${warns} 个提示）`)
+        } else if (action === 'export') {
+          const payload = {
+            at: new Date().toISOString(),
+            version: ctx.inject('app')?.version,
+            runtime: 'cordis',
+            plugins: manager.list({ includeCore: true, includeRemoved: true }),
+            issues: issues(),
+            services: ctx.registry.list(),
+          }
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `fengyu-plugins-diagnostic-${Date.now()}.json`
+          a.click()
+          URL.revokeObjectURL(url)
+          toast.success('诊断信息已导出')
+        } else if (action === 'install' || action === 'market') {
+          toast.info('未实现：当前版本只支持本地插件目录 + 运行时启停，详见「设置 → 未实现清单」。')
+        }
+      }
+
+      const onSortKey = () => {
+        sortKey = sortKeyEl.value
+        render()
+      }
+      const onSortOrder = () => {
+        sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'
+        sortOrderEl.textContent = sortOrder === 'asc' ? '↑' : '↓'
+        render()
+      }
+
+      sortKeyEl.addEventListener('change', onSortKey)
+      sortOrderEl.addEventListener('click', onSortOrder)
+
+      const offs = [
+        ctx.on('plugin:loaded', render),
+        ctx.on('plugin:enabled', render),
+        ctx.on('plugin:disabled', render),
+        ctx.on('plugin:uninstalled', render),
+        ctx.on('plugin:error', render),
+        ctx.on('plugin:warning', render),
+      ]
+
+      sortKeyEl.value = sortKey
+      sortOrderEl.textContent = sortOrder === 'asc' ? '↑' : '↓'
+      render()
+      return () => {
+        offs.forEach(off => off())
+        sortKeyEl.removeEventListener('change', onSortKey)
+        sortOrderEl.removeEventListener('click', onSortOrder)
+      }
+    },
+  })
+}

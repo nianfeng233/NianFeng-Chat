@@ -1,0 +1,58 @@
+# 桌面端打包（Rust + WebView2，已实现）
+
+风语现在提供两套分发产物，均由 `scripts/package-release.mjs` 生成：
+
+| 版本 | 目录 | 说明 |
+|---|---|---|
+| Web 源码 | `release/web/source/` | 纯净源码，不含个人数据与 `node_modules`，适合推送 GitHub |
+| Web 部署 | `release/web/deploy/` | 自带便携 Node 运行时，双击 `启动风语.cmd` 即可运行 |
+| 桌面源码 | `release/desktop/source/` | Rust 桌面壳源码 + 无 `official-service` 的运行时 app + 可嵌入的 Node 运行时 |
+| 桌面部署 | `release/desktop/deploy/风语.exe` | 单文件、无边框窗口、已内嵌 Node 运行时与全部前端资源 |
+
+重新生成：
+
+```bash
+npm run build:release     # Web + 桌面
+npm run build:desktop     # 只生成桌面版
+npm run build:release -- --web-only   # 只生成 Web 版
+```
+
+## 桌面壳实现
+
+- **窗口**：`tao` + `wry`，`WindowBuilder::with_decorations(false)`，页面通过 `window.windHost.window(action)` 调用最小化 / 最大化 / 关闭。
+- **拖动**：优先使用 WebView2 123+ 的 `app-region: drag`；同时注入 JS fallback，在顶层栏按下鼠标时通过 IPC 调用 `window.drag_window()`。
+- **后端**：Rust 先挑选一个空闲端口，启动内嵌的 `node.exe server/index.mjs`，通过环境变量传入：
+  - `PORT`：随机本地端口
+  - `FENGYU_STATIC_DIR=.`：由后端直接托管 WebUI
+  - `FENGYU_DATA_DIR=%LOCALAPPDATA%\FengyuChat\user_data`：用户数据目录
+- **资源**：`node.exe` 与干净的 `app/` 在编译时通过 `build.rs` / `app_assets.rs` 嵌入 exe；首次运行释放到 `%LOCALAPPDATA%\FengyuChat\runtime`，用 `.build-id` 判断是否需要更新。用户数据独立保存在 `%LOCALAPPDATA%\FengyuChat\user_data`，升级版本不会覆盖。
+- **外部插件**：后端 `plugin-registry` 会扫描数据目录下的 `plugins/`（桌面版为 `%LOCALAPPDATA%\FengyuChat\user_data\plugins`），也可在「设置 → 插件 → 插件目录」指定任意目录；插件放在 `<目录>/<分层>/<插件id>/index.mjs`，重新扫描/刷新即可加载，升级 exe 不删除外部插件。
+- **图标**：`scripts/desktop-wrapper/app.ico` 由 `scripts/generate-icon.ps1` 从 `logo.png` 生成圆角矩形多尺寸图标，构建时嵌入 Windows 资源；`app.rgba` 同时作为窗口 / 任务栏缩略图图标。
+- **官方服务**：桌面版会在打包时移除 `plugins/features/official-service` 并重写 `plugins/registry.mjs`，因此账号页与「使用风语内置模型」入口不会出现在打包版本中。
+
+## 环境要求
+
+- 开发机：Windows 10/11、Visual Studio Build Tools（MSVC linker）、Rust MSVC toolchain、WebView2 Runtime（Win11 / 新版 Edge 已自带）。
+- 用户机：Windows 10/11；WebView2 Runtime 缺失时需安装 Evergreen Runtime。
+
+## 数据目录
+
+两个版本共用同一套数据目录解析规律：
+
+1. 宿主只负责提供可写的 `FENGYU_HOME_DIR`（桌面版为 `%LOCALAPPDATA%\FengyuChat`，Web 部署版为部署根目录）。
+2. 本部署首次启动时，`server/data-dir.mjs` 会读取 `%APPDATA%\fengyu\instance.json` 里的本机数据目录指针，自动加载之前使用过的数据目录。
+3. 之后本部署只认 `FENGYU_HOME_DIR/user_data/instance.json`，不会反复读取 AppData 指针覆盖数据目录。
+4. 用户也可以在「设置 → 数据」里切换目录，记录会写入该本地指针。
+
+- Web 部署默认位置：`release/web/deploy/user_data/`
+- 桌面版：`%LOCALAPPDATA%\FengyuChat\user_data\`（若 LOCALAPPDATA 不可写，会回退到 exe 同级 `.fengyu` 或 TEMP）
+  * 默认外部插件目录：`%LOCALAPPDATA%\FengyuChat\user_data\plugins\`（设置里可改成任意外部目录）
+
+两个版本都不会把会话、配置、密钥写进源码目录。
+
+## 许可证与商用
+
+- 依赖清单：`docs/DEPENDENCIES.md`（`npm run audit:deps` 重新生成）
+- 第三方声明：`THIRD-PARTY-NOTICES.md`
+- 商用检查建议：`docs/COMMERCIAL-USE.md`
+- 发布 exe / Web 部署目录时，请一并保留 `LICENSE`、`THIRD-PARTY-NOTICES.md` 和 `docs/DEPENDENCIES.md`。

@@ -1,0 +1,151 @@
+/**
+ * 应用入口：创建基于真实 cordis 的运行时 → 加载插件 → 启动 → 暴露调试对象。
+ *
+ * cordis 负责：插件生命周期（fiber）、依赖注入、事件总线、日志、服务注册。
+ * 风语运行时负责：插件清单、状态视图、启停策略、诊断信息。
+ */
+import { App, VERSION, STATUS } from './runtime/app.mjs'
+import { plugins as builtinPluginEntries } from '../plugins/registry.mjs'
+
+const CONFIG_KEY = 'fengyu:config'
+
+function readBootConfig() {
+  try {
+    const raw = localStorage.getItem(CONFIG_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    // config 服务把点号路径存成嵌套对象：plugins.disabled → { plugins: { disabled: [...] } }
+    const data = parsed?.data && typeof parsed.data === 'object' ? parsed.data : parsed || {}
+    const plugins = data.plugins || {}
+    return {
+      disabled: Array.isArray(plugins.disabled) ? plugins.disabled : [],
+      removed: Array.isArray(plugins.removed) ? plugins.removed : [],
+      enabled: Array.isArray(plugins.enabled) ? plugins.enabled : [],
+    }
+  } catch (_) {
+    return { disabled: [], removed: [], enabled: [] }
+  }
+}
+
+/** 与 backend-client 一样，优先读 config['backend.url']，默认走同源 /api */
+function pluginApiBase() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}')
+    const data = parsed?.data && typeof parsed.data === 'object' ? parsed.data : parsed || {}
+    return String(data?.backend?.url || '/api').replace(/\/+$/, '')
+  } catch (_) {
+    return '/api'
+  }
+}
+
+/**
+ * 插件清单优先从后端取（内置 + 外部插件目录合并）。
+ * 如果后端没起来或能力较旧，回退到打包时生成的 registry.mjs，
+ * 保证纯静态/离线场景仍能启动。
+ */
+async function loadPluginEntries() {
+  try {
+    const base = pluginApiBase()
+    const href = typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/'
+    const url = new URL(`${base}/plugins`, href)
+    const timeout = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(3500) : undefined
+    const res = await fetch(url.href, { cache: 'no-store', signal: timeout })
+    if (!res.ok) return builtinPluginEntries
+    const data = await res.json()
+    if (!Array.isArray(data?.plugins) || !data.plugins.length) return builtinPluginEntries
+    return data.plugins
+      .filter(entry => entry && entry.path)
+      .map(entry => {
+        // 外部插件路径是 /user-plugins/...；按「页面同源」转成绝对 URL。
+        // 官方启动方式（start.mjs / 单端口 / 桌面壳）都会把 /user-plugins 代理到后端，
+        // 这样插件内部的 ../../../src/... 相对引用也能落到同源的 /src 上。
+        if (entry.external && entry.path.startsWith('/')) {
+          try {
+            const origin = typeof location !== 'undefined' && location.origin ? location.origin : url.origin
+            return { ...entry, path: origin + entry.path }
+          } catch (_) {
+            return entry
+          }
+        }
+        return entry
+      })
+  } catch (_) {
+    return builtinPluginEntries
+  }
+}
+
+export async function boot() {
+  const t0 = performance.now()
+  const entries = await loadPluginEntries()
+  const app = new App({ baseUrl: new URL('../', import.meta.url) })
+  const { disabled, removed, enabled } = readBootConfig()
+
+  window.__wind = app.rootCompat
+  window.__wind_app = app
+  window.__wind_debug = createDebug(app)
+
+  await app.loadAll(entries, { disabled, removed, enabled })
+
+  const ms = Math.round(performance.now() - t0)
+  console.log(
+    `%c风语%c 已启动 · ${app.activeCount}/${entries.length} 个插件激活 · cordis v4 · ${ms}ms`,
+    'color:#70a15a;font-weight:600',
+    'color:#8b919c',
+  )
+  app.emit('app:ready', { ms, count: app.activeCount, total: entries.length, version: VERSION })
+
+  writeDiagnostics(app)
+  hideBootScreen()
+  return { app, ctx: app.rootCompat, cordis: app.cordis, loader: app, version: VERSION }
+}
+
+function writeDiagnostics(app) {
+  try {
+    const list = app.list()
+    const diag = document.createElement('div')
+    diag.id = 'wind-diag'
+    diag.hidden = true
+    diag.dataset.runtime = 'cordis'
+    diag.dataset.active = String(app.activeCount)
+    diag.dataset.total = String(list.length)
+    diag.dataset.services = String(app.serviceList().length)
+    diag.dataset.errors = JSON.stringify(list.filter(r => r.status === STATUS.ERROR).map(r => ({ id: r.id, reason: r.reason })))
+    diag.dataset.inactive = JSON.stringify(list.filter(r => r.status === STATUS.INACTIVE).map(r => ({ id: r.id, reason: r.reason })))
+    diag.dataset.disabled = JSON.stringify(list.filter(r => r.status === STATUS.DISABLED).map(r => r.id))
+    diag.dataset.warnings = JSON.stringify(app.warnings)
+    diag.dataset.plugins = JSON.stringify(list.map(r => ({ id: r.id, status: r.status })))
+    document.body.appendChild(diag)
+  } catch (err) {
+    console.warn('[fengyu] 诊断信息写入失败', err)
+  }
+}
+
+function hideBootScreen() {
+  const bootEl = document.getElementById('boot')
+  if (!bootEl) return
+  bootEl.classList.add('fade')
+  setTimeout(() => bootEl.remove(), 420)
+}
+
+function createDebug(app) {
+  return {
+    runtime: 'cordis',
+    ctx: app.cordis,
+    app,
+    loader: app,
+    status: () => app.list(),
+    services: () => app.serviceList(),
+    events: () => app.eventsFacade.eventNames().map(name => ({ name, listeners: app.eventsFacade.listeners(name) })),
+    trace(on = true) {
+      app.trace = on ? (phase, name, payload, owner) => console.log(`[${phase}] ${name}`, owner, payload) : null
+      return on
+    },
+    enable: id => app.enable(id),
+    disable: id => app.disable(id),
+    emit: (event, payload) => app.emit(event, payload),
+    warnings: () => app.warnings,
+    graph: () => app.graph(),
+    heuristics: () => app.detectSemanticConflicts(),
+    fibers: () => [...app.records.values()].map(r => ({ id: r.id, state: r.fiber?.state, name: r.fiber?.name })),
+    reload: () => location.reload(),
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "fengyu-chat",
+  "version": "0.40.0",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "description": "风语 · 万物皆插件的 AI 聊天程序（真实 cordis 内核 + 本地后端）",
+  "scripts": {
+    "start": "node start.mjs",
+    "dev": "node start.mjs",
+    "stop": "node scripts/stop.mjs",
+    "serve": "node start.mjs --serve",
+    "backend": "node server/index.mjs",
+    "sync-plugins": "node scripts/sync-plugins.mjs",
+    "build:release": "node scripts/package-release.mjs",
+    "build:desktop": "node scripts/package-release.mjs --desktop-only",
+    "audit:deps": "node scripts/audit-dependencies.mjs",
+    "check:kernels": "node scripts/check-syntax.mjs",
+    "test:smoke": "node scripts/smoke.mjs",
+    "test:backend": "node scripts/test-backend.mjs",
+    "test:chat": "node scripts/test-chat.mjs",
+    "test:chat-tools": "node scripts/test-chat-tools.mjs",
+    "test:vendors": "node scripts/test-vendors.mjs",
+    "mock:openai": "node scripts/mock-openai.mjs",
+    "test": "npm run check:kernels && npm run test:backend && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cordis": "^4.0.0-rc.10"
+  }
+}

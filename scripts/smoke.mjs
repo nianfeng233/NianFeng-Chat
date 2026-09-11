@@ -1,0 +1,905 @@
+/**
+ * 端到端冒烟测试（Node + 极简 DOM 垫片）
+ * 用法：npm run test:smoke
+ *
+ * 覆盖：
+ *  1. 全部插件加载 / 激活，无 error
+ *  2. 服务注册表内容
+ *  3. 事件总线 + 拦截型事件
+ *  4. 聊天闭环：message:send → 流式 chunk → message:done
+ *  5. 视图切换（chat ↔ channel）
+ *  6. 可选中服务：动态启用 bubble-qq 并切换气泡
+ *  7. 插件动态启停
+ *  8. 主题样式注入、诊断信息
+ */
+import './dom-shim.mjs'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { startBackend } from '../server/index.mjs'
+
+const results = []
+let failed = 0
+
+function check(name, condition, detail = '') {
+  const ok = !!condition
+  results.push({ name, ok, detail })
+  if (!ok) failed++
+  console.log(`${ok ? '  ✔' : '  ✗'} ${name}${detail ? `  ${ok ? '' : '→ ' + detail}` : ''}`)
+  return ok
+}
+
+function section(title) {
+  console.log(`\n${title}`)
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const dataDir = join(ROOT, '.tmp', `smoke-${Date.now()}`)
+
+/** 起一个真实后端，并注册一个测试用适配器（真实的 HTTP / SSE 链路，不是打桩前端） */
+async function startTestBackend() {
+  const backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
+  backend.ctx.models.registerAdapter('smoke', {
+    label: 'Smoke 测试适配器',
+    async listModels() {
+      return [{ id: 'smoke-1', name: 'Smoke Model' }]
+    },
+    async test() {
+      return { detail: '测试通过' }
+    },
+    async stream({ onChunk, onDone }) {
+      const text = '这是来自本地后端的真实流式回复，用于端到端验证。'
+      for (const char of text) {
+        onChunk(char)
+        await sleep(1)
+      }
+      onDone({})
+    },
+  })
+  await backend.ctx.settings.update({
+    providers: {
+      smoke: {
+        type: 'smoke',
+        name: 'Smoke Provider',
+        baseURL: 'smoke://local',
+        enabled: true,
+        models: [{ id: 'smoke-1', name: 'Smoke Model' }],
+        defaultModel: 'smoke-1',
+      },
+    },
+    defaultProvider: 'smoke',
+    defaultModel: 'smoke-1',
+  })
+  return backend
+}
+
+/** 等待条件成立（带超时） */
+async function waitFor(fn, { timeout = 5000, interval = 30 } = {}) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    const value = await fn()
+    if (value) return value
+    await sleep(interval)
+  }
+  return null
+}
+
+async function main() {
+  // 清掉上一次测试可能留下的持久化配置
+  localStorage.clear()
+
+  // 模拟 index.html 的 #app 挂载点与启动屏
+  const appRoot = document.createElement('div')
+  appRoot.id = 'app'
+  document.body.appendChild(appRoot)
+
+  section('① 启动真实后端 + 前端')
+  const backend = await startTestBackend()
+  localStorage.setItem('fengyu:config', JSON.stringify({ data: { backend: { url: `${backend.url}/api` } } }))
+
+  const { boot } = await import('../src/main.mjs')
+  const { app, ctx, loader } = await boot()
+  await sleep(600)
+  await waitFor(() => document.getElementById('wind-diag'), { timeout: 3000 })
+
+  // 冒烟用的 smoke 适配器只输出文本，不涉及工具协议；关掉严格工具模式保持旧闭环断言。
+  ctx.inject('config').set('chat.requireToolCall', false)
+  const list = loader.list()
+  const errors = list.filter(r => r.status === 'error')
+  const active = list.filter(r => r.status === 'active')
+  const disabled = list.filter(r => r.status === 'disabled')
+  const inactive = list.filter(r => r.status === 'inactive')
+
+  check('后端健康接口可用', (await backend.ctx.models.list()).length >= 3)
+  check('插件总数 ≥ 60', list.length >= 60, `实际 ${list.length}`)
+  check('没有 error 插件', errors.length === 0, errors.map(e => `${e.id}: ${e.reason}`).join(' | '))
+  check('没有 inactive 插件（依赖齐全）', inactive.length === 0, inactive.map(e => `${e.id}: ${e.reason}`).join(' | '))
+  check('active 插件数量正常', active.length >= 55, `active=${active.length} disabled=${disabled.length}`)
+  check('没有默认禁用的内置插件（精简后）', disabled.length === 0, disabled.map(d => d.id).join(','))
+
+  section('② DOM 骨架')
+  const appEl = document.getElementById('windApp')
+  check('#windApp 已挂载', !!appEl)
+  check('.titlebar 已渲染', !!document.querySelector('.titlebar'))
+  check('.rail 已渲染', !!document.querySelector('.rail'))
+  check('.list-pane 已渲染', !!document.querySelector('.list-pane'))
+  check('.content 已渲染', !!document.querySelector('.content'))
+  check('logo 图片已挂载', !!document.querySelector('.tb-logo'))
+  check('会话列表容器已渲染', !!document.getElementById('convList'))
+  check('消息滚动区已渲染', !!document.getElementById('msgScroll'))
+  check('输入框存在', !!document.getElementById('composerInput'))
+  check('“正在输入”提示默认隐藏', document.getElementById('typingHint')?.hasAttribute?.('hidden') === true)
+  check('主题变量样式已注入', !!document.querySelector('style[data-plugin="theme-tokens"]'))
+  check('绿雾背景 8 个光团', document.querySelectorAll('.bg-aurora .blob').length === 8, `实际 ${document.querySelectorAll('.bg-aurora .blob').length}`)
+  check('rail:middle 插槽存在', !!document.querySelector('.rail-middle[data-slot="rail:middle"]'))
+
+  section('③ 服务与插件系统')
+  const services = ctx.registry.list().map(s => s.name)
+  for (const name of [
+    'event-bus', 'storage', 'config', 'logs', 'slots', 'theme', 'bg-provider',
+    'session-service', 'message-service', 'model-registry', 'model-service',
+    'view-router', 'channel-registry', 'plugin-manager', 'bubble-styles',
+    'modal', 'context-menu', 'toast', 'shortcuts', 'notification', 'markdown',
+    'api', 'model-adapter', 'export-service', 'search-service',
+  ]) {
+    check(`服务 ${name} 已注册`, services.includes(name))
+  }
+  check(
+    '聊天记录 JSON 设置页已注册',
+    ctx.inject('settings-container').list().some(pageItem => pageItem.id === 'chat-records'),
+    ctx.inject('settings-container').list().map(pageItem => pageItem.id).join(','),
+  )
+
+  const diagnostics = document.getElementById('wind-diag')
+  check('诊断元素存在', !!diagnostics)
+  check('诊断 error 为空', diagnostics?.dataset.errors === '[]', diagnostics?.dataset.errors)
+  check('语义冲突检测已运行', typeof loader.warnings.length === 'number')
+
+  section('③b 外部插件目录')
+  const externalRoot = join(ROOT, '.tmp', `smoke-plugins-${Date.now()}`)
+  await mkdir(join(externalRoot, 'views', 'smoke-external'), { recursive: true })
+  await writeFile(
+    join(externalRoot, 'views', 'smoke-external', 'index.mjs'),
+    [
+      "export const name = 'smoke-external'",
+      "export const version = '1.0.0'",
+      "export const displayName = '冒烟外部插件'",
+      "export const description = '验证外部插件目录'",
+      'export const core = false',
+      'export const inject = []',
+      "export function apply(ctx) { ctx.provide('smokeExternalService', { name: 'smoke-external', ready: true }) }",
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  const setDirRes = await fetch(`${backend.url}/api/plugins/dirs`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dir: externalRoot }),
+  })
+  check('外部插件目录可通过 API 指定', setDirRes.ok, `HTTP ${setDirRes.status}`)
+  const extList = await (await fetch(`${backend.url}/api/plugins`)).json()
+  const extEntry = extList.plugins.find(item => item.id === 'smoke-external')
+  check('后端清单包含外部插件', !!extEntry && extEntry.external === true && extList.externalCount >= 1)
+  const extFileRes = await fetch(`${backend.url}${extEntry.path}`)
+  const extFileText = await extFileRes.text()
+  check('外部插件模块可通过 /user-plugins 访问', extFileRes.ok && extFileText.includes('smoke-external'))
+  const { App } = await import('../src/runtime/app.mjs')
+  const extApp = new App({ baseUrl: new URL('../', import.meta.url) })
+  await extApp.loadAll([{ ...extEntry, path: pathToFileURL(join(externalRoot, 'views', 'smoke-external', 'index.mjs')).href, external: true }], {})
+  const extRecord = extApp.records.get('smoke-external')
+  check(
+    '外部插件可被前端运行时加载并激活',
+    extRecord?.status === 'active' && extRecord?.manifest?.external === true && extApp.services.has('smokeExternalService'),
+    extRecord?.reason || '',
+  )
+  const removeRes = await fetch(`${backend.url}/api/plugins/external/smoke-external`, { method: 'DELETE' })
+  check('外部插件删除接口生效', removeRes.ok, `HTTP ${removeRes.status}`)
+  await fetch(`${backend.url}/api/plugins/dirs`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dir: '' }),
+  })
+  await rm(externalRoot, { recursive: true, force: true })
+  check(
+    '插件目录恢复默认后不再包含测试插件',
+    !(await (await fetch(`${backend.url}/api/plugins`)).json()).plugins.some(item => item.id === 'smoke-external'),
+  )
+  section('④ 事件总线')
+  let hits = 0
+  const off = ctx.on('smoke:ping', () => hits++)
+  ctx.emit('smoke:ping', {})
+  check('ctx.on / emit 正常', hits === 1)
+  off()
+
+  let intercepted = null
+  ctx.on('smoke:intercept', payload => ({ ...payload, extra: true }), { owner: 'smoke' })
+  ctx.emit('smoke:intercept', { value: 1 }, { interceptor: true, onIntercept: next => (intercepted = next) })
+  check('拦截型事件可修改 payload', intercepted?.extra === true)
+
+  // 开启事件追踪后再 emit：历史实现会在 cordis 代理上访问 ctx.id 而抛错，
+  // 这里保证调试工具 __wind_debug.trace(true) 是可用的。
+  const traced = []
+  const previousTrace = loader.trace
+  loader.trace = (phase, name, payload, owner) => traced.push({ phase, name, owner })
+  let traceEmitOk = true
+  try {
+    ctx.emit('smoke:trace', { ok: true })
+  } catch (_) {
+    traceEmitOk = false
+  }
+  loader.trace = previousTrace
+  check('开启事件追踪后 emit 仍然安全', traceEmitOk && traced.some(item => item.name === 'smoke:trace'), JSON.stringify(traced.slice(-3)))
+
+  section('⑤ 聊天闭环（真实后端 + SSE）')
+  const sessions = ctx.inject('session-service')
+  const messages = ctx.inject('message-service')
+  const conv = sessions.create({ name: '冒烟测试会话' })
+  sessions.activate(conv.id)
+  const before = sessions.messages(conv.id).length
+  const sent = messages.requestSend(conv.id, '你好，请回复一段测试文本')
+  check('message:send 已广播', !!sent?.conversationId)
+
+  const done = await waitFor(() => {
+    const last = sessions.messages(conv.id).at(-1)
+    return last && last.role === 'assistant' && !last.streaming && last.content ? last : null
+  }, { timeout: 8000 })
+
+  check('助手回复完成（经后端 SSE 流式）', !!done, '8 秒内未收到 message:done')
+  check('回复内容来自后端适配器', (done?.content || '').includes('本地后端'), (done?.content || '').slice(0, 40))
+  check('消息数量增加 ≥ 2', sessions.messages(conv.id).length >= before + 2, `${before} → ${sessions.messages(conv.id).length}`)
+  const statusAdvanced = await waitFor(
+    () => sessions.messages(conv.id).find(m => m.role === 'user' && (m.status === 'read' || m.status === 'delivered')),
+    { timeout: 3000 },
+  )
+  check('用户消息状态机推进（delivered/read）', !!statusAdvanced, '3 秒内状态未推进')
+  check('气泡渲染包含助手回复', document.querySelectorAll('.msg-row').length >= 2 && !!document.querySelector('.msg-row:not(.right) .bubble'))
+  check('会话已写回后端', await waitFor(async () => {
+    const payload = await backend.ctx.sessions.list()
+    return payload.some(c => c.id === conv.id && c.messages.length >= 2)
+  }, { timeout: 3000 }))
+
+  section('⑤b 收尾项：头像 / 语言包 / 通知')
+  const config = ctx.inject('config')
+  const scrollEl = document.getElementById('msgScroll')
+  const scrollHtml = () => String(scrollEl?.innerHTML || '')
+  check('用户消息头像默认使用风语 logo', scrollHtml().includes('public/assets/logo.png'))
+  config.set('ui.avatarImage', 'data:image/png;base64,SMOKE')
+  await sleep(80)
+  check('更换头像后消息头像同步更新', scrollHtml().includes('data:image/png;base64,SMOKE'))
+  config.set('ui.avatarImage', '')
+  await sleep(80)
+  check('清除头像后恢复风语 logo', scrollHtml().includes('public/assets/logo.png'))
+
+  const i18n = ctx.inject('i18n')
+  const localePacks = i18n.locales()
+  check('默认只安装简体中文语言包', localePacks.length === 1 && localePacks[0].id === 'zh-CN', JSON.stringify(localePacks))
+  check('未安装的语种不会被切换（i18n 切换真实生效）', i18n.setLocale('en') === false && i18n.locale() === 'zh-CN')
+
+  const notifConv = sessions.create({ name: '通知测试会话' })
+  // 保持当前会话仍是 conv，模拟“不在该会话”时收到角色消息
+  sessions.activate(conv.id)
+  messages.add(notifConv.id, { role: 'assistant', content: '通知测试：来自另一个会话的消息' })
+  await sleep(120)
+  const notifCards = document.querySelectorAll('.notify-card.notify-kind-character')
+  check('非当前会话的角色消息会生成通知', notifCards.length >= 1)
+  check(
+    '角色通知包含头像 / 角色名 / 内容预览',
+    !!notifCards[0]?.querySelector('.notify-avatar') &&
+      notifCards[0]?.querySelector('.notify-title')?.textContent === '通知测试会话' &&
+      (notifCards[0]?.querySelector('.notify-desc')?.textContent || '').includes('通知测试'),
+  )
+  ctx.inject('notification').clear?.()
+  sessions.remove(notifConv.id)
+  sessions.activate(conv.id)
+  await sleep(40)
+
+  const clearConv = sessions.create({ name: '清空消息测试' })
+  sessions.activate(clearConv.id)
+  messages.add(clearConv.id, { role: 'user', content: '待清空' })
+  await sleep(50)
+  check('清空前消息已渲染', document.querySelectorAll('.msg-row').length >= 1)
+  sessions.clearMessages(clearConv.id)
+  await sleep(60)
+  check('清空消息后会话与界面同步清空', sessions.messages(clearConv.id).length === 0 && document.querySelectorAll('.msg-row').length === 0)
+  sessions.remove(clearConv.id)
+  sessions.activate(conv.id)
+  await sleep(30)
+
+  section('⑥ 视图切换')
+  const router = ctx.inject('view-router')
+  router.switch('channel')
+  await sleep(60)
+  const channelListVisible = document.querySelector('#mainPanel .main-view[data-view="channel"]')?.style.display !== 'none'
+  const chatHidden = document.querySelector('#mainPanel .main-view[data-view="chat"]')?.style.display === 'none'
+  check('切到渠道视图', router.active() === 'channel' && channelListVisible)
+  check('会话主视图被隐藏', chatHidden)
+  check('渠道列表渲染出分组', document.querySelectorAll('#groupsContainer .group').length >= 1)
+
+  const channelRegistry = ctx.inject('channel-registry')
+  check('未实现渠道路径被明确标注', channelRegistry.plannedList().length >= 3, channelRegistry.plannedList().map(p => p.type).join(','))
+  check('没有注册任何"假渠道类型"', channelRegistry.typeList().length === 0, channelRegistry.typeList().map(t => t.id).join(','))
+  const group = channelRegistry.groups('private')[0]
+  const channel = channelRegistry.addChannel('private', group.id, { type: 'custom', name: '测试渠道' })
+  channelRegistry.activate('private', channel.id)
+  await sleep(80)
+  check('激活渠道后详情渲染', document.querySelector('.channel-detail')?.textContent.includes('测试渠道'), document.querySelector('.channel-detail')?.textContent?.slice(0, 60))
+  check('渠道视图有 1 个真实渠道（非种子数据）', channelRegistry.channels('private').length === 1)
+
+  router.switch('chat')
+  await sleep(60)
+  check('切回会话视图', router.active() === 'chat' && router.getWidth('chat') >= 68)
+
+  // 视图注册也是注册型服务：注销时必须清理左右面板挂载，并把 active 回退到可用视图
+  const tempViewDispose = router.register('smoke-temp-view', {
+    label: '临时视图',
+    icon: '',
+    order: 999,
+    rail: false,
+    list(container) {
+      container.innerHTML = '<div id="smokeTempList"></div>'
+    },
+    main(container) {
+      container.innerHTML = '<div id="smokeTempMain"></div>'
+    },
+  })
+  router.switch('smoke-temp-view')
+  await sleep(40)
+  check('临时注册的视图能挂载到左右面板', !!document.getElementById('smokeTempList') && !!document.getElementById('smokeTempMain'))
+  tempViewDispose()
+  await sleep(40)
+  check(
+    '视图注销后挂载被清理且 active 自动回退',
+    !router.has('smoke-temp-view') && router.active() !== 'smoke-temp-view' && !document.getElementById('smokeTempMain'),
+    String(router.active()),
+  )
+
+  section('⑦ 可选中服务与运行时启停')
+  const bubbles = ctx.inject('bubble-styles')
+  check('默认气泡已注册', bubbles.getActiveId() === 'bubble-default')
+  check('气泡实现列表只有默认实现（精简后）', bubbles.list().length === 1, bubbles.list().map(b => b.id).join(','))
+
+  const manager = ctx.inject('plugin-manager')
+  const disabledOk = await manager.disable('tooltip-host')
+  await sleep(80)
+  const tooltipRecord = loader.get('tooltip-host')
+  check('运行时禁用插件成功', disabledOk && tooltipRecord.status === 'disabled' && !ctx.registry.get('tooltip'))
+  const enabledOk = await manager.enable('tooltip-host')
+  await sleep(80)
+  check('运行时重新启用插件成功', enabledOk && loader.get('tooltip-host').status === 'active' && !!ctx.registry.get('tooltip'))
+
+  // 卸载不是“删了就找不回来”：记录保留 removed 标记，插件页提供恢复入口
+  const uninstallPromise = manager.uninstall('tooltip-host')
+  await sleep(30)
+  document.querySelector('#modalOk')?.click()
+  await uninstallPromise
+  await sleep(80)
+  check(
+    '卸载后标记 removed 并从正常列表移除',
+    manager.describe('tooltip-host')?.removed === true && !manager.list().some(p => p.id === 'tooltip-host'),
+  )
+  const restoreOk = await manager.restore('tooltip-host')
+  await sleep(80)
+  check(
+    '卸载后的插件可以恢复运行',
+    restoreOk && manager.describe('tooltip-host')?.removed === false && loader.get('tooltip-host').status === 'active',
+  )
+  // 卸载状态必须能在插件页里看到，并直接点「恢复」回来
+  const pluginPages = ctx.inject('settings-container')
+  const removeAgain = manager.uninstall('tooltip-host')
+  await sleep(30)
+  document.querySelector('#modalOk')?.click()
+  await removeAgain
+  await sleep(80)
+  pluginPages.open('plugins')
+  await sleep(50)
+  const restoreButton = document.querySelector('[data-plugin-action="restore"][data-plugin-id="tooltip-host"]')
+  check('插件页为已卸载插件渲染恢复按钮', !!restoreButton)
+  restoreButton?.click()
+  await sleep(120)
+  check(
+    '点击恢复按钮后插件重新运行',
+    manager.describe('tooltip-host')?.removed === false && loader.get('tooltip-host').status === 'active',
+  )
+
+  // 注册型服务同样要随插件卸载一起释放，否则重新启用会出现残留/重复/注册冲突
+  await manager.disable('settings-item-data')
+  await sleep(80)
+  check('禁用设置项后注册页被移除', !pluginPages.list().some(page => page.id === 'data'))
+  await manager.enable('settings-item-data')
+  await sleep(80)
+  check('重新启用设置项后注册页恢复', pluginPages.list().some(page => page.id === 'data'))
+
+  await manager.disable('global-search')
+  await sleep(80)
+  check('禁用全局搜索后侧栏入口与浮层一起移除', !document.getElementById('globalSearchBtn'))
+  await manager.enable('global-search')
+  await sleep(120)
+  check(
+    '重新启用全局搜索不产生重复入口',
+    document.querySelectorAll('#globalSearchBtn').length === 1 && !!ctx.inject('global-search'),
+  )
+
+  section('⑧ 主题 / 背景可选中服务')
+  const theme = ctx.inject('theme')
+  theme.select('dark')
+  await sleep(50)
+  check('切换到深色主题', document.documentElement.dataset.theme === 'dark')
+  theme.select('light')
+  await sleep(50)
+  check('切回浅色主题', document.documentElement.dataset.theme === 'light')
+  const bg = ctx.inject('bg-provider')
+  bg.select('bg-solid')
+  await sleep(50)
+  check('切换到纯色背景', !!document.querySelector('.bg-solid-inner'))
+  bg.select('bg-aurora')
+  await sleep(50)
+  check('切回绿雾背景', bg.active() === 'bg-aurora' && !!document.querySelector('.bg-aurora'))
+
+  // selectable 服务：禁用当前实现后 activeId 会临时落到别的实现上；
+  // 重新启用同一个实现时必须自动切回来，而不是等刷新。
+  await manager.disable('bg-aurora')
+  await sleep(100)
+  check('禁用绿雾背景后立即回退其它实现', bg.active() !== 'bg-aurora' && !document.querySelector('.bg-aurora'))
+  await manager.enable('bg-aurora')
+  await sleep(150)
+  check(
+    '重新启用绿雾背景后无需刷新即恢复',
+    bg.active() === 'bg-aurora' && !!document.querySelector('.bg-aurora'),
+    String(bg.active()),
+  )
+
+  section('⑨ 渠道消息闭环')
+  const convCount = sessions.count()
+  ctx.emit('channel:message', {
+    channelId: channel.id,
+    channel,
+    message: { role: 'user', content: '来自测试渠道的问候' },
+  })
+  await sleep(200)
+  check(
+    '渠道消息落库为会话',
+    sessions.count() === convCount + 1 && sessions.list().some(c => c.preview?.includes('测试渠道的问候')),
+    `会话数 ${sessions.count()}`,
+  )
+
+  section('⑩ 设置页全量渲染')
+  const settingsView = ctx.inject('settings-view')
+  const settingsContainer = ctx.inject('settings-container')
+  settingsView.open('account')
+  await sleep(60)
+  check('设置页已打开', settingsView.isOpen())
+  check('设置导航已渲染', document.querySelectorAll('.settings-nav-item').length >= 10, `实际 ${document.querySelectorAll('.settings-nav-item').length}`)
+  const pages = settingsContainer.list()
+  check('设置页注册数量 ≥ 11', pages.length >= 11, `实际 ${pages.length}`)
+
+  const pageErrors = []
+  for (const page of pages) {
+    settingsContainer.open(page.id)
+    await sleep(20)
+    const content = document.querySelector('#settingsContent') || document.querySelector('.settings-content')
+    const html = content?.innerHTML || ''
+    if (html.length < 80) pageErrors.push(`${page.id} 内容为空`)
+    if (html.includes('页面渲染失败')) pageErrors.push(`${page.id} 渲染失败`)
+  }
+  check('所有设置页渲染成功', pageErrors.length === 0, pageErrors.join(' | '))
+  settingsContainer.open('appearance')
+  await sleep(60)
+  const appearanceNames = []
+  document.querySelectorAll('.settings-content .setting-name').forEach(el => appearanceNames.push(String(el.textContent)))
+  check(
+    '外观页背景使用正式名称',
+    appearanceNames.includes('绿雾背景') && appearanceNames.includes('纯色背景') && appearanceNames.includes('自定义背景图'),
+    appearanceNames.join(','),
+  )
+  check('外观页气泡使用正式名称', appearanceNames.includes('默认气泡'), appearanceNames.join(','))
+  check('外观页不再把内部 id 当作名称', !appearanceNames.some(name => /^(bg-|bubble-|theme-)/.test(name)), appearanceNames.join(','))
+  settingsContainer.open('plugins')
+  await sleep(150)
+  check('插件页显示外部插件目录设置', !!document.querySelector('#pluginDirInput'))
+  const dirsText = String(document.querySelector('#pluginDirsContainer')?.textContent || '')
+  check('插件页说明内置与外部插件目录', dirsText.includes('内置插件目录') && dirsText.includes('外部插件目录'), dirsText.slice(0, 120))
+  check('插件页渲染出插件条目', (() => {
+    settingsContainer.open('plugins')
+    return document.querySelectorAll('#pluginListContainer .plugin-item').length >= 20
+  })(), `实际 ${document.querySelectorAll('#pluginListContainer .plugin-item').length}`)
+  settingsContainer.open('model')
+  await sleep(80)
+  const modelContent = document.querySelector('.settings-content')
+  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用风语内置模型'))
+  const builtinToggle = document.querySelector('.settings-content [data-action="toggle-builtin"]')
+  check('内置模型开关默认开启', !!builtinToggle && builtinToggle.classList.contains('on'))
+  check('当前生效有模型选择按钮', !!document.querySelector('.settings-content [data-active-model]'))
+  check('内置模型展示官方服务未接入空状态', (modelContent?.textContent || '').includes('官方服务尚未接入'))
+  const reasoningSlider = document.querySelector('.settings-content [data-slider="reasoning"]')
+  const temperatureSlider = document.querySelector('.settings-content [data-slider="temperature"]')
+  check('推理等级是独立滑块', !!reasoningSlider && !!reasoningSlider.querySelector('input[type="range"]'))
+  check('temperature 是独立滑块', !!temperatureSlider && !!temperatureSlider.querySelector('input[type="range"]'))
+  const reasoningRange = reasoningSlider?.querySelector('input[type="range"]')
+  const temperatureRange = temperatureSlider?.querySelector('input[type="range"]')
+  if (reasoningRange) {
+    reasoningRange.value = '3'
+    reasoningRange.dispatchEvent({ type: 'change' })
+  }
+  await sleep(30)
+  check('推理等级写入 max', ctx.inject('config').get('chat.reasoningEffort') === 'max', String(ctx.inject('config').get('chat.reasoningEffort')))
+  check('推理等级不改变 temperature', Number(ctx.inject('config').get('chat.temperature')) === 1)
+  if (temperatureRange) {
+    temperatureRange.value = '1.7'
+    temperatureRange.dispatchEvent({ type: 'change' })
+  }
+  await sleep(30)
+  check('temperature 支持 0-2 连续值', Number(ctx.inject('config').get('chat.temperature')) === 1.7, String(ctx.inject('config').get('chat.temperature')))
+  check('temperature 不改变推理等级', ctx.inject('config').get('chat.reasoningEffort') === 'max')
+  // 恢复默认，避免影响后续对话测试
+  ctx.inject('config').set('chat.reasoningEffort', 'off')
+  ctx.inject('config').set('chat.temperature', 1)
+  builtinToggle?.click()
+  await waitFor(() => document.querySelector('.settings-content .model-provider-layout'), { timeout: 3000 })
+  check('关闭开关后切换为自定义提供商面板', !!document.querySelector('.settings-content .model-provider-layout'))
+  check(
+    '自定义提供商面板能看到后端提供商',
+    (document.querySelector('.settings-content')?.textContent || '').includes('Smoke Provider'),
+    '未找到 Smoke Provider',
+  )
+  const smokeItem = [...document.querySelectorAll('.settings-content [data-provider-id]')].find(el => el.dataset.providerId === 'smoke')
+  check('提供商列表出现 smoke', !!smokeItem)
+  smokeItem?.click()
+  await sleep(40)
+  check('提供商详情显示 Base URL', (document.querySelector('.settings-content')?.textContent || '').includes('smoke://local'))
+  check('提供商详情展示模型列表', (document.querySelector('.settings-content')?.textContent || '').includes('Smoke Model'))
+  check('提供商详情有新增自定义模型入口', !!document.querySelector('.settings-content [data-action="add-model"]'))
+
+  // 提供商启用开关（曾经是只有 data-toggle 没有绑定事件，点了没反应）
+  document.querySelector('.settings-content [data-action="toggle-provider-enabled"]')?.click()
+  const providerDisabledViaUi = await waitFor(() => backend.ctx.settings.get().providers.smoke?.enabled === false, { timeout: 3000 })
+  check('提供商启用开关可写回后端（禁用）', !!providerDisabledViaUi)
+  document.querySelector('.settings-content [data-action="toggle-provider-enabled"]')?.click()
+  const providerEnabledViaUi = await waitFor(() => backend.ctx.settings.get().providers.smoke?.enabled !== false, { timeout: 3000 })
+  check('提供商启用开关可写回后端（恢复）', !!providerEnabledViaUi)
+
+  // 自定义提供商 / 模型 CRUD（真实后端写盘 + 真实 DOM 事件）
+  const setField = (selector, value) => {
+    const el = document.querySelector(`.settings-content ${selector}`)
+    if (el) el.value = value
+  }
+  document.querySelector('.settings-content [data-action="new-provider"]')?.click()
+  await sleep(20)
+  setField('[data-create="id"]', 'smoke-ui')
+  setField('[data-create="name"]', 'Smoke UI Provider')
+  setField('[data-create="baseURL"]', 'http://127.0.0.1:9/v1')
+  document.querySelector('.settings-content [data-action="create-provider"]')?.click()
+  const uiProviderCreated = await waitFor(() => backend.ctx.settings.get().providers['smoke-ui'] && !backend.ctx.settings.get().providers['smoke-ui'].deleted, { timeout: 3000 })
+  check('可通过界面创建提供商', !!uiProviderCreated)
+  const uiProviderSelected = await waitFor(() => {
+    const el = document.querySelector('.settings-content [data-provider-id="smoke-ui"]')
+    return el && el.classList.contains('active')
+  }, { timeout: 3000 })
+  check('新建提供商后自动选中', !!uiProviderSelected, '新提供商没有选中')
+  document.querySelector('.settings-content [data-action="add-model"]')?.click()
+  await sleep(20)
+  setField('[data-new-model="id"]', 'smoke-ui-model')
+  setField('[data-new-model="name"]', 'Smoke UI Model')
+  document.querySelector('.settings-content [data-action="confirm-add-model"]')?.click()
+  const uiModelCreated = await waitFor(
+    () => backend.ctx.settings.get().providers['smoke-ui']?.models?.some(m => m.id === 'smoke-ui-model'),
+    { timeout: 3000 },
+  )
+  check('可通过界面添加自定义模型', !!uiModelCreated)
+  check('提供商列表项自带删除按钮', !!document.querySelector('.settings-content [data-provider-delete="smoke-ui"]'))
+  document.querySelector('.settings-content [data-provider-delete="smoke-ui"]')?.click()
+  await sleep(20)
+  document.querySelector('#modalOk')?.click()
+  const uiProviderDeleted = await waitFor(() => backend.ctx.settings.get().providers['smoke-ui']?.deleted === true, { timeout: 3000 })
+  check('可通过界面删除提供商', !!uiProviderDeleted)
+
+  // 恢复默认的内置模型开关，避免影响后续测试
+  document.querySelector('.settings-content [data-action="toggle-builtin"]')?.click()
+  await sleep(30)
+  check('可以切回内置模型面板', (document.querySelector('.settings-content')?.textContent || '').includes('官方服务尚未接入'))
+
+  settingsContainer.open('data')
+  await sleep(120)
+  const dataText = document.querySelector('.settings-content')?.textContent || ''
+  check('数据页有数据目录设置', dataText.includes('当前数据目录') && dataText.includes('user_data'))
+  check('数据页有输入框风格的路径与选择目录按钮', !!document.querySelector('[data-field="data-dir"]') && !!document.querySelector('[data-action="pick-dir"]'))
+  check('数据页有导出 / 同步 / 清空操作', dataText.includes('导出全部会话') && dataText.includes('从后端重新同步') && dataText.includes('清空所有会话'))
+
+  settingsContainer.open('network')
+  await sleep(120)
+  check('网络页可编辑全局代理', !!document.querySelector('.settings-content [data-field="proxy"]') && !!document.querySelector('.settings-content [data-action="save-network"]'))
+  check('网络页可编辑后端地址', !!document.querySelector('.settings-content [data-field="backend-url"]'))
+
+  settingsContainer.open('appearance')
+  await sleep(30)
+  check('外观页能看到气泡区块', !!document.querySelector('[data-bubble-section]'))
+  check('外观页能看到背景区块', !!document.querySelector('[data-bg="bg-solid"]'))
+  check('外观页有自定义背景图入口', !!document.querySelector('[data-bg-upload]'))
+  check(
+    '背景图片使用自定义文件选择器而不是原生控件',
+    !!document.querySelector('.file-picker [data-bg-upload]') && !document.querySelector('.settings-content input.setting-input[type="file"]'),
+  )
+  const glassRange = document.querySelector('[data-glass-panel="chat-list"][data-glass-prop="alpha"]')
+  check('外观页有每块玻璃板的完整属性滑块', !!glassRange && document.querySelectorAll('[data-glass-panel]').length >= 35, `实际 ${document.querySelectorAll('[data-glass-panel]').length}`)
+  if (glassRange) {
+    glassRange.value = '30'
+    glassRange.dispatchEvent({ type: 'change' })
+  }
+  await sleep(40)
+  check('玻璃板透明度写入 config', Number(ctx.inject('config').get('ui.glass.chatList.alpha')).toFixed(2) === '0.30', String(ctx.inject('config').get('ui.glass.chatList.alpha')))
+  check(
+    '玻璃板透明度映射为对应 CSS 变量',
+    document.documentElement.style.getPropertyValue('--glass-chat-list-alpha') === '0.3',
+    document.documentElement.style.getPropertyValue('--glass-chat-list-alpha'),
+  )
+  ctx.inject('config').set('ui.glass.chatList.blur', 4)
+  document.querySelector('[data-glass-reset="all"]')?.click()
+  await sleep(60)
+  check(
+    '恢复默认会重置全部玻璃板参数',
+    Number(ctx.inject('config').get('ui.glass.chatList.alpha')).toFixed(2) === '0.55' &&
+      Number(ctx.inject('config').get('ui.glass.chatList.blur')) === 22,
+    JSON.stringify(ctx.inject('config').get('ui.glass.chatList')),
+  )
+  settingsView.close()
+  await sleep(20)
+  check('设置页可关闭', !settingsView.isOpen())
+
+  section('⑩b 捏人窗口与插件权限')
+  const characterSessions = ctx.inject('session-service')
+  const charCountBefore = characterSessions.count()
+  document.getElementById('newConvBtn')?.click()
+  await waitFor(() => document.querySelector('.char-dialog'), { timeout: 2000 })
+  check('新建会话弹出捏人窗口', !!document.querySelector('.char-dialog'))
+  const nameField = document.querySelector('.char-name')
+  if (nameField) nameField.value = '冒烟角色'
+  const personaField = document.querySelector('.char-persona')
+  if (personaField) personaField.value = '你是冒烟测试人格，请简短回答。'
+  document.querySelector('[data-char-save]')?.click()
+  const characterConv = await waitFor(
+    () => characterSessions.list().find(item => item.name === '冒烟角色'),
+    { timeout: 3000 },
+  )
+  check(
+    '捏人窗口创建会话并写入人格',
+    characterSessions.count() === charCountBefore + 1 && characterConv?.meta?.persona?.includes('冒烟测试人格'),
+    JSON.stringify(characterConv?.meta),
+  )
+  check('角色模型默认可跟随全局', !characterConv?.meta?.model)
+
+  document.getElementById('chatMoreBtn')?.click()
+  await sleep(40)
+  const editRoleItem = [...document.querySelectorAll('.context-menu .menu-item')].find(el => (el.textContent || '').includes('编辑角色'))
+  check('会话头部菜单有「编辑角色」', !!editRoleItem)
+  check('会话头部菜单已分组', document.querySelectorAll('.context-menu .menu-group').length >= 3)
+  check('会话列表有删除按钮', !!document.querySelector('[data-conv-delete]'))
+  editRoleItem?.click()
+  const editDialog = await waitFor(() => document.querySelector('.char-dialog'), { timeout: 2000 })
+  const personaShown = editDialog?.querySelector('.char-persona')
+  check('编辑窗口带出原人格', String(personaShown?.value || personaShown?.textContent || '').includes('冒烟测试人格'))
+  document.querySelector('[data-char-cancel]')?.click()
+  check('角色编辑窗口可关闭', !document.querySelector('.char-dialog'))
+
+  // 验证 chat-flow 真的把人设与生成参数传给了 model-service
+  const modelService = ctx.inject('model-service')
+  const originalStream = modelService.stream
+  let captured = null
+  modelService.stream = function (modelMessages, options, callbacks) {
+    captured = { messages: JSON.parse(JSON.stringify(modelMessages)), options: { ...options } }
+    return originalStream.call(this, modelMessages, options, callbacks)
+  }
+  messages.requestSend(characterConv.id, '验证人设注入')
+  await waitFor(() => captured, { timeout: 3000 })
+  modelService.stream = originalStream
+  await sleep(200)
+  check(
+    'chat-flow 注入人设 system 段落',
+    captured?.messages?.[0]?.role === 'system' && captured.messages[0].content.includes('冒烟测试人格'),
+    JSON.stringify(captured?.messages?.[0] || null),
+  )
+  check(
+    'chat-flow 传递独立的推理等级与 temperature',
+    captured?.options?.reasoningEffort === 'off' && Number(captured?.options?.temperature) === 1,
+    JSON.stringify(captured?.options || {}),
+  )
+
+  // 停止生成：stub 一个永不结束的流，验证 composer 停止按钮与 chat-flow.abort
+  await waitFor(() => !ctx.inject('chat-flow')?.isRunning(characterConv.id), { timeout: 3000 })
+  let abortCalled = false
+  modelService.stream = function (modelMessages, options, callbacks) {
+    callbacks.onStart?.({})
+    return {
+      abort() {
+        abortCalled = true
+      },
+    }
+  }
+  messages.requestSend(characterConv.id, '测试停止生成')
+  const stopButton = document.getElementById('stopBtn')
+  const stopShown = !!stopButton && stopButton.classList.contains('show')
+  stopButton?.click()
+  await sleep(60)
+  modelService.stream = originalStream
+  const cancelledMessage = [...sessions.messages(characterConv.id)].reverse().find(item => item.role === 'assistant')
+  check('生成过程中出现停止按钮', stopShown)
+  check('停止生成会取消请求并结束占位消息', abortCalled && cancelledMessage?.error === '请求已取消', JSON.stringify(cancelledMessage || null))
+
+  const permissions = ctx.inject('permissions')
+  check('权限预设有三个', permissions.presets().length === 3)
+  const fakeApi = { health: () => 'ok', baseUrl: () => '/api' }
+  const guardedApi = permissions.guardService(
+    { name: 'settings-item-network', displayName: '网络', core: false, permissions: ['network'] },
+    'api',
+    fakeApi,
+  )
+  check('已声明权限的插件拿到活代理', guardedApi !== fakeApi)
+  permissions.setPreset('read-only')
+  let denied = false
+  try {
+    guardedApi.health()
+  } catch (err) {
+    denied = err.code === 'PLUGIN_PERMISSION_DENIED'
+  }
+  check('只读预设拒绝非核心插件 network', denied && permissions.isGranted('settings-item-network', 'network') === false)
+  check('core 插件权限豁免', permissions.isGranted('chat-flow', 'network') === true)
+  permissions.setPreset('standard')
+  check('改回标准预设立即恢复', guardedApi.health() === 'ok' && permissions.isGranted('settings-item-network', 'network') === true)
+
+  section('⑪ 搜索 / 导出 / 日志')
+  const search = ctx.inject('search-service')
+  const result = search.search('冒烟测试')
+  check('搜索能命中会话', result.total > 0 && !!result.groups.conversation, JSON.stringify(Object.keys(result.groups)))
+  check('搜索能命中插件', search.search('bubble').total > 0)
+  const exportService = ctx.inject('export-service')
+  const md = exportService.toMarkdown(sessions.get(conv.id))
+  check('导出 Markdown 内容正常', md.includes('# 冒烟测试会话') && md.includes('本地后端'))
+  const allHtml = exportService.toAllHtml(sessions.list())
+  check(
+    '导出全部会话 HTML 保留每个会话标题',
+    allHtml.includes('冒烟测试会话') && allHtml.includes('冒烟角色') && allHtml.includes('conv-block'),
+    allHtml.slice(0, 120),
+  )
+  check('导出 JSON 数据完整', JSON.stringify(sessions.list()).length > 500)
+  check('日志服务有历史记录', ctx.inject('logs').history().length > 5)
+
+  // 搜索结果必须能“真正打开”目标，而不只是让 UI 看起来变了
+  const conversationHit = result.groups.conversation?.[0]
+  sessions.activate(null)
+  search.run(conversationHit)
+  await sleep(30)
+  check('搜索会话结果会真正激活会话', !!conversationHit && sessions.activeId() === conversationHit.id, String(sessions.activeId()))
+  const channelHit = search.search('测试渠道').groups.channel?.[0]
+  channelRegistry.activate(null)
+  search.run(channelHit)
+  await sleep(30)
+  check(
+    '搜索渠道结果会真正激活渠道',
+    !!channelHit && channelRegistry.activeKey() === `private:${channelHit.id}`,
+    String(channelRegistry.activeKey()),
+  )
+
+  // Markdown 代码块（曾经会被二次转义成 &lt;pre&gt; 纯文本）
+  const markdownHtml = ctx.inject('markdown').render('before\n\n```js\nconst a = 1 < 2 && "x"\n```\n\nafter **bold**')
+  check(
+    'Markdown 代码块渲染为 pre，而不是被转义的文本',
+    markdownHtml.includes('<pre class="code md-code"') && markdownHtml.includes('<strong>bold</strong>') && !markdownHtml.includes('&lt;pre'),
+    markdownHtml.slice(0, 120),
+  )
+
+  section('⑫ 样式完整性')
+  const styles = document.head.children.filter(c => c.nodeName === 'STYLE')
+  check('各插件样式均已注入（≥ 15 个）', styles.length >= 15, `实际 ${styles.length}`)
+  const pluginNames = new Set(styles.map(s => s.getAttribute('data-plugin')))
+  for (const name of ['app-shell', 'theme-tokens', 'session-list', 'channel-list', 'settings-item-plugins', 'bubble-default', 'composer']) {
+    check(`样式来自插件 ${name}`, pluginNames.has(name))
+  }
+  const sessionStyleText = styles.find(s => s.getAttribute('data-plugin') === 'session-list')?.textContent || ''
+  check('紧凑模式会隐藏会话行删除按钮（避免压住头像）', sessionStyleText.includes('.list-pane.compact .conv-del'))
+  check('全局搜索插件已注入样式', pluginNames.has('global-search'))
+
+  const globalSearch = ctx.inject('global-search')
+  check('侧栏有全局搜索入口', !!document.getElementById('globalSearchBtn'))
+  globalSearch.open()
+  await sleep(20)
+  const globalSearchInput = document.getElementById('globalSearchInput')
+  if (globalSearchInput) {
+    globalSearchInput.value = '冒烟测试'
+    globalSearchInput.dispatchEvent({ type: 'input' })
+  }
+  await sleep(180)
+  check('全局搜索能渲染分组结果', document.querySelectorAll('.gsearch-item').length >= 1, `实际 ${document.querySelectorAll('.gsearch-item').length}`)
+  document.querySelector('.gsearch-item')?.click()
+  await sleep(30)
+  check('点击搜索结果后搜索浮层会关闭', !document.querySelector('.gsearch-mask.show'))
+
+  section('⑬ 交互组件')
+  const toast = ctx.inject('toast')
+  const menu = ctx.inject('context-menu')
+  const modal = ctx.inject('modal')
+  toast.success('冒烟测试提示')
+  await sleep(30)
+  check('toast 能渲染', !!document.querySelector('.toast-wrap .toast-success'))
+  menu.open(100, 100, [{ label: '测试项', action() {} }, { separator: true }, { label: '禁用项', disabled: true }])
+  check('右键菜单能渲染', document.querySelectorAll('.context-menu .menu-item').length === 2 && !!document.querySelector('.context-menu.show'))
+  menu.close()
+  const opened = modal.open({ title: '测试弹窗', description: '描述', input: true, value: 'abc', requireValue: true })
+  await sleep(20)
+  check('弹窗能渲染', !!document.querySelector('#modalMask.show') && document.querySelector('#modalTitle').textContent === '测试弹窗')
+  document.querySelector('#modalCancel').click()
+  check('弹窗取消正常返回', (await opened).ok === false)
+  const shortcuts = ctx.inject('shortcuts')
+  const shortcutList = shortcuts.list().map(s => s.combo)
+  check('快捷键已注册（Ctrl+K / Ctrl+N）', shortcutList.includes('Ctrl+K') && shortcutList.includes('Ctrl+N'), shortcutList.join(','))
+  check(
+    '全局搜索 / 视图切换快捷键已注册',
+    shortcutList.includes('Ctrl+Shift+F') && shortcutList.includes('Ctrl+1'),
+    shortcutList.join(','),
+  )
+  ctx.inject('notification').notify({ title: '通知测试', body: '正文', level: 'info' })
+  await sleep(20)
+  check('通知中心渲染通知卡片', !!document.querySelector('.notify-center .notify-card'))
+  ctx.inject('notification').clear?.()
+
+  section('⑬b 插件自检与错误高亮')
+  const pagesApi = ctx.inject('settings-container')
+  pagesApi.open('plugins')
+  await sleep(60)
+  const healthyIssues = manager.selfCheck()
+  check('自检返回问题数组', Array.isArray(healthyIssues))
+  check('健康启动时没有 error 级问题', healthyIssues.filter(i => i.severity === 'error').length === 0, JSON.stringify(healthyIssues.slice(0, 3)))
+  check('插件页有状态汇总', document.querySelectorAll('[data-plugin-summary] .plugin-chip').length >= 4)
+  check('插件页渲染出插件条目', document.querySelectorAll('#pluginListContainer .plugin-item').length >= 20)
+
+  // 注入一个"错误插件"，验证标红与原因展示
+  const victim = loader.get('markdown-enhancer')
+  const snapshot = { status: victim.status, reason: victim.reason, error: victim.error, conflict: victim.conflict }
+  victim.status = 'error'
+  victim.reason = '冒烟测试注入的错误原因'
+  victim.error = new Error('冒烟测试注入的错误原因')
+  pagesApi.open('plugins')
+  await sleep(40)
+  const errorItem = document.querySelector('#pluginListContainer .plugin-item.error')
+  check('错误插件被标红', !!errorItem, '未找到 .plugin-item.error')
+  check('错误插件显示了原因', (errorItem?.textContent || '').includes('冒烟测试注入的错误原因'), errorItem?.textContent?.slice(0, 80))
+
+  // 注入一个"冲突插件"，验证标红与冲突原因
+  victim.status = 'inactive'
+  victim.conflict = true
+  victim.reason = '服务「storage」已被插件「storage」占用（冒烟测试）'
+  pagesApi.open('plugins')
+  await sleep(40)
+  const conflictItem = document.querySelector('#pluginListContainer .plugin-item.error')
+  check('冲突插件被标红', !!conflictItem, '未找到冲突高亮')
+  check('冲突插件显示了原因', (conflictItem?.textContent || '').includes('已被插件'), conflictItem?.textContent?.slice(0, 80))
+
+  Object.assign(victim, snapshot)
+  pagesApi.open('plugins')
+  await sleep(40)
+  check('恢复后不再有标红插件', !document.querySelector('#pluginListContainer .plugin-item.error'))
+  await sleep(10)
+
+  section('⑭ 错误与告警')
+  console.log(`  插件告警 ${loader.warnings.length} 条`)
+  for (const w of loader.warnings.slice(0, 6)) console.log(`    · [${w.severity}] ${w.id}: ${w.message}`)
+  check('无 error 日志中的致命异常', loader.list().filter(r => r.status === 'error').length === 0)
+
+  section('⑮ 收尾')
+  await backend.close()
+  await rm(dataDir, { recursive: true, force: true }).catch(() => {})
+  check('后端已关闭', true)
+
+  section('结果')
+  console.log(`  ${results.length - failed}/${results.length} 项通过`)
+  if (failed) {
+    console.log('\n失败项：')
+    for (const r of results.filter(r => !r.ok)) console.log(`  ✗ ${r.name} ${r.detail || ''}`)
+  }
+  process.exit(failed ? 1 : 0)
+}
+
+main().catch(err => {
+  console.error('\n冒烟测试异常终止：')
+  console.error(err)
+  process.exit(1)
+})

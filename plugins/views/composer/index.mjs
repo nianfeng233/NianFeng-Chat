@@ -1,0 +1,285 @@
+/**
+ * V11 · composer
+ * 输入区：Enter 发送 / Shift+Enter 换行、工具条、可拖拽高度、紧凑模式。
+ * 只广播 message:send，不认识 chat-flow（文档 §8.1）。
+ */
+export const name = 'composer'
+export const version = '1.0.0'
+export const displayName = '输入区'
+export const description = '视觉内容 · 消息输入、工具条与高度拖拽。'
+export const author = '风语内核'
+export const icon = '⌨️'
+export const core = true
+export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
+export const inject = ['slots', 'session-service', 'message-service', 'event-bus', 'toast', 'i18n', 'config']
+export const provides = [{ name: 'composer', type: 'singleton' }]
+
+import { useStyle } from '../../../src/util/style.mjs'
+import { COMPOSER_CSS } from './style.mjs'
+import { icons } from '../../../src/util/icons.mjs'
+
+const MIN_HEIGHT = 58
+
+export function apply(ctx) {
+  const sessions = ctx.inject('session-service')
+  const messages = ctx.inject('message-service')
+  const events = ctx.inject('event-bus')
+  const toast = ctx.inject('toast')
+  const i18n = ctx.inject('i18n')
+  const config = ctx.inject('config')
+
+  useStyle(ctx, COMPOSER_CSS)
+
+  ctx.slots.register('chat:composer', container => {
+    container.innerHTML = `
+      <div class="h-resizer" id="hResizer"></div>
+      <div class="composer" id="composer">
+        <div class="composer-tools">
+          <span class="typing-hint" id="typingHint" hidden>正在输入…</span>
+          <button class="tool-btn" title="表情（插件扩展位）" data-tool="emoji">${icons.emoji}</button>
+          <button class="tool-btn" title="图片（插件扩展位）" data-tool="image">${icons.image}</button>
+          <button class="tool-btn" title="附件（插件扩展位）" data-tool="file">${icons.attach}</button>
+          <button class="tool-btn" title="语音输入" data-tool="voice">${icons.voice}</button>
+        </div>
+        <div class="composer-body">
+          <textarea class="composer-input" id="composerInput"
+            placeholder="${i18n.t('chat.placeholder', '输入消息，Enter 发送，Shift + Enter 换行')}"></textarea>
+          <button class="stop-btn" id="stopBtn" title="停止生成">停止</button>
+          <button class="send-btn" id="sendBtn"><span id="sendBtnText">${i18n.t('chat.send', '发送')}</span></button>
+        </div>
+      </div>`
+
+    const composer = container.querySelector('#composer')
+    const input = container.querySelector('#composerInput')
+    const sendBtn = container.querySelector('#sendBtn')
+    const stopBtn = container.querySelector('#stopBtn')
+    const typingHint = container.querySelector('#typingHint')
+    const hResizer = container.querySelector('#hResizer')
+    const pane = container.closest('.pane-view')
+    const showTyping = on => {
+      if (typingHint) typingHint.hidden = !on
+    }
+
+    const availableHeight = () => {
+      const rect = pane.getBoundingClientRect()
+      const header = pane.querySelector('.chat-header')
+      return rect.height - (header?.offsetHeight || 58) - 1
+    }
+    const setHeight = h => {
+      const avail = availableHeight()
+      const maxH = Math.max(MIN_HEIGHT, avail * 0.5)
+      composer.style.height = `${Math.max(MIN_HEIGHT, Math.min(h, maxH))}px`
+      composer.classList.toggle('compact', composer.offsetHeight < 112)
+    }
+
+    /* -------- 发送 -------- */
+    const send = () => {
+      const text = input.value.replace(/\s+$/, '').replace(/^\s+/, '')
+      if (!text) return
+      const convId = sessions.activeId()
+      if (!convId) {
+        toast.warn('请先选择一个会话')
+        return
+      }
+      input.value = ''
+      messages.requestSend(convId, text) // 广播 message:send（拦截型事件）
+    }
+
+    const onKeydown = e => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault()
+        send()
+      }
+    }
+    const onClickSend = () => send()
+    const showStop = on => stopBtn?.classList.toggle('show', !!on)
+    const syncStop = () => showStop(!!ctx.registry.get('chat-flow')?.isRunning(sessions.activeId()))
+    const onStopClick = () => {
+      const convId = sessions.activeId()
+      if (!convId) return
+      if (ctx.registry.get('chat-flow')?.abort(convId)) showStop(false)
+    }
+    const onComposerClick = e => {
+      const btn = e.target.closest('[data-tool]')
+      if (!btn) return
+      const tool = btn.dataset.tool
+      ctx.emit('composer:tool', { tool, conversationId: sessions.activeId(), handled: false })
+      if (tool === 'voice') {
+        const result = toggleVoice()
+        if (result === true) return
+      }
+      // 表情 / 图片 / 附件是插件扩展位：没有插件接管时明确说明，避免看起来像能点却没反应。
+      if (!ctx.registry.get('composer-tool-host') && !btn.dataset.handled) {
+        const tips = { emoji: '表情面板', image: '图片上传', file: '附件上传', voice: SpeechRecognitionCtor ? '语音输入' : '语音输入（当前浏览器不支持 Web Speech API）' }
+        toast.info(`${tips[tool] || tool}是插件扩展位，当前还没有安装对应插件，可在「设置 → 插件」中查看。`)
+      }
+    }
+
+    /* -------- 内置语音输入（Web Speech API） -------- */
+    const SpeechRecognitionCtor = typeof window !== 'undefined' ? window.SpeechRecognition || window.webkitSpeechRecognition : null
+    let recognition = null
+    let listening = false
+    let voiceBase = ''
+    const voiceButton = () => container.querySelector('[data-tool="voice"]')
+
+    const stopVoice = () => {
+      try {
+        recognition?.stop()
+      } catch (_) {
+        /* ignore */
+      }
+      listening = false
+      voiceButton()?.classList.remove('active')
+    }
+
+    const toggleVoice = () => {
+      if (!SpeechRecognitionCtor) return null
+      if (listening) {
+        stopVoice()
+        return true
+      }
+      try {
+        recognition = new SpeechRecognitionCtor()
+        recognition.lang = navigator.language || 'zh-CN'
+        recognition.interimResults = true
+        recognition.continuous = false
+        recognition.onstart = () => {
+          listening = true
+          voiceBase = input.value.trim()
+          voiceButton()?.classList.add('active')
+        }
+        recognition.onresult = event => {
+          let finalText = ''
+          let interimText = ''
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const chunk = event.results[i][0]?.transcript || ''
+            if (event.results[i].isFinal) finalText += chunk
+            else interimText += chunk
+          }
+          const combined = (finalText || interimText).trim()
+          input.value = (voiceBase ? voiceBase + ' ' : '') + combined
+        }
+        recognition.onerror = event => {
+          listening = false
+          voiceButton()?.classList.remove('active')
+          if (event.error !== 'aborted' && event.error !== 'no-speech') toast.error(`语音识别失败：${event.error}`)
+        }
+        recognition.onend = () => {
+          listening = false
+          voiceButton()?.classList.remove('active')
+          input.focus()
+        }
+        recognition.start()
+        return true
+      } catch (err) {
+        toast.error(`无法启动语音输入：${err.message}`)
+        return true
+      }
+    }
+
+    input.addEventListener('keydown', onKeydown)
+    sendBtn.addEventListener('click', onClickSend)
+    stopBtn?.addEventListener('click', onStopClick)
+    composer.addEventListener('click', onComposerClick)
+
+    /* -------- 高度拖拽 -------- */
+    let dragging = false
+    const onResizeDown = e => {
+      dragging = true
+      hResizer.classList.add('dragging')
+      document.body.classList.add('resizing-h')
+      e.preventDefault()
+    }
+    const onResizeMove = e => {
+      if (!dragging) return
+      const rect = pane.getBoundingClientRect()
+      setHeight(rect.bottom - e.clientY)
+    }
+    const onResizeUp = () => {
+      if (!dragging) return
+      dragging = false
+      hResizer.classList.remove('dragging')
+      document.body.classList.remove('resizing-h')
+      config.set('chat.composerHeight', Math.round(composer.offsetHeight))
+    }
+    const onWindowResize = () => setHeight(composer.offsetHeight)
+
+    hResizer.addEventListener('mousedown', onResizeDown)
+    window.addEventListener('mousemove', onResizeMove)
+    window.addEventListener('mouseup', onResizeUp)
+    window.addEventListener('resize', onWindowResize)
+
+    const initHeight = () => {
+      const saved = Number(config.get('chat.composerHeight', 0))
+      if (Number.isFinite(saved) && saved > 0) {
+        setHeight(saved)
+        return
+      }
+      const avail = availableHeight()
+      setHeight(Math.max(MIN_HEIGHT, avail * 0.36))
+    }
+    initHeight()
+    const initTimer = setTimeout(initHeight, 50)
+
+    const offI18n = ctx.on('i18n:changed', () => {
+      const t = ctx.registry.get('i18n')
+      input.placeholder = t?.t('chat.placeholder', input.placeholder) || input.placeholder
+      const sendText = container.querySelector('#sendBtnText')
+      if (sendText) sendText.textContent = t?.t('chat.send', '发送') || '发送'
+    })
+
+    const onConversationSwitch = () => {
+      input.disabled = false
+      showTyping(false)
+      syncStop()
+      setTimeout(() => input.focus(), 10)
+    }
+    const offSwitch = events.on('conversation:switch', onConversationSwitch)
+    const offStart = events.on('chat:request-start', ({ conversationId } = {}) => {
+      if (conversationId === sessions.activeId()) showStop(true)
+    })
+    const offDone = events.on('chat:request-done', ({ conversationId } = {}) => {
+      if (conversationId === sessions.activeId()) {
+        showStop(false)
+        showTyping(false)
+      }
+    })
+    const offError = events.on('message:error', ({ conversationId } = {}) => {
+      if (conversationId === sessions.activeId()) {
+        showStop(false)
+        showTyping(false)
+      }
+    })
+    // 工具发送消息前的“真人打字”状态（chat-tools 广播）
+    const offTyping = events.on('chat:typing', ({ conversationId, typing } = {}) => {
+      if (conversationId === sessions.activeId()) showTyping(typing !== false)
+    })
+
+    return () => {
+      clearTimeout(initTimer)
+      stopVoice()
+      input.removeEventListener('keydown', onKeydown)
+      sendBtn.removeEventListener('click', onClickSend)
+      stopBtn?.removeEventListener('click', onStopClick)
+      composer.removeEventListener('click', onComposerClick)
+      hResizer.removeEventListener('mousedown', onResizeDown)
+      window.removeEventListener('mousemove', onResizeMove)
+      window.removeEventListener('mouseup', onResizeUp)
+      window.removeEventListener('resize', onWindowResize)
+      offI18n()
+      offSwitch()
+      offStart()
+      offDone()
+      offError()
+      offTyping()
+      container.innerHTML = ''
+    }
+  })
+
+  ctx.provide('composer', {
+    name: 'composer',
+    focus: () => document.querySelector('#composerInput')?.focus(),
+  }, { type: 'singleton' })
+
+  ctx.logger.debug('输入区就绪')
+}

@@ -1,0 +1,79 @@
+/**
+ * V23 · settings-item-about
+ * 关于：版本、内核、插件与服务统计、调试面板入口。
+ */
+export const name = 'settings-item-about'
+export const version = '1.0.0'
+export const displayName = '设置项 · 关于'
+export const description = '设置页 · 版本与插件系统信息。'
+export const author = '风语内核'
+export const icon = 'ℹ️'
+export const core = true
+export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
+export const inject = ['settings-container', 'plugin-manager', 'event-bus', 'toast']
+
+import { page, section, card, row } from '../../../src/util/settings.mjs'
+import { escapeHtml } from '../../../src/util/format.mjs'
+
+export function apply(ctx) {
+  const pages = ctx.inject('settings-container')
+  const manager = ctx.inject('plugin-manager')
+  const toast = ctx.inject('toast')
+
+  pages.register({
+    id: 'about',
+    group: '其他',
+    groupOrder: 50,
+    label: '关于',
+    icon: 'ⓘ',
+    order: 110,
+    render(container) {
+      const render = () => {
+        const stats = manager.stats()
+        const appVersion = ctx.registry.get('app')?.version || '0.40.0'
+        const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
+        container.innerHTML = page('关于', '关于当前版本以及插件系统信息。', `
+          ${section('', `<div class="settings-card" style="padding:22px">
+              <div class="about-head">
+                <div class="about-mark">风</div>
+                <div>
+                  <div class="setting-name" style="font-size:15px">风语 · AI Chat</div>
+                  <div class="about-version">Version ${escapeHtml(appVersion)} · 万物皆插件</div>
+                </div>
+              </div>
+            </div>`)}
+          ${section('系统信息', card(
+            row('内核版本', `Kernel v${escapeHtml(appVersion)} · event-bus + plugin-loader（Cordis 风格）`, '<span class="text-good">● 正常</span>') +
+            row('已加载插件', `核心 ${stats.core} 个 · 第三方 ${stats.thirdParty} 个 · 共 ${stats.total} 个`,
+              '<button class="outline-btn" data-action="goto-plugins">查看</button>') +
+            row('已注册服务', Object.entries(stats.servicesByType).map(([k, v]) => `${k} ${v}`).join(' · '),
+              '<button class="outline-btn" data-action="dump-services">查看</button>') +
+            row('运行时长', '本次启动至今', `<span class="text-good">${uptime} 秒</span>`),
+          ))}
+          ${section('其他', card(
+            row('检查更新', '查看是否有新的应用版本', '<button class="outline-btn" data-action="update">检查</button>') +
+            row('调试面板', '打开浏览器控制台后可使用 window.__wind_debug', '<button class="outline-btn" data-action="debug">说明</button>'),
+          ))}`)
+
+        const onClick = e => {
+          const action = e.target.closest('[data-action]')?.dataset.action
+          if (action === 'goto-plugins') ctx.inject('settings-container').open('plugins')
+          if (action === 'dump-services') {
+            console.table(ctx.registry.list())
+            toast.info(`已把 ${stats.services} 个服务打印到控制台`)
+          }
+          if (action === 'update') toast.success(`已是最新版本（v${appVersion}）。`)
+          if (action === 'debug') {
+            toast.info('在控制台执行 __wind_debug.status() / services() / trace(true) 查看插件状态。')
+            console.log('__wind_debug ·', window.__wind_debug)
+          }
+        }
+        container.addEventListener('click', onClick)
+      }
+
+      const offs = [ctx.on('plugin:loaded', render), ctx.on('plugin:enabled', render), ctx.on('plugin:disabled', render)]
+      render()
+      return () => offs.forEach(off => off())
+    },
+  })
+}
