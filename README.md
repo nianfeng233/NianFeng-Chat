@@ -7,7 +7,7 @@
 
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
 
-- 当前版本：v0.41.1
+- 当前版本：v0.41.0
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 - 仓库：<https://github.com/nianfeng233/fengyu-chat>
 
@@ -168,4 +168,3 @@ npm run test:smoke    # 前端端到端（真实后端与 SSE）
 - [`docs/RELEASING.md`](docs/RELEASING.md) — 版本管理与发布规范
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows 使用与排障
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — 桌面壳构建
-- [`docs/LEGACY-DESIGN.md`](docs/LEGACY-DESIGN.md) — 早期设计草稿（历史参考）

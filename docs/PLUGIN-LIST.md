@@ -1,7 +1,7 @@
 # 插件清单与实现状态
 
 > 共 **84 个前端插件 + 8 个后端插件**（核心 66 · 可选 18）。
-> 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**；视觉拆解见 [`docs/DEMO-MAPPING.md`](DEMO-MAPPING.md)。
+> 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**。
 
 ---
 

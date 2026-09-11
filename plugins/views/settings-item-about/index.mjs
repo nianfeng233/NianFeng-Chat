@@ -30,7 +30,7 @@ export function apply(ctx) {
     render(container) {
       const render = () => {
         const stats = manager.stats()
-        const appVersion = ctx.registry.get('app')?.version || '0.40.0'
+        const appVersion = ctx.registry.get('app')?.version || '0.41.0'
         const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
         container.innerHTML = page('关于', '关于当前版本以及插件系统信息。', `
           ${section('', `<div class="settings-card" style="padding:22px">
@@ -43,7 +43,7 @@ export function apply(ctx) {
               </div>
             </div>`)}
           ${section('系统信息', card(
-            row('内核版本', `Kernel v${escapeHtml(appVersion)} · event-bus + plugin-loader（Cordis 风格）`, '<span class="text-good">● 正常</span>') +
+            row('内核版本', 'cordis v4 · event-bus + plugin-loader', '<span class="text-good">● 正常</span>') +
             row('已加载插件', `核心 ${stats.core} 个 · 第三方 ${stats.thirdParty} 个 · 共 ${stats.total} 个`,
               '<button class="outline-btn" data-action="goto-plugins">查看</button>') +
             row('已注册服务', Object.entries(stats.servicesByType).map(([k, v]) => `${k} ${v}`).join(' · '),
@@ -51,7 +51,6 @@ export function apply(ctx) {
             row('运行时长', '本次启动至今', `<span class="text-good">${uptime} 秒</span>`),
           ))}
           ${section('其他', card(
-            row('检查更新', '查看是否有新的应用版本', '<button class="outline-btn" data-action="update">检查</button>') +
             row('调试面板', '打开浏览器控制台后可使用 window.__wind_debug', '<button class="outline-btn" data-action="debug">说明</button>'),
           ))}`)
 
@@ -62,7 +61,6 @@ export function apply(ctx) {
             console.table(ctx.registry.list())
             toast.info(`已把 ${stats.services} 个服务打印到控制台`)
           }
-          if (action === 'update') toast.success(`已是最新版本（v${appVersion}）。`)
           if (action === 'debug') {
             toast.info('在控制台执行 __wind_debug.status() / services() / trace(true) 查看插件状态。')
             console.log('__wind_debug ·', window.__wind_debug)

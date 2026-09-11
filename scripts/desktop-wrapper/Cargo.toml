@@ -1,6 +1,6 @@
 [package]
 name = "fengyu-desktop"
-version = "0.41.1"
+version = "0.41.0"
 edition = "2021"
 description = "风语 AI Chat 无边框桌面壳（WebView2）"
 license = "Apache-2.0"

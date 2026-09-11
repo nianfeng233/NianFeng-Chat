@@ -44,6 +44,9 @@
 
 采用 [语义化版本](https://semver.org/lang/zh-CN/)：`MAJOR.MINOR.PATCH`，统一前缀 `v` 作为 Git tag。
 
+> 注意：README、文档措辞、注释等**不改变功能的改动不单独发 Release**，随下一次功能版本一起发布；
+> 只有在许可证、安全性或发布内容存在必须立即更正的问题时，才发 PATCH 并在说明中注明原因。
+
 | 版本 | 场景 | 示例 |
 |---|---|---|
 | `MAJOR` | 破坏性变更（数据结构、插件协议、配置不兼容） | `v1.0.0` |
@@ -58,7 +61,7 @@
 * 版本号同时写入 `package.json` 与 `scripts/desktop-wrapper/Cargo.toml`，发布前由脚本校验一致。
 * 预发布版本在 GitHub Release 上必须勾选 **Set as a pre-release**。
 * 不允许覆盖或移动已经发布的 tag；发现问题发新的 PATCH 版本。
-* `docs/STATUS.md` 记录“当前稳定版 / 开发中的版本”。
+* 当前正式版本以 Git tag 与 GitHub Releases 为准。
 
 ---
 

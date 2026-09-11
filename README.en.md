@@ -10,7 +10,7 @@ a Windows desktop application.
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
 
-- Current version: v0.41.1
+- Current version: v0.41.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/fengyu-chat>
 
@@ -189,4 +189,3 @@ numbers, `user_data`, and similar content.
 - [`docs/RELEASING.md`](docs/RELEASING.md) — versioning and release process
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows usage and troubleshooting
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — desktop shell build
-- [`docs/LEGACY-DESIGN.md`](docs/LEGACY-DESIGN.md) — early design draft (historical reference)
