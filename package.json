@@ -1,10 +1,10 @@
 {
   "name": "fengyu-chat",
-  "version": "0.41.0",
+  "version": "0.41.1",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "风语 · 万物皆插件的 AI 聊天程序（真实 cordis 内核 + 本地后端）",
+  "description": "风语 · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + 本地后端）",
   "scripts": {
     "start": "node start.mjs",
     "dev": "node start.mjs",

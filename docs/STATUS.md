@@ -4,7 +4,7 @@
 
 ## 本轮（聊天链路 · 方案第一阶段）
 
-按 `文档.txt` 落地了聊天主链路，WebUI 会话即 `nova:web:<会话id>` 渠道。
+按 `docs/LEGACY-DESIGN.md` 落地了聊天主链路，WebUI 会话即 `nova:web:<会话id>` 渠道。
 
 ### 新增插件（7 个，全部 core）
 - `chat-store`（L2）：渠道记录、nova 渠道识别、消息 `message_id / seq / timestamp / sender / source / visibility`、工作记忆查询。

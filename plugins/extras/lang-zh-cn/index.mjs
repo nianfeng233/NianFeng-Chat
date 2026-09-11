@@ -22,7 +22,7 @@ export const provides = []
 
 export const MESSAGES = {
   'app.name': '风语',
-  'app.slogan': '专注 AI 与人机对话',
+  'app.slogan': '本地优先的 AI 聊天客户端',
   'view.chat': '会话',
   'view.channel': '渠道',
   'view.settings': '设置',

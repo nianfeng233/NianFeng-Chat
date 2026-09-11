@@ -38,7 +38,7 @@ export function apply(ctx) {
                 <div class="about-mark">风</div>
                 <div>
                   <div class="setting-name" style="font-size:15px">风语 · AI Chat</div>
-                  <div class="about-version">Version ${escapeHtml(appVersion)} · 万物皆插件</div>
+                  <div class="about-version">Version ${escapeHtml(appVersion)} · 插件化架构</div>
                 </div>
               </div>
             </div>`)}

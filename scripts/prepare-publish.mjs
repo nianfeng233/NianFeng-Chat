@@ -45,7 +45,7 @@ async function removeTreeExceptGit(dir) {
 }
 
 const TEXT_EXT = /\.(mjs|js|cjs|json|md|txt|html|css|ps1|cmd|rs|toml|yml|yaml|gitattributes|gitignore|notice|license)$/i
-const SKIP_SCAN_FILE = /^(deepseek_html_.*\.html|.*\.log)$/i
+const SKIP_SCAN_FILE = /^([a-z0-9]+_html_\d{8}_[a-z0-9]+\.html|.*\.log)$/i
 
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const localUser = String(process.env.USERNAME || process.env.USER || '').trim()
