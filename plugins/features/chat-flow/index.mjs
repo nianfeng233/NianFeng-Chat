@@ -449,7 +449,7 @@ export function apply(ctx) {
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
-          sender_id: who.userId,
+          sender_id: who.identityUserId || who.userId,
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',
@@ -701,7 +701,7 @@ export function apply(ctx) {
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
-          sender_id: who.userId,
+          sender_id: who.identityUserId || who.userId,
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',

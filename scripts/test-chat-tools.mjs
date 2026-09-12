@@ -285,7 +285,14 @@ async function main() {
   check('消息带稳定 message_id', !!userMessage?.message_id && userMessage.message_id === userMessage.id)
   check('消息带单调 seq', Number(userMessage?.seq) === 1 && Number(assistantMessage?.seq) === 2, `${userMessage?.seq} / ${assistantMessage?.seq}`)
   check('消息带 ISO timestamp', !Number.isNaN(Date.parse(userMessage?.timestamp || '')) && !Number.isNaN(Date.parse(assistantMessage?.timestamp || '')))
-  check('消息带 sender / role / source / visibility', userMessage?.sender_id === 'web-user' && userMessage.source === 'nova' && userMessage.visibility === 'shareable' && assistantMessage?.is_bot === true, JSON.stringify(userMessage))
+  check(
+    '消息带 sender / role / source / visibility',
+    ['我', 'web-user'].includes(userMessage?.sender_id) &&
+      userMessage.source === 'nova' &&
+      userMessage.visibility === 'shareable' &&
+      assistantMessage?.is_bot === true,
+    JSON.stringify(userMessage),
+  )
   check('投递状态机推进', await waitFor(() => (sessions.message(conv1.id, userMessage.id)?.status || '') !== 'sent', { timeout: 3000 }))
 
   console.log('\n④ read_messages：模型主动读取历史')

@@ -27,11 +27,20 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   const providers = new Set()
 
-  const localIdentity = () => ({
-    userId: String(config.get('identity.userId', '') || config.get('chat.userId', 'web-user') || 'web-user').trim() || 'web-user',
-    userName: String(config.get('identity.userName', '') || resolveUserNickname(config)).trim() || resolveUserNickname(config),
-    source: 'local',
-  })
+  const localIdentity = () => {
+    const nickname = resolveUserNickname(config)
+    const configuredId = String(config.get('identity.userId', '') || '').trim()
+    const chatUserId = String(config.get('chat.userId', '') || '').trim()
+    // 暂时没有联网账号时，Nova 渠道的用户标识就使用用户名（昵称）；
+    // 只有显式配置了非默认 chat.userId 时才优先使用它。未来联网插件注册 provider 后
+    // 会直接返回真实账号 ID / 用户名。
+    const userId = configuredId || (chatUserId && chatUserId !== 'web-user' ? chatUserId : nickname)
+    return {
+      userId: userId || nickname || 'web-user',
+      userName: String(config.get('identity.userName', '') || nickname).trim() || nickname,
+      source: 'local',
+    }
+  }
 
   const service = {
     name: 'user-identity',

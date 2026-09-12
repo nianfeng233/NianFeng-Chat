@@ -63,13 +63,17 @@ export function apply(ctx) {
     const channel = store.channelForConversation(conversationId)
     if (!conv || !channel) return null
     const identity = ctx.registry.get('user-identity')?.get?.() || {}
-    const userId = String(identity.userId || config.get('chat.userId', 'web-user') || 'web-user')
+    // userId 继续作为“权限主体”稳定标识（沿用历史 chat.userId，保证已有授权不失效）；
+    // identityUserId 才是展示 / 模型上下文里的用户标识，暂时等于用户名，未来由联网插件提供真实账号 ID。
+    const userId = String(config.get('chat.userId', 'web-user') || 'web-user')
+    const identityUserId = String(identity.userId || userId)
     const userName = String(identity.userName || resolveUserNickname(config))
     return {
       conversationId,
       roleId: conv.meta?.roleId || conv.id,
       channelId: channel.channelId,
       userId,
+      identityUserId,
       userName,
       identitySource: identity.source || 'local',
       channel,
