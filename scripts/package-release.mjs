@@ -29,7 +29,8 @@ import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const RELEASE = join(ROOT, 'release')
+// 默认 release/；NIANFENG_RELEASE_DIR 可指向临时目录，避免旧 exe 正在运行锁住 release/desktop。
+const RELEASE = resolve(process.env.NIANFENG_RELEASE_DIR || join(ROOT, 'release'))
 const args = new Set(process.argv.slice(2))
 const onlyWeb = args.has('--web-only')
 const onlyDesktop = args.has('--desktop-only')
