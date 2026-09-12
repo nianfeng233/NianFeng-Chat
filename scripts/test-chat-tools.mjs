@@ -401,6 +401,11 @@ async function main() {
   const pendingDecision = permissions.authorize({ conversationId: conv1.id, action: 'send', channel: channel2.channelId })
   await waitFor(() => seen.length > 0, { timeout: 2000 })
   check('敏感操作发出确认请求', seen.length === 1 && seen[0].targetChannel === channel2.channelId, JSON.stringify(seen[0]))
+  check(
+    '确认文案包含目标渠道类型与名称',
+    seen[0]?.targetName?.includes('渠道') === true && String(seen[0]?.targetName || '').includes(channel2.channelId),
+    JSON.stringify(seen[0]?.targetName),
+  )
   messages.requestSend(conv1.id, '确认')
   const confirmed = await pendingDecision
   await sleep(80)
