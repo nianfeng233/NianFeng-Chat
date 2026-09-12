@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** bg-image 样式：图片铺满背景层，并加一层可读性蒙版。 */
 export const BG_IMAGE_CSS = `
   .bg-image-inner{position:absolute;inset:0;background-size:cover;background-position:center;background-repeat:no-repeat;background-color:transparent}

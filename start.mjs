@@ -1,5 +1,10 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 风语启动脚本：一条命令同时拉起「后端 + WebUI」，并自动打开浏览器。
+ * 念风启动脚本：一条命令同时拉起「后端 + WebUI」，并自动打开浏览器。
  *
  *   node start.mjs              # 后端 8788 + WebUI 5173（/api 反向代理到后端）
  *   node start.mjs --serve      # 单端口模式：后端直接托管 WebUI（5173）
@@ -72,8 +77,8 @@ function createWebServer({ backendPort, accessToken = '' }) {
     // 访问令牌：health / version 放行（供宿主探活），其余请求需要 query / cookie / header 中的 token
     if (token && pathname !== '/api/health' && pathname !== '/api/version') {
       const queryToken = url.searchParams.get('token') || ''
-      const cookieToken = cookieValue(req, 'fengyu_token')
-      const headerToken = String(req.headers['x-fengyu-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+      const cookieToken = cookieValue(req, 'nianfeng_token')
+      const headerToken = String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
       const ok = queryToken === token || cookieToken === token || headerToken === token
       if (!ok) {
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -82,7 +87,7 @@ function createWebServer({ backendPort, accessToken = '' }) {
       }
       if (queryToken === token && cookieToken !== token && req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
         res.writeHead(302, {
-          'Set-Cookie': `fengyu_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+          'Set-Cookie': `nianfeng_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
           Location: pathname || '/',
         })
         res.end()
@@ -172,8 +177,9 @@ async function main() {
 
   // WebUI 监听地址/端口/访问令牌来自数据目录 config.json 的 network 段。
   // 优先级：环境变量 > config.json > 默认值；设置页保存后按提示重启生效。
-  const paths = process.env.FENGYU_DATA_DIR
-    ? { dataDir: resolve(process.env.FENGYU_DATA_DIR) }
+  const dataDirEnv = process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR
+  const paths = dataDirEnv
+    ? { dataDir: resolve(dataDirEnv) }
     : await resolveDataDir(ROOT)
   let network = {}
   try {
@@ -185,9 +191,9 @@ async function main() {
   const webPort = Number(process.env.WEB_PORT || network.webuiPort || (singlePort ? 5173 : 5173))
   const accessToken = String(network.webuiToken || '').trim()
 
-  banner(singlePort ? ['风语 · 单端口模式', '后端同时托管 WebUI 与 API'] : ['风语 · 开发模式', '后端 + WebUI 一起启动'])
+  banner(singlePort ? ['念风 · 单端口模式', '后端同时托管 WebUI 与 API'] : ['念风 · 开发模式', '后端 + WebUI 一起启动'])
 
-  // 重复双击启动时：如果端口上是旧的风语实例，自动关掉再启动；是别的程序则明确报错
+  // 重复双击启动时：如果端口上是旧的念风实例，自动关掉再启动；是别的程序则明确报错
   await ensurePortsFree(singlePort ? [webPort] : [backendPort, webPort], { autoStop: true, log: console })
 
   let backend = null
@@ -198,7 +204,7 @@ async function main() {
   const restart = async () => {
     if (restarting) return
     restarting = true
-    console.log('正在重启风语…')
+    console.log('正在重启念风…')
     try {
       if (web) await new Promise(resolveClose => web.close(resolveClose))
     } catch (_) {
@@ -218,7 +224,7 @@ async function main() {
   backend = await startBackend({
     port: singlePort ? webPort : backendPort,
     host: singlePort ? webuiHost : '127.0.0.1',
-    dataDir: process.env.FENGYU_DATA_DIR || undefined,
+    dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     staticDir: singlePort ? '.' : null,
     accessToken,
     onRestart: restart,
@@ -246,7 +252,7 @@ async function main() {
   openBrowser(webUrl)
 
   const shutdown = async () => {
-    console.log('\n正在关闭风语…')
+    console.log('\n正在关闭念风…')
     try {
       if (web) await new Promise(resolve => web.close(resolve))
     } catch (_) {
@@ -261,12 +267,12 @@ async function main() {
   // 崩溃兜底：写日志 + 友好退出，避免给用户一个无信息的系统弹窗
   process.on('uncaughtException', async err => {
     await logCrash('uncaughtException', err)
-    console.error('\n风语遇到未预期错误，已写入 user_data/logs/error.log')
+    console.error('\n念风遇到未预期错误，已写入 user_data/logs/error.log')
     await shutdown()
   })
   process.on('unhandledRejection', async reason => {
     await logCrash('unhandledRejection', reason)
-    console.error('\n风语遇到未处理的异步错误，已写入 user_data/logs/error.log')
+    console.error('\n念风遇到未处理的异步错误，已写入 user_data/logs/error.log')
   })
 }
 

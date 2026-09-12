@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * S1 · app-shell
  * 整体 grid 骨架（文档 §二 L3）。自身不画任何内容，
@@ -18,7 +23,7 @@ export const name = 'app-shell'
 export const version = '1.0.0'
 export const displayName = '应用外壳'
 export const description = '视觉框架 · 整体 grid 骨架与挂载点。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🪟'
 export const core = true
 export const inject = ['slots']

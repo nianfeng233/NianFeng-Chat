@@ -1,9 +1,14 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V2 · user-widget
  * 顶层栏右侧：用户头像 + 个性签名。
  *
  * 头像统一走 src/util/identity.mjs：
- *   - 默认使用风语 logo（FENGYU_LOGO）；
+ *   - 默认使用念风 logo（NIANFENG_LOGO）；
  *   - 点击头像可选择图片，压缩后写入 config 的 ui.avatarImage；
  *   - 右键头像可更换 / 恢复默认；
  *   - 所有读取同一 config 的头像位置（消息、通知等）都会一起更新。
@@ -12,7 +17,7 @@ export const name = 'user-widget'
 export const version = '1.1.0'
 export const displayName = '用户信息'
 export const description = '顶层栏内容 · 用户头像（可更换）与可编辑签名。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🙋'
 export const core = true
 export const depends = { titlebar: '^1.0.0', config: '^1.0.0' }
@@ -38,7 +43,7 @@ export function apply(ctx) {
       <span class="tb-divider"></span>
       <div class="tb-user">
         <button class="tb-avatar ${hasCustomAvatar ? '' : 'tb-avatar-logo'}" id="tbAvatar" type="button"
-          title="点击更换头像；默认使用风语 logo（右键可恢复默认）">
+          title="点击更换头像；默认使用念风 logo（右键可恢复默认）">
           <img id="tbAvatarImg" src="${escapeAttr(resolveUserAvatar(config))}" alt="头像" draggable="false" />
         </button>
         <input type="file" id="tbAvatarFile" accept="image/*" hidden />

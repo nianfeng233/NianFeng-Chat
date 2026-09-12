@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 从 release/web/source（package-release 生成的纯净源码）同步到 release/publish。
  * 同步后执行严格的敏感信息扫描；扫描不通过就中止。

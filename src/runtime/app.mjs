@@ -1,8 +1,13 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 风语应用运行时：真实 cordis 之上的薄封装。
+ * 念风应用运行时：真实 cordis 之上的薄封装。
  *
  * 职责：
- *  - 创建 cordis Context，并把风语约定（事件索引 / 服务台账 / 插件状态）挂上去
+ *  - 创建 cordis Context，并把念风约定（事件索引 / 服务台账 / 插件状态）挂上去
  *  - 动态 import 插件模块 → 交给 cordis 的 ctx.plugin() 管理生命周期与依赖注入
  *  - 提供插件管理器需要的状态视图（active / inactive / error / disabled）与启停
  *  - 语义冲突启发式检测（插槽拥挤 / 多监听者 / 多实现）
@@ -50,7 +55,7 @@ export class App {
     this.services.set('app', { name: 'app', type: 'singleton', owner: 'kernel', meta: {}, value: this.publicApi() })
     this.serviceOwners.set('app', 'kernel')
 
-    // 根 ctx 的风语兼容视图（调试对象 / 引导脚本使用；插件拿到的是各自 fiber 的兼容视图）
+    // 根 ctx 的念风兼容视图（调试对象 / 引导脚本使用；插件拿到的是各自 fiber 的兼容视图）
     this.rootCompat = createCompat(this, this.cordis, { id: 'app', meta: { plugin: { name: 'app' } } })
 
     this.eventsFacade = {
@@ -475,7 +480,7 @@ export class App {
     }
   }
 
-  /** 根据 cordis fiber 状态回填风语状态 */
+  /** 根据 cordis fiber 状态回填念风状态 */
   reclassify() {
     for (const record of this.records.values()) {
       // 手动标记为禁用 / 循环依赖的保持不变

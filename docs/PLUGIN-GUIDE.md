@@ -1,6 +1,11 @@
-# 风语插件开发指南
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# 念风插件开发指南
 
-> 风语使用**真实的 cordis v4**：插件就是 cordis 插件。
+> 念风使用**真实的 cordis v4**：插件就是 cordis 插件。
 > 三步：写 manifest → 写 `apply(ctx)` → 放进目录 `npm run sync-plugins`。
 
 ---
@@ -97,7 +102,7 @@ export function dispose(ctx) {}
 ```
 
 > **effect 语义**：`ctx.effect(fn)` 表示"把 `fn` 注册为卸载时的清理函数"。
-> 这与 cordis 原生 `effect(execute)`（立即执行并注册返回值）不同，兼容层已统一，插件按风语语义写即可。
+> 这与 cordis 原生 `effect(execute)`（立即执行并注册返回值）不同，兼容层已统一，插件按念风语义写即可。
 
 ---
 
@@ -117,6 +122,18 @@ export function dispose(ctx) {}
 
 ---
 
+## 4.1 渠道插件扩展点
+
+渠道插件通过 `ctx.inject('channel-base').defineChannel()` 注册类型，除了
+`name / color / icon / description / connect / disconnect` 之外，还支持：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `create(options)` | `Function` | 自定义「添加渠道」流程；`channel-list` 发现该字段后直接调用，不再弹默认的名称输入框。`options.tab` 是当前分类。 |
+| `detail(options)` | `Function` | 自定义渠道详情渲染；`options` 包含 `{ container, channel, type }`，返回清理函数。适合接入二维码、状态轮询、专属设置等。 |
+| `settingsSchema` | `Object` | 预留给通用表单型渠道插件（当前内置插件未使用，第三方插件可按自己的约定解释）。 |
+
+参考实现：`plugins/channels/wechat-clawbot/index.mjs`。
 ## 5. 样式
 
 ```js

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * K2 · plugin-loader
  * 把 Kernel 的 PluginLoader 暴露成服务：查询状态、动态启停、查看依赖图。
@@ -7,7 +12,7 @@ export const name = 'plugin-loader'
 export const version = '1.0.0'
 export const displayName = '插件加载器'
 export const description = '内核层 · 扫描插件目录、读取 manifest、按依赖顺序加载与启停插件。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧩'
 export const core = true
 export const depends = { 'event-bus': '^1.0.0', 'dependency-resolver': '^1.0.0' }

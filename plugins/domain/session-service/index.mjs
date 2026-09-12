@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D1 · session-service
  * 会话 CRUD、当前激活会话、上下文组装（文档 §6.2）。
@@ -11,7 +16,7 @@ export const name = 'session-service'
 export const version = '2.0.0'
 export const displayName = '会话服务'
 export const description = '业务服务 · 会话管理、上下文组装、后端持久化与离线降级。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💬'
 export const core = true
 export const depends = { storage: '^1.0.0', config: '^1.0.0' }

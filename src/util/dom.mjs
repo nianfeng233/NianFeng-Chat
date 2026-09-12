@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** 常用 DOM 工具（库，不是插件） */
 export const $ = (sel, root = document) => root.querySelector(sel)
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel))

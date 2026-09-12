@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · document-service
  * 资料库（文档 §3.2 / §6.3）：
@@ -10,7 +15,7 @@ export const name = 'document-service'
 export const version = '1.0.0'
 export const displayName = '资料库'
 export const description = '业务服务 · 长资料原文存储与分段读取，聊天记录只存引用。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📚'
 export const core = true
 export const depends = { storage: '^1.0.0' }

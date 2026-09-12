@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 本地 OpenAI 兼容 Mock 服务（开发 / 集成测试用，不进入应用 UI）。
  *
@@ -8,15 +13,15 @@
  *   GET  /v1/models            返回一个 mock-chat 模型
  *   POST /v1/chat/completions  支持 stream=true 的 SSE 流式回复
  *                              带 tools 时返回确定性的 tool_calls（chat_send / read_messages / send_document），
- *                              用于验证风语的工具调用链路；普通文本请求行为不变。
+ *                              用于验证念风的工具调用链路；普通文本请求行为不变。
  *
- * 用途：在没有任何云端 Key / 本地 Ollama 的机器上，验证风语的
+ * 用途：在没有任何云端 Key / 本地 Ollama 的机器上，验证念风的
  * 「提供商 → /api/chat → SSE → 气泡」完整链路。它不是模型，也不假装是模型。
  */
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
 
-const DEFAULT_REPLY = '这是一段来自本地 OpenAI 兼容 Mock 服务的真实流式回复，用于验证风语对话链路。'
+const DEFAULT_REPLY = '这是一段来自本地 OpenAI 兼容 Mock 服务的真实流式回复，用于验证念风对话链路。'
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -75,7 +80,7 @@ function chooseToolCall(body, question, replyText = REPLY_TEXT) {
   return call('chat_send', { messages: ['我处理好了。'], end: true })
 }
 
-const REPLY_TEXT = '这是一段来自本地 OpenAI 兼容 Mock 服务的真实流式回复，用于验证风语对话链路。'
+const REPLY_TEXT = '这是一段来自本地 OpenAI 兼容 Mock 服务的真实流式回复，用于验证念风对话链路。'
 
 /** 以 OpenAI SSE 格式流式返回一个 tool_call */
 async function streamToolCall(res, body, call, sleep, reasoningText = '') {
@@ -121,7 +126,7 @@ export async function startMockOpenAI({ port = 18099, host = '127.0.0.1', apiKey
 
     if (url.pathname.endsWith('/models')) {
       if (!authorized) return json(401, { error: { message: 'invalid api key' } })
-      return json(200, { object: 'list', data: [{ id: 'mock-chat', object: 'model', owned_by: 'fengyu-mock' }] })
+      return json(200, { object: 'list', data: [{ id: 'mock-chat', object: 'model', owned_by: 'nianfeng-mock' }] })
     }
 
     if (url.pathname.endsWith('/chat/completions') && req.method === 'POST') {

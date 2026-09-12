@@ -1,0 +1,705 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目：念风 Chat（NianFeng-Chat）
+ *
+ * 微信 Clawbot 后端桥（参考 Tencent/openclaw-weixin 的 HTTP JSON API）。
+ *
+ * 职责：
+ *   - 二维码登录：get_bot_qrcode / get_qrcode_status
+ *   - 消息长轮询：getupdates（收到的消息通过 hub 的 clawbot:message 事件推给前端）
+ *   - 发送消息与 typing：sendmessage / getconfig / sendtyping
+ *
+ * 该文件只被 Node 后端加载（server/index.mjs），浏览器端插件是
+ * plugins/channels/wechat-clawbot/index.mjs。账号 token 使用与 .secret-key
+ * 相同的 AES-256-GCM 密钥加密后写入 <数据目录>/clawbot.json。
+ */
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { createCipheriv, createDecipheriv, randomBytes, randomInt } from 'node:crypto'
+
+export const name = 'wechat-clawbot-bridge'
+export const version = '1.0.0'
+export const displayName = '微信 Clawbot 后端桥'
+export const description = '渠道后端 · Clawbot 登录、长轮询、发送消息与 typing 状态。'
+export const core = false
+export const inject = ['settings', 'hub']
+export const provides = [{ name: 'clawbot', type: 'singleton' }]
+
+const DEFAULT_BASE_URL =
+  process.env.NIANFENG_CLAWBOT_BASE_URL ||
+  process.env.NIANFENG_CLAWBOT_BASE_URL ||
+  'https://ilinkai.weixin.qq.com'
+const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
+const ENC_PREFIX = 'enc:v1:'
+const STATE_FILE = 'clawbot.json'
+const BASE_INFO = { channel_version: '1.0.0', bot_agent: 'NianFeng-Chat/1.0.0 WeChatClawbot/1.0.0' }
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const trimSlash = value => String(value || '').replace(/\/+$/, '')
+
+function randomUin() {
+  return Buffer.from(String(randomInt(1, 2 ** 32 - 1))).toString('base64')
+}
+
+function jsonHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'iLink-App-Id': '',
+    'iLink-App-ClientVersion': '65536',
+  }
+}
+
+function authHeaders(token) {
+  return {
+    ...jsonHeaders(),
+    AuthorizationType: 'ilink_bot_token',
+    Authorization: `Bearer ${String(token || '').trim()}`,
+    'X-WECHAT-UIN': randomUin(),
+  }
+}
+
+function apiErrorText(response) {
+  if (!response || typeof response !== 'object') return String(response || '未知错误')
+  const code = response.errcode ?? response.ret
+  const message = response.errmsg || response.message || response.error || response.raw || ''
+  return [code !== undefined && code !== 0 ? `code=${code}` : '', message ? String(message).slice(0, 300) : ''].filter(Boolean).join(' ') || '接口未返回有效数据'
+}
+
+function isSessionExpired(response) {
+  if (!response || typeof response !== 'object') return false
+  for (const field of ['ret', 'errcode']) {
+    const value = Number(response[field])
+    if (Number.isFinite(value) && value === -14) return true
+  }
+  const text = apiErrorText(response).toLowerCase()
+  return /401|403|invalid token|token expired|session expired|登录.*(失效|过期)/i.test(text)
+}
+
+function isApiError(response) {
+  if (!response || typeof response !== 'object') return true
+  if (response._error) return true
+  if (response._httpStatus && response._httpStatus >= 400) return true
+  const ret = Number(response.ret)
+  const errcode = Number(response.errcode)
+  if (Number.isFinite(ret) && ret !== 0) return true
+  if (Number.isFinite(errcode) && errcode !== 0) return true
+  return false
+}
+
+function extractMessages(response) {
+  if (!response || typeof response !== 'object') return []
+  const candidates = [response.msgs, response.messages, response.updates, response.data?.msgs, response.data?.messages]
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate
+  }
+  if (response.msg && typeof response.msg === 'object') return [response.msg]
+  return []
+}
+
+function isOwnMessage(raw) {
+  const msg = raw?.msg || raw || {}
+  const from = String(msg.from_user_id || msg.fromUserId || raw?.from_user_id || '')
+  if (!from) return true
+  const messageType = Number(msg.message_type ?? raw?.message_type)
+  if (Number.isFinite(messageType) && messageType === 2) return true
+  return false
+}
+
+function normalizeIncoming(raw) {
+  const msg = raw?.msg || raw || {}
+  const items = Array.isArray(msg.item_list) ? msg.item_list : Array.isArray(raw?.item_list) ? raw.item_list : []
+  const texts = []
+  let hasMedia = false
+  for (const item of items) {
+    const type = Number(item?.type)
+    if (type === 1 && item?.text_item?.text) texts.push(String(item.text_item.text))
+    else if ([2, 3, 4, 5].includes(type)) hasMedia = true
+  }
+  let text = texts.join('').trim()
+  if (!text && hasMedia) text = '[微信侧媒体消息]'
+  const fromUserId = String(msg.from_user_id || msg.fromUserId || raw?.from_user_id || raw?.sender || '')
+  if (!fromUserId || !text) return null
+  const contextToken = String(msg.context_token || raw?.context_token || '')
+  const messageId = msg.message_id ?? msg.msg_id ?? msg.seq ?? msg.seq_id ?? null
+  const id = messageId !== null && messageId !== undefined && String(messageId).trim()
+    ? `wx-${messageId}`
+    : `wx-${fromUserId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const timestamp = Number(msg.create_time_ms || raw?.create_time_ms || 0) || Date.now()
+  return {
+    id,
+    fromUserId,
+    contextToken,
+    text,
+    timestamp,
+    kind: hasMedia && !texts.length ? 'media' : 'text',
+    raw: {
+      message_id: messageId,
+      from_user_id: fromUserId,
+      context_token: contextToken,
+      message_type: Number(msg.message_type || 1),
+      create_time_ms: timestamp,
+    },
+  }
+}
+
+export function apply(ctx) {
+  // 后端是真实 cordis：inject 声明会先把服务放到 ctx 上，这里直接读取。
+  const settings = ctx.settings
+  const hub = ctx.hub
+  const sessions = new Map()
+  let state = { version: 1, accounts: {} }
+  let secretKey = null
+  let persistTimer = null
+  let closed = false
+
+  const statePath = () => join(settings.dataDir || process.cwd(), STATE_FILE)
+  const keyPath = () => join(settings.dataDir || process.cwd(), '.secret-key')
+
+  const readSecret = async () => {
+    try {
+      const raw = (await readFile(keyPath(), 'utf8')).trim()
+      const key = Buffer.from(raw, 'base64')
+      return key.length === 32 ? key : null
+    } catch (_) {
+      return null
+    }
+  }
+
+  const encrypt = plain => {
+    const value = String(plain || '')
+    if (!value) return ''
+    if (!secretKey) return value
+    if (value.startsWith(ENC_PREFIX)) return value
+    const iv = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', secretKey, iv)
+    const data = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+    const tag = cipher.getAuthTag()
+    return `${ENC_PREFIX}${iv.toString('base64')}:${tag.toString('base64')}:${data.toString('base64')}`
+  }
+
+  const decrypt = stored => {
+    const value = String(stored || '')
+    if (!value || !value.startsWith(ENC_PREFIX)) return value
+    if (!secretKey) return ''
+    try {
+      const [ivB64, tagB64, dataB64] = value.slice(ENC_PREFIX.length).split(':')
+      const decipher = createDecipheriv('aes-256-gcm', secretKey, Buffer.from(ivB64, 'base64'))
+      decipher.setAuthTag(Buffer.from(tagB64, 'base64'))
+      return Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]).toString('utf8')
+    } catch (_) {
+      ctx.logger.warn('Clawbot 账号凭据解密失败，请重新扫码登录')
+      return ''
+    }
+  }
+
+  const persist = async () => {
+    if (closed) return
+    try {
+      await mkdir(settings.dataDir, { recursive: true })
+      const tmp = `${statePath()}.${process.pid}.tmp`
+      await writeFile(tmp, JSON.stringify(state, null, 2), 'utf8')
+      await rename(tmp, statePath())
+      try {
+        await chmod(statePath(), 0o600)
+      } catch (_) {
+        /* Windows 忽略 */
+      }
+    } catch (err) {
+      ctx.logger.warn(`Clawbot 状态写入失败：${err.message}`)
+    }
+  }
+
+  const schedulePersist = () => {
+    if (persistTimer) return
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      persist().catch(() => {})
+    }, 500)
+  }
+
+  const getSession = channelId => {
+    const key = String(channelId || '').trim()
+    if (!key) return null
+    let session = sessions.get(key)
+    if (session) return session
+    const saved = state.accounts[key] || {}
+    session = {
+      channelId: key,
+      account: saved.account
+        ? {
+            ...saved.account,
+            token: decrypt(saved.account.token || ''),
+          }
+        : null,
+      buf: String(saved.updatesBuf || ''),
+      inbox: Array.isArray(saved.inbox) ? saved.inbox : [],
+      seen: Array.isArray(saved.seen) ? saved.seen : [],
+      contextTokens: saved.contextTokens && typeof saved.contextTokens === 'object' ? { ...saved.contextTokens } : {},
+      typingTickets: new Map(),
+      qr: null,
+      status: saved.account?.token ? 'offline' : 'idle',
+      error: '',
+      loop: null,
+      closed: false,
+    }
+    sessions.set(key, session)
+    return session
+  }
+
+  const toStateAccount = session => ({
+    account: session.account
+      ? {
+          accountId: session.account.accountId || '',
+          userId: session.account.userId || '',
+          nickname: session.account.nickname || '',
+          baseUrl: session.account.baseUrl || DEFAULT_BASE_URL,
+          cdnBaseUrl: session.account.cdnBaseUrl || DEFAULT_CDN_BASE_URL,
+          token: encrypt(session.account.token || ''),
+        }
+      : null,
+    updatesBuf: session.buf || '',
+    inbox: (session.inbox || []).slice(-100),
+    seen: (session.seen || []).slice(-500),
+    contextTokens: Object.fromEntries(Object.entries(session.contextTokens || {}).slice(-100)),
+    updatedAt: new Date().toISOString(),
+  })
+
+  const saveSession = session => {
+    state.accounts[session.channelId] = toStateAccount(session)
+    schedulePersist()
+  }
+
+  const publicStatus = session => ({
+    channelId: session.channelId,
+    status: session.status,
+    loggedIn: !!session.account?.token,
+    accountId: session.account?.accountId || '',
+    userId: session.account?.userId || '',
+    nickname: session.account?.nickname || '',
+    error: session.error || '',
+    pending: (session.inbox || []).length,
+    qr: session.qr
+      ? {
+          content: session.qr.content || '',
+          imageUrl: session.qr.imageUrl || '',
+          status: session.qr.status || 'wait_scan',
+          startedAt: session.qr.startedAt || 0,
+          expiresAt: session.qr.expiresAt || 0,
+        }
+      : null,
+  })
+
+  const broadcastStatus = (session, status, extra = {}) => {
+    if (!session) return
+    session.status = status
+    if (extra.error !== undefined) session.error = String(extra.error || '')
+    hub.broadcast('clawbot:status', { ...publicStatus(session), ...extra, status })
+  }
+
+  async function requestApi(session, path, { method = 'POST', body, token = '', baseUrl = '', timeoutMs = 20000 } = {}) {
+    const base = trimSlash(baseUrl || session?.account?.baseUrl || DEFAULT_BASE_URL)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('请求超时')), Math.max(1000, Number(timeoutMs) || 20000))
+    try {
+      const response = await fetch(`${base}${path}`, {
+        method,
+        headers: token ? authHeaders(token) : jsonHeaders(),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      })
+      const text = await response.text()
+      let data = {}
+      try {
+        data = text ? JSON.parse(text) : {}
+      } catch (_) {
+        data = { raw: text.slice(0, 500) }
+      }
+      if (!response.ok) data._httpStatus = response.status
+      return data
+    } catch (err) {
+      return { _error: err?.name === 'AbortError' ? '请求超时' : err?.message || String(err) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function notifyStart(session) {
+    if (!session?.account?.token || session.startedNotified) return
+    const response = await requestApi(session, '/ilink/bot/msg/notifystart', {
+      method: 'POST',
+      token: session.account.token,
+      body: { base_info: BASE_INFO },
+      timeoutMs: 12000,
+    })
+    if (!response?._error && !response?._httpStatus) session.startedNotified = true
+  }
+
+  function markSeen(session, id) {
+    if (!id || session.seen.includes(id)) return false
+    session.seen.push(id)
+    if (session.seen.length > 500) session.seen.splice(0, session.seen.length - 500)
+    return true
+  }
+
+  function enqueueIncoming(session, message) {
+    if (!message || !markSeen(session, message.id)) return false
+    session.inbox.push(message)
+    if (session.inbox.length > 100) session.inbox.splice(0, session.inbox.length - 100)
+    saveSession(session)
+    hub.broadcast('clawbot:message', { channelId: session.channelId, message })
+    return true
+  }
+
+  async function pollLoop(session) {
+    await notifyStart(session)
+    broadcastStatus(session, session.account?.token ? 'online' : 'offline')
+    while (!closed && !session.closed && session.account?.token) {
+      try {
+        const response = await requestApi(session, '/ilink/bot/getupdates', {
+          method: 'POST',
+          token: session.account.token,
+          body: { get_updates_buf: session.buf || '', base_info: BASE_INFO },
+          timeoutMs: 40000,
+        })
+        if (closed || session.closed) return
+        if (isSessionExpired(response)) {
+          ctx.logger.warn(`[clawbot] ${session.channelId} 登录已过期，需要重新接入`)
+          session.account = null
+          session.buf = ''
+          session.qr = null
+          session.startedNotified = false
+          saveSession(session)
+          broadcastStatus(session, 'expired', { error: '微信登录已过期，请重新扫码接入' })
+          return
+        }
+        if (isApiError(response)) {
+          broadcastStatus(session, 'error', { error: apiErrorText(response) })
+          await sleep(3000)
+          continue
+        }
+        const nextBuf = response.get_updates_buf || response.next_get_updates_buf || response.update_buf
+        if (typeof nextBuf === 'string' && nextBuf !== session.buf) {
+          session.buf = nextBuf
+          saveSession(session)
+        }
+        for (const raw of extractMessages(response)) {
+          if (isOwnMessage(raw)) continue
+          const message = normalizeIncoming(raw)
+          if (!message) continue
+          if (message.contextToken) {
+            session.contextTokens[message.fromUserId] = message.contextToken
+            saveSession(session)
+          }
+          enqueueIncoming(session, message)
+        }
+        if (session.status !== 'online') broadcastStatus(session, 'online')
+      } catch (err) {
+        if (closed || session.closed) return
+        broadcastStatus(session, 'error', { error: err?.message || String(err) })
+        await sleep(3000)
+      }
+    }
+  }
+
+  function ensureLoop(session) {
+    if (!session?.account?.token || session.loop || closed || session.closed) return
+    session.loop = pollLoop(session)
+      .catch(err => ctx.logger.warn(`[clawbot] 轮询异常：${err?.message || err}`))
+      .finally(() => {
+        session.loop = null
+      })
+  }
+
+  async function getTypingTicket(session, toUserId, contextToken) {
+    const cacheKey = `${toUserId}|${contextToken || ''}`
+    const cached = session.typingTickets.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) return cached.ticket
+    const response = await requestApi(session, '/ilink/bot/getconfig', {
+      method: 'POST',
+      token: session.account?.token,
+      body: { ilink_user_id: toUserId, context_token: contextToken || undefined, base_info: BASE_INFO },
+      timeoutMs: 12000,
+    })
+    if (isApiError(response) || !response.typing_ticket) return ''
+    const ticket = String(response.typing_ticket)
+    session.typingTickets.set(cacheKey, { ticket, expiresAt: Date.now() + 10 * 60 * 1000 })
+    return ticket
+  }
+
+  const ready = (async () => {
+    try {
+      await settings.ready()
+      secretKey = await readSecret()
+      try {
+        const raw = await readFile(statePath(), 'utf8')
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && parsed.accounts && typeof parsed.accounts === 'object') state = parsed
+      } catch (_) {
+        state = { version: 1, accounts: {} }
+      }
+      for (const channelId of Object.keys(state.accounts || {})) {
+        const session = getSession(channelId)
+        if (session.account?.token) {
+          broadcastStatus(session, 'connecting')
+          ensureLoop(session)
+        } else if (session.status === 'connecting') {
+          session.status = 'offline'
+        }
+      }
+      ctx.logger.info(`微信 Clawbot 后端桥就绪（${Object.keys(state.accounts || {}).length} 个已保存渠道）`)
+    } catch (err) {
+      ctx.logger.warn(`微信 Clawbot 后端桥初始化失败：${err?.message || err}`)
+    }
+  })()
+
+  const service = {
+    name: 'clawbot',
+    ready: () => ready,
+
+    /** 二维码登录：获取 ticket 与二维码内容 */
+    async startLogin({ channelId } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session) throw Object.assign(new Error('缺少 channelId'), { status: 400 })
+      if (session.account?.token) {
+        ensureLoop(session)
+        return { ...publicStatus(session), status: 'logged_in' }
+      }
+      session.qr = { status: 'getting_qr', startedAt: Date.now() }
+      session.error = ''
+      broadcastStatus(session, 'connecting')
+      const localTokens = Object.values(state.accounts || {})
+        .map(account => decrypt(account?.account?.token || ''))
+        .filter(Boolean)
+      const response = await requestApi(session, '/ilink/bot/get_bot_qrcode?bot_type=3', {
+        method: 'POST',
+        token: '',
+        body: { local_token_list: localTokens },
+        timeoutMs: 15000,
+      })
+      if (isApiError(response)) {
+        session.qr = null
+        broadcastStatus(session, 'error', { error: `获取二维码失败：${apiErrorText(response)}` })
+        throw Object.assign(new Error(`获取二维码失败：${apiErrorText(response)}`), { status: 502 })
+      }
+      const ticket = String(response.qrcode || response.qrcode_ticket || '')
+      const content = String(response.qrcode_img_content || response.qrcode_img_url || response.qrcodeUrl || response.qrcode_url || ticket || '')
+      if (!ticket || !content) {
+        session.qr = null
+        broadcastStatus(session, 'error', { error: '微信未返回二维码内容' })
+        throw Object.assign(new Error('微信未返回二维码内容'), { status: 502 })
+      }
+      session.qr = {
+        ticket,
+        content,
+        imageUrl: /^https?:\/\//i.test(content) && /\.(png|jpe?g|gif|webp|bmp|avif)(\?|#|$)/i.test(content) ? content : '',
+        status: 'wait_scan',
+        startedAt: Date.now(),
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      }
+      broadcastStatus(session, 'connecting')
+      return publicStatus(session)
+    },
+
+    /** 查询扫码状态；确认后保存 token 并启动长轮询 */
+    async loginStatus({ channelId } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session) return { channelId, status: 'idle', loggedIn: false }
+      if (session.account?.token) {
+        ensureLoop(session)
+        return { ...publicStatus(session), status: 'logged_in' }
+      }
+      if (!session.qr?.ticket) return publicStatus(session)
+      if (session.qr.expiresAt && Date.now() > session.qr.expiresAt) {
+        session.qr.status = 'expired'
+        broadcastStatus(session, 'expired', { error: '二维码已过期，请重新获取' })
+        return publicStatus(session)
+      }
+      const response = await requestApi(session, `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(session.qr.ticket)}`, {
+        method: 'GET',
+        timeoutMs: 12000,
+      })
+      if (isApiError(response)) {
+        broadcastStatus(session, 'error', { error: `查询二维码状态失败：${apiErrorText(response)}` })
+        return publicStatus(session)
+      }
+      const code = String(response.status || response.state || '').toLowerCase()
+      if (code === 'confirmed') {
+        const token = String(response.bot_token || response.token || response.access_token || response.ilink_bot_token || '')
+        const accountId = String(response.ilink_bot_id || response.bot_id || response.account_id || '')
+        if (!token) {
+          session.qr.status = 'error'
+          broadcastStatus(session, 'error', { error: '扫码已确认，但微信未返回登录 token' })
+          return publicStatus(session)
+        }
+        session.account = {
+          token,
+          accountId,
+          userId: String(response.ilink_user_id || response.user_id || response.wxid || ''),
+          nickname: String(response.nickname || response.ilink_nickname || response.wx_nickname || accountId.slice(0, 8) || '微信用户'),
+          baseUrl: String(response.base_url || response.api_base_url || DEFAULT_BASE_URL),
+          cdnBaseUrl: String(response.cdn_base_url || response.cdnBaseUrl || DEFAULT_CDN_BASE_URL),
+        }
+        session.qr = { ...(session.qr || {}), status: 'confirmed' }
+        session.buf = ''
+        session.inbox = []
+        session.seen = []
+        session.startedNotified = false
+        saveSession(session)
+        ensureLoop(session)
+        broadcastStatus(session, 'online', { message: '微信 Clawbot 已登录' })
+        return { ...publicStatus(session), status: 'logged_in' }
+      }
+      if (code === 'expired' || code === 'verify_code_blocked') {
+        session.qr.status = code
+        broadcastStatus(session, code === 'expired' ? 'expired' : 'error', { error: code === 'expired' ? '二维码已过期，请重新获取' : '验证失败次数过多，请稍后再试' })
+        return publicStatus(session)
+      }
+      if (code === 'scaned' || code === 'scaned_but_redirect' || code === 'binded_redirect') {
+        session.qr.status = 'scanned'
+        return { ...publicStatus(session), status: 'scanned' }
+      }
+      session.qr.status = 'wait_scan'
+      return publicStatus(session)
+    },
+
+    async status({ channelId, all = false } = {}) {
+      await ready
+      if (all) {
+        return [...sessions.values()].map(publicStatus)
+      }
+      const session = getSession(channelId)
+      if (!session) return null
+      if (session.account?.token) ensureLoop(session)
+      return publicStatus(session)
+    },
+
+    async logout({ channelId } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session) return { ok: true }
+      session.closed = true
+      session.account = null
+      session.buf = ''
+      session.inbox = []
+      session.seen = []
+      session.qr = null
+      session.startedNotified = false
+      session.closed = false
+      delete state.accounts[session.channelId]
+      schedulePersist()
+      broadcastStatus(session, 'offline')
+      return { ok: true }
+    },
+
+    async sendText({ channelId, toUserId, text, contextToken } = {}) {
+      await ready
+      const session = getSession(channelId)
+      const content = String(text || '').trim()
+      if (!session?.account?.token) throw Object.assign(new Error('微信 Clawbot 尚未登录'), { status: 409 })
+      if (!toUserId || !content) throw Object.assign(new Error('缺少发送目标或内容'), { status: 400 })
+      const response = await requestApi(session, '/ilink/bot/sendmessage', {
+        method: 'POST',
+        token: session.account.token,
+        body: {
+          msg: {
+            from_user_id: '',
+            to_user_id: String(toUserId),
+            client_id: `nianfeng-wechat-clawbot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            message_type: 2,
+            message_state: 2,
+            item_list: [{ type: 1, text_item: { text: content } }],
+            context_token: contextToken || undefined,
+          },
+          base_info: BASE_INFO,
+        },
+        timeoutMs: 20000,
+      })
+      if (isSessionExpired(response)) {
+        session.account = null
+        saveSession(session)
+        broadcastStatus(session, 'expired', { error: '微信登录已过期，请重新扫码接入' })
+        throw Object.assign(new Error('微信登录已过期，请重新扫码接入'), { status: 401 })
+      }
+      if (isApiError(response)) throw Object.assign(new Error(`微信发送失败：${apiErrorText(response)}`), { status: 502 })
+      return { ok: true, response }
+    },
+
+    async startTyping({ channelId, toUserId, contextToken } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session?.account?.token || !toUserId) return { ok: false, reason: 'not-ready' }
+      const ticket = await getTypingTicket(session, toUserId, contextToken)
+      if (!ticket) return { ok: false, reason: 'no-ticket' }
+      const response = await requestApi(session, '/ilink/bot/sendtyping', {
+        method: 'POST',
+        token: session.account.token,
+        body: {
+          ilink_user_id: toUserId,
+          typing_ticket: ticket,
+          status: 1,
+          context_token: contextToken || undefined,
+          base_info: BASE_INFO,
+        },
+        timeoutMs: 12000,
+      })
+      return { ok: !isApiError(response), response }
+    },
+
+    async stopTyping({ channelId, toUserId, contextToken } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session?.account?.token || !toUserId) return { ok: false, reason: 'not-ready' }
+      const ticket = await getTypingTicket(session, toUserId, contextToken)
+      if (!ticket) return { ok: false, reason: 'no-ticket' }
+      const response = await requestApi(session, '/ilink/bot/sendtyping', {
+        method: 'POST',
+        token: session.account.token,
+        body: {
+          ilink_user_id: toUserId,
+          typing_ticket: ticket,
+          status: 2,
+          context_token: contextToken || undefined,
+          base_info: BASE_INFO,
+        },
+        timeoutMs: 12000,
+      })
+      return { ok: !isApiError(response), response }
+    },
+
+    async inbox({ channelId } = {}) {
+      await ready
+      const session = getSession(channelId)
+      return session ? { channelId, messages: [...session.inbox] } : { channelId, messages: [] }
+    },
+
+    async ackInbox({ channelId, ids = [] } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session) return { ok: true, removed: 0 }
+      const set = new Set((Array.isArray(ids) ? ids : []).map(String))
+      const before = session.inbox.length
+      session.inbox = session.inbox.filter(message => !set.has(String(message.id)))
+      saveSession(session)
+      return { ok: true, removed: before - session.inbox.length }
+    },
+
+    /** 当前所有已保存渠道的登录状态（前端启动时同步用） */
+    snapshot: async () => {
+      await ready
+      return [...sessions.values()].map(publicStatus)
+    },
+
+    contextTokenFor: (channelId, userId) => getSession(channelId)?.contextTokens?.[String(userId)] || '',
+  }
+
+  ctx.provide('clawbot', service)
+
+  ctx.effect(() => async () => {
+    closed = true
+    if (persistTimer) clearTimeout(persistTimer)
+    for (const session of sessions.values()) session.closed = true
+    await persist()
+  })
+}

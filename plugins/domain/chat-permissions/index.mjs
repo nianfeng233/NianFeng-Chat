@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · chat-permissions
  * 聊天链路权限与敏感确认（文档 §7）：
@@ -10,7 +15,7 @@ export const name = 'chat-permissions'
 export const version = '1.0.0'
 export const displayName = '聊天权限'
 export const description = '业务服务 · 渠道读写权限表、跨渠道校验、敏感确认与审计。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
 export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0', 'event-bus': '^1.0.0' }

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V4 · rail-nav-buttons
  * 侧边栏导航：从 view-router 动态生成视图按钮，不写死 chat / channel。
@@ -7,7 +12,7 @@ export const name = 'rail-nav-buttons'
 export const version = '1.0.0'
 export const displayName = '侧栏导航'
 export const description = '侧边栏内容 · 会话 / 渠道 / 设置切换。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧭'
 export const core = true
 export const depends = { rail: '^1.0.0', 'view-router': '^1.0.0' }

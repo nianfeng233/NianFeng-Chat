@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V13 · channel-list
  * 渠道列表：分组折叠、右键菜单、渠道拖拽跨组、添加渠道。
@@ -7,7 +12,7 @@ export const name = 'channel-list'
 export const version = '1.0.0'
 export const displayName = '渠道列表'
 export const description = '视觉内容 · 渠道分组列表、拖拽排序与添加渠道。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
 export const depends = { 'left-list-panel': '^1.0.0', 'channel-registry': '^1.0.0' }
@@ -294,6 +299,10 @@ export function apply(ctx) {
     /* ---------------- 增删改 ---------------- */
     async function createChannel(type) {
       const typeDef = channels.type(type)
+      // 渠道类型可以自带配置窗口（例如微信 Clawbot：角色 / 分类 / 权限 / 扫码登录）
+      if (typeof typeDef?.create === 'function') {
+        return typeDef.create({ tab, typeDef })
+      }
       const result = await modal.prompt({
         title: `添加${typeDef?.name || '渠道'}`,
         value: '',

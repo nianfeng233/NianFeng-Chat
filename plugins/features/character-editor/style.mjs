@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** 角色编辑（捏人窗口）样式。 */
 export const CHARACTER_CSS = `
   .char-mask{position:fixed;inset:0;z-index:120;background:rgba(20,26,18,.34);display:flex;align-items:center;justify-content:center;padding:24px;animation:char-fade .16s ease}

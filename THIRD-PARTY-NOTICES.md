@@ -1,10 +1,15 @@
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
 # 第三方组件与许可证声明
 
-> 风语原创代码、文档、界面与资源使用 Apache License 2.0（见根目录 LICENSE 与 NOTICE）；release/publish 发布仓库同样适用。
+> 念风原创代码、文档、界面与资源使用 Apache License 2.0（见根目录 LICENSE 与 NOTICE）；release/publish 发布仓库同样适用。
 > 本文件仅列出第三方组件与相应许可证义务。
 
 
-本文件用于满足风语项目的第三方依赖署名与许可证声明义务。
+本文件用于满足念风项目的第三方依赖署名与许可证声明义务。
 `docs/DEPENDENCIES.md` 由 `npm run audit:deps` 自动生成，包含完整依赖清单；
 本文件给出最重要的分发注意事项与通用许可证文本。
 
@@ -13,7 +18,7 @@
 
 ## 1. Node.js 运行时
 
-桌面版 `风语.exe` 内嵌了 Node.js 运行时，并会释放到本机运行；Web 部署版在
+桌面版 `念风Chat.exe` 内嵌了 Node.js 运行时，并会释放到本机运行；Web 部署版在
 `runtime/node.exe` 中携带便携运行时。本次构建使用 Node.js v24.x。
 
 Node.js 主体使用 MIT 许可证；发行版中还包含 V8、OpenSSL、c-ares、ICU 等
@@ -35,6 +40,16 @@ Node.js 主体使用 MIT 许可证；发行版中还包含 V8、OpenSSL、c-ares
 这些依赖均为 MIT 许可证，允许商业使用、修改与再分发，但需要保留版权声明
 与许可证文本。
 
+## 2.1 内置 QRCode（微信clawbot 插件 vendor）
+
+`plugins/channels/wechat-clawbot/vendor/qrcode/` 是 **QRCode for JavaScript** 的
+ESM 转换版，来自 `qrcode-terminal` 的 `vendor/QRCode`：
+
+- Copyright (c) 2009 Kazuhiko Arase
+- MIT License（<https://opensource.org/licenses/MIT>）
+- 用途：微信 Clawbot 登录二维码的本地渲染；不参与联网请求。
+
+分发时请随插件目录保留本声明与 `vendor/qrcode/` 中的版权/许可证注释。
 ## 3. Rust 桌面壳依赖
 
 Rust 依赖及许可证清单见 [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)，
@@ -56,7 +71,7 @@ Apache-2.0 许可证要求保留版权、许可证与 NOTICE（如上游提供�
 
 ## 4. Microsoft WebView2 Runtime
 
-桌面版通过 Microsoft Edge WebView2 Runtime 渲染界面。风语不复制、不修改
+桌面版通过 Microsoft Edge WebView2 Runtime 渲染界面。念风不复制、不修改
 WebView2 Runtime 本身；最终用户需按 Microsoft 的许可条款安装 / 使用该运行时：
 
 - https://learn.microsoft.com/microsoft-edge/webview2/
@@ -66,7 +81,7 @@ WebView2 Runtime 本身；最终用户需按 Microsoft 的许可条款安装 / �
 
 ## 5. 模型服务与第三方商标
 
-风语本身只是客户端，不内置任何模型或官方云服务。用户接入的
+念风本身只是客户端，不内置任何模型或官方云服务。用户接入的
 DeepSeek / OpenAI / Anthropic / Google Gemini / Ollama 等服务，分别受
 各自的服务条款、隐私政策与商标政策约束。商业分发时请注意：
 

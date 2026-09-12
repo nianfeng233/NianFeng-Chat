@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V9 · message-list
  * 消息滚动区容器：订阅消息事件，调用当前气泡实现渲染每一行。
@@ -7,7 +12,7 @@ export const name = 'message-list'
 export const version = '1.0.0'
 export const displayName = '消息列表'
 export const description = '视觉内容 · 消息滚动区容器与渲染调度。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📜'
 export const core = true
 export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
@@ -169,7 +174,7 @@ export function apply(ctx) {
 /** 没有气泡样式可用时的兜底渲染（也应保证不崩） */
 function fallbackRow(message, conv, config) {
   const isMe = message.role === 'user'
-  // 用户头像统一走 identity（默认风语 logo，可在 user-widget 更换）；
+  // 用户头像统一走 identity（默认念风 logo，可在 user-widget 更换）；
   // 角色头像统一走 characterAvatarHtml（自定义图片 / 首字色块）。
   const avatar = isMe ? userAvatarHtml(config) : characterAvatarHtml(conv)
   return `<div class="msg-row ${isMe ? 'right' : ''}" data-message-id="${message.id}">${avatar}

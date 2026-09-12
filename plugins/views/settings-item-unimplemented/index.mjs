@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 设置项 · 未实现清单
  * 把当前版本里"确实还没做"的功能集中列出，避免用户误以为是 bug。
@@ -6,7 +11,7 @@ export const name = 'settings-item-unimplemented'
 export const version = '1.0.0'
 export const displayName = '设置项 · 未实现清单'
 export const description = '设置页 · 如实列出尚未实现的功能与原因。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🚧'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0' }
@@ -16,8 +21,7 @@ import { page, section, card, row } from '../../../src/util/settings.mjs'
 import { icons } from '../../../src/util/icons.mjs'
 
 const ITEMS = [
-  ['扩展插件（QQ/微信气泡、音乐播放器、番茄钟、RSS、TTS、翻译、Telegram 渠道）', '未实现', '这些已从核心移除，定位为独立扩展插件：音乐播放器 / 番茄钟 / TTS（speechSynthesis）属于本地可做但需要单独排期的功能；RSS / 翻译依赖网络或已配置的模型；Telegram 与气泡渠道需要协议和权限。'],
-  ['微信渠道', '未实现', '微信个人号没有官方 API，需接入 wechaty 等第三方协议，存在封号与合规风险。'],
+  ['扩展插件（QQ / 微信气泡、音乐播放器、番茄钟、RSS、TTS、翻译、Telegram 渠道）', '未实现', '这些已从核心移除，定位为独立扩展插件：音乐播放器 / 番茄钟 / TTS（speechSynthesis）属于本地可做但需要单独排期的功能；RSS / 翻译依赖网络或已配置的模型；Telegram 与气泡渠道需要协议和权限。'],
   ['Discord 渠道', '未实现', '需要 Bot Gateway 长连接、OAuth 与权限申请流程。'],
   ['邮箱渠道', '未实现', '需要 IMAP/SMTP 凭据、邮件线程解析与附件处理。'],
   ['代码运行器（code-runner）', '部分实现', '设置 → 代码运行器 已内置 JavaScript Web Worker 沙箱：无 DOM、禁用 fetch / XHR / importScripts、5 秒超时自动终止。Python / Node / 系统命令需要操作系统级沙箱，未实现。'],

@@ -1,7 +1,12 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * Nova 渠道 · 工具循环集成测试
  *
- *   本地 Mock OpenAI（带 function calling） ↔ 风语后端 /api/chat ↔ 前端插件链路
+ *   本地 Mock OpenAI（带 function calling） ↔ 念风后端 /api/chat ↔ 前端插件链路
  *
  * 覆盖文档第一阶段：
  *   - WebUI 会话 = nova:web:<会话id> 渠道，消息带 message_id / seq / timestamp / source
@@ -211,7 +216,7 @@ async function main() {
   const appRoot = document.createElement('div')
   appRoot.id = 'app'
   document.body.appendChild(appRoot)
-  localStorage.setItem('fengyu:config', JSON.stringify({ data: { backend: { url: `${base}/api` } } }))
+  localStorage.setItem('nianfeng:config', JSON.stringify({ data: { backend: { url: `${base}/api` } } }))
 
   const { ctx, loader } = await import('../src/main.mjs').then(mod => mod.boot())
   await sleep(500)

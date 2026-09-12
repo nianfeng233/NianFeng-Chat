@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V15 · settings-view
  * 设置视图入口：覆盖在右侧主面板之上的整页视图。
@@ -7,7 +12,7 @@ export const name = 'settings-view'
 export const version = '1.0.0'
 export const displayName = '设置视图'
 export const description = '视觉内容 · 设置页外壳、导航槽与内容槽。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⚙️'
 export const core = true
 export const depends = { 'app-shell': '^1.0.0' }

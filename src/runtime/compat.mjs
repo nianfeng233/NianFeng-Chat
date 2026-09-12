@@ -1,10 +1,15 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 兼容层：让风语插件可以使用一套简洁稳定的 ctx API，
+ * 兼容层：让念风插件可以使用一套简洁稳定的 ctx API，
  * 而底层完全运行在真实的 cordis Context 上。
  *
  * 插件拿到的 `ctx` 是一个以 cordis 的 fiber Context 为原型的对象：
  *   - 未覆盖的属性/方法直接走 cordis（ctx.effect / ctx.on / ctx.emit / ctx.extend ...）
- *   - 覆盖的部分提供风语的约定：
+ *   - 覆盖的部分提供念风的约定：
  *       inject(deps[, cb])   无需回调也能取值（cordis 只支持回调形式）
  *       provide(name, value, meta)  带 owner / 类型记录的冲突检测
  *       emit(name, payload, {interceptor, onIntercept})
@@ -268,9 +273,9 @@ export function createCompat(app, ctx, { id, meta = {} } = {}) {
 
     /* -------------------- 生命周期 -------------------- */
     /**
-     * 风语语义：ctx.effect(fn) 表示"把 fn 注册为卸载时的清理函数"。
+     * 念风语义：ctx.effect(fn) 表示"把 fn 注册为卸载时的清理函数"。
      * cordis 原生语义是 effect(execute)：立即执行 execute 并注册其返回值。
-     * 这里统一成风语语义，并包一层错误兜底。
+     * 这里统一成念风语义，并包一层错误兜底。
      */
     effect(fn) {
       if (typeof fn !== 'function') return () => {}

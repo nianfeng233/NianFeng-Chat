@@ -1,10 +1,10 @@
 {
-  "name": "fengyu-chat",
+  "name": "nianfeng-chat",
   "version": "0.41.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
-  "description": "风语 · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + 本地后端）",
+  "description": "念风：本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）",
   "scripts": {
     "start": "node start.mjs",
     "dev": "node start.mjs",
@@ -16,6 +16,8 @@
     "release:publish": "node scripts/publish-release.mjs",
     "build:release": "node scripts/package-release.mjs",
     "build:desktop": "node scripts/package-release.mjs --desktop-only",
+    "sync:clawbot-plugin": "node scripts/sync-clawbot-standalone.mjs",
+    "build:clawbot-plugin": "node scripts/sync-clawbot-standalone.mjs && node scripts/package-clawbot-plugin.mjs",
     "audit:deps": "node scripts/audit-dependencies.mjs",
     "check:kernels": "node scripts/check-syntax.mjs",
     "test:smoke": "node scripts/smoke.mjs",
@@ -23,8 +25,9 @@
     "test:chat": "node scripts/test-chat.mjs",
     "test:chat-tools": "node scripts/test-chat-tools.mjs",
     "test:vendors": "node scripts/test-vendors.mjs",
+    "test:clawbot": "node scripts/test-clawbot.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",
-    "test": "npm run check:kernels && npm run test:backend && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors"
+    "test": "npm run check:kernels && npm run test:backend && npm run test:clawbot && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors"
   },
   "engines": {
     "node": ">=20"

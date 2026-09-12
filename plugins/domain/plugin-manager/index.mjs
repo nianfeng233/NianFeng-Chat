@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D7 · plugin-manager
  * 插件启停 / 安装 / 卸载 的用户侧入口（文档 §4.4）。
@@ -7,7 +12,7 @@ export const name = 'plugin-manager'
 export const version = '1.0.0'
 export const displayName = '插件管理器'
 export const description = '业务服务 · 插件启停 / 安装 / 卸载与状态整理。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = { 'plugin-loader': '^1.0.0', config: '^1.0.0' }

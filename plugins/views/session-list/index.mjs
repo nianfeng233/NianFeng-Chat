@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V7 · session-list
  * 会话列表：搜索、选中/取消、右键菜单（重命名 / 删除 / 清空）、紧凑模式搜索浮层。
@@ -6,7 +11,7 @@ export const name = 'session-list'
 export const version = '1.0.0'
 export const displayName = '会话列表'
 export const description = '视觉内容 · 会话列表与搜索。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📋'
 export const core = true
 export const depends = { 'left-list-panel': '^1.0.0', 'session-service': '^1.0.0' }

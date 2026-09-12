@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F1 · storage
  * KV + 结构化数据存储。浏览器环境用 localStorage，不可用时自动降级到内存，
@@ -7,13 +12,13 @@ export const name = 'storage'
 export const version = '1.0.0'
 export const displayName = '数据存储'
 export const description = '基础服务 · 会话与配置的本地持久化（localStorage + 内存降级）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💾'
 export const core = true
 export const inject = []
 export const provides = [{ name: 'storage', type: 'singleton' }]
 
-const PREFIX = 'fengyu:'
+const PREFIX = 'nianfeng:'
 
 function detectBackend() {
   try {
@@ -105,7 +110,7 @@ export function apply(ctx) {
       return [...cache.keys()]
     },
 
-    /** 导出全部风语数据（D9 export-service 会用） */
+    /** 导出全部念风数据（D9 export-service 会用） */
     exportAll() {
       const out = {}
       for (let i = 0; i < backend.length; i++) {

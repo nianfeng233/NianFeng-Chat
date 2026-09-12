@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D4 · model-service
  * 模型抽象接口：stream / complete（文档 §8.1）。
@@ -7,7 +12,7 @@ export const name = 'model-service'
 export const version = '1.0.0'
 export const displayName = '模型服务'
 export const description = '业务服务 · 模型抽象接口与调度，具体由适配器插件实现。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
 export const depends = { 'model-registry': '^1.0.0', config: '^1.0.0' }

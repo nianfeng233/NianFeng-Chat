@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V21 · settings-item-plugins
  * 插件管理器：不只是列表，而是"可验证的运行状态"。
@@ -12,7 +17,7 @@ export const name = 'settings-item-plugins'
 export const version = '3.0.0'
 export const displayName = '设置项 · 插件'
 export const description = '设置页 · 插件自检、健康状态、启停与详情。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
@@ -51,7 +56,7 @@ export function apply(ctx) {
     icon: icons.plugin,
     order: 30,
     render(container) {
-      container.innerHTML = page('插件', '风语的一切功能都由插件提供。这里可以查看每个插件是否真的在正常工作。', `
+      container.innerHTML = page('插件', '念风的一切功能都由插件提供。这里可以查看每个插件是否真的在正常工作。', `
         <div class="plugin-toolbar">
           <button class="plugin-toolbar-btn primary" data-action="selfcheck">
             ${icons.check} 重新自检
@@ -299,7 +304,7 @@ export function apply(ctx) {
       }
       if (!api.supports?.('plugin-dirs')) {
         dirsEl.innerHTML = section('插件目录', card(
-          row('后端未提供外部插件能力', '当前运行的后端是旧进程：请完全关闭风语后重新启动（更新后的后端才会扫描外部插件目录）。', '<span class="plugin-tag warn">需要重启</span>'),
+          row('后端未提供外部插件能力', '当前运行的后端是旧进程：请完全关闭念风后重新启动（更新后的后端才会扫描外部插件目录）。', '<span class="plugin-tag warn">需要重启</span>'),
         ))
         return
       }
@@ -314,7 +319,7 @@ export function apply(ctx) {
           `<span class="mono plugin-path">${escapeHtml(dirsInfo.builtinDir || '—')}</span>`) +
         row('外部插件目录',
           dirsInfo.envOverride
-            ? '当前由环境变量 FENGYU_PLUGINS_DIR 指定，设置页的修改不会生效'
+            ? '当前由环境变量 NIANFENG_PLUGINS_DIR 指定，设置页的修改不会生效'
             : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs）；升级 exe / 应用不会删除此目录',
           `<input class="setting-input plugin-dir-input" id="pluginDirInput" value="${escapeHtml(external)}" style="width:260px" />
            <button class="outline-btn" data-dir-action="pick">选择目录</button>
@@ -446,7 +451,7 @@ export function apply(ctx) {
           const url = URL.createObjectURL(blob)
           const a = document.createElement('a')
           a.href = url
-          a.download = `fengyu-plugins-diagnostic-${Date.now()}.json`
+          a.download = `nianfeng-plugins-diagnostic-${Date.now()}.json`
           a.click()
           URL.revokeObjectURL(url)
           toast.success('诊断信息已导出')

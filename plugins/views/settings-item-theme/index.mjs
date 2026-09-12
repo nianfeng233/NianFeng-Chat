@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V19 · settings-item-theme
  * 外观设置：主题（theme-tokens）、背景（bg-provider）、界面细节。
@@ -7,7 +12,7 @@ export const name = 'settings-item-theme'
 export const version = '1.0.0'
 export const displayName = '设置项 · 外观'
 export const description = '设置页 · 主题、背景与界面细节，支持插件继续追加区块。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🎨'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'theme-tokens': '^1.0.0', 'bg-provider': '^1.0.0' }

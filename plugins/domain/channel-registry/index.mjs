@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D6 · channel-registry
  * 注册所有渠道类型与实例（文档 §6.3）。
@@ -8,7 +13,7 @@ export const name = 'channel-registry'
 export const version = '1.0.0'
 export const displayName = '渠道注册中心'
 export const description = '业务服务 · 渠道类型注册与渠道实例管理。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📡'
 export const core = true
 export const depends = { storage: '^1.0.0' }
@@ -19,9 +24,12 @@ const NS = 'channels'
 const KEY = 'data'
 const TABS = ['private', 'group', 'privacy']
 
-/** 已知但未实现的渠道类型：明确标注，不用假数据填充 */
+/**
+ * 已知但未实现的渠道类型：明确标注，不用假数据填充。
+ * 微信 Clawbot 已由独立插件 plugins/channels/wechat-clawbot 实现，
+ * 不再放在这里占位；插件未安装时菜单里不会出现“微信clawbot”。
+ */
 const PLANNED = [
-  { type: 'wechat', name: '微信', color: '#07c160', reason: '未实现：微信没有官方个人号 API，需要接入 wechaty 等第三方协议，存在封号风险' },
   { type: 'discord', name: 'Discord', color: '#5865f2', reason: '未实现：需要 Discord Bot Gateway 长连接与完整权限申请流程' },
   { type: 'email', name: '邮箱', color: '#8b5cf6', reason: '未实现：需要 IMAP/SMTP 凭据与邮件线程解析' },
 ]
@@ -69,6 +77,13 @@ export function apply(ctx) {
         meta: definition.meta || {},
         connect: definition.connect || (() => Promise.resolve()),
         disconnect: definition.disconnect || (() => Promise.resolve()),
+        // 渠道类型扩展点：
+        //   create(options)  自定义「添加渠道」流程（例如 Clawbot 的配置窗口）
+        //   detail(options)  自定义渠道详情渲染（例如 Clawbot 的接入二维码/状态）
+        //   settingsSchema   预留给通用表单型渠道插件
+        create: typeof definition.create === 'function' ? definition.create : null,
+        detail: typeof definition.detail === 'function' ? definition.detail : null,
+        settingsSchema: definition.settingsSchema || null,
       })
       events.emit('channel:type-registered', { id })
       return () => types.delete(id)

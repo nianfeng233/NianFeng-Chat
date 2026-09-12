@@ -1,12 +1,17 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 关闭正在运行的「风语」实例（按端口找进程）。
+ * 关闭正在运行的「念风」实例（按端口找进程）。
  *
  *   npm run stop              # 关闭默认的 5173 / 8788
  *   node scripts/stop.mjs 5173 8788 18099
  *   node scripts/stop.mjs --dry-run
  *
  * 只按端口匹配；如果某个端口被其他程序占用也会被结束，
- * 请确认这些端口属于你自己的风语实例再用。
+ * 请确认这些端口属于你自己的念风实例再用。
  */
 import { findListeningPids, killProcess } from '../server/port-utils.mjs'
 
@@ -27,7 +32,7 @@ if (!listeners) {
   process.exit(1)
 }
 if (!listeners.size) {
-  console.log(`没有发现监听中的风语实例（端口：${ports.join(' / ')}）`)
+  console.log(`没有发现监听中的念风实例（端口：${ports.join(' / ')}）`)
   process.exit(0)
 }
 

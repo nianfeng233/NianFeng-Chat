@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F3 · logger
  * 不自己造日志系统，而是接入 cordis 原生 LoggerService：
@@ -11,7 +16,7 @@ export const name = 'logger'
 export const version = '1.0.0'
 export const displayName = '日志'
 export const description = '基础服务 · cordis 日志导出器：控制台输出、历史记录与订阅。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📝'
 export const core = true
 export const inject = ['config?']

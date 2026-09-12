@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 真实模型适配器：把本地后端的提供商（OpenAI 兼容 / Anthropic / Ollama）
  * 注册进前端 model-registry，聊天通过 /api/chat（SSE）流式返回。
@@ -9,7 +14,7 @@ export const name = 'model-adapter-backend'
 export const version = '2.0.0'
 export const displayName = '后端模型适配器'
 export const description = '模型适配器 · 通过本地后端接入真实模型（OpenAI 兼容 / Anthropic / Ollama）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔌'
 export const core = true
 export const depends = { 'model-registry': '^1.0.0', 'backend-client': '^1.0.0' }

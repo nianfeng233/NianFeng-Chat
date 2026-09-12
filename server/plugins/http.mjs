@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端 · http
  * 真实的 HTTP API（JSON + SSE 流式）+ 可选的 WebUI 静态托管。
@@ -8,7 +13,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 
 export const name = 'http'
-export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry']
+export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry', 'clawbot']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -69,8 +74,8 @@ export function apply(ctx, config = {}) {
   }
   const requestTokens = (req, url) => ({
     query: url.searchParams.get('token') || '',
-    cookie: cookieValue(req, 'fengyu_token') || '',
-    header: String(req.headers['x-fengyu-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
+    cookie: cookieValue(req, 'nianfeng_token') || '',
+    header: String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
   })
   const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version'
   const sendAuthPage = res => {
@@ -167,7 +172,7 @@ export function apply(ctx, config = {}) {
       uptime: Date.now() - startedAt,
       time: new Date().toISOString(),
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
-      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart'],
+      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'wechat-clawbot'],
       dataDir: settings.dataDir,
       configFile: settings.file,
       providers: providerList.map(p => ({ id: p.id, type: p.type, configured: p.configured, status: p.status, models: p.models.length })),
@@ -184,7 +189,7 @@ export function apply(ctx, config = {}) {
   /** 重启：由宿主/启动脚本接管；桌面版请在设置页走 windHost.restart() */
   route('POST', '/api/system/restart', async (req, res) => {
     if (!onRestart) return sendError(res, 501, '当前运行方式不支持自动重启，请手动关闭后重新启动')
-    sendJson(res, 200, { ok: true, message: '正在重启风语…' })
+    sendJson(res, 200, { ok: true, message: '正在重启念风…' })
     setTimeout(() => {
       try {
         onRestart()
@@ -423,7 +428,7 @@ export function apply(ctx, config = {}) {
     if (!/^https?:\/\//i.test(target)) return sendError(res, 400, '仅支持 http(s) 地址')
     try {
       const response = await fetch(target, {
-        headers: { 'User-Agent': 'fengyu-rss/1.0', Accept: 'application/rss+xml, application/xml, text/xml, */*' },
+        headers: { 'User-Agent': 'nianfeng-rss/1.0', Accept: 'application/rss+xml, application/xml, text/xml, */*' },
         signal: AbortSignal.timeout(15000),
       })
       if (!response.ok) return sendError(res, 502, `拉取失败：HTTP ${response.status}`)
@@ -444,6 +449,79 @@ export function apply(ctx, config = {}) {
   route('GET', '/api/logs', async (req, res, params, url) => {
     const limit = Math.min(Number(url.searchParams.get('limit') || 100), 500)
     sendJson(res, 200, { requests: requestLog.slice(-limit), ...hub.snapshot() })
+  })
+
+  /* ---------------- 微信 Clawbot 渠道后端桥 ---------------- */
+
+  /**
+   * 这些路由只做参数整理与错误包装，真实协议在同目录
+   * server/plugins/../plugins/channels/wechat-clawbot/bridge.mjs 中实现。
+   */
+  const withClawbot = async (res, fn) => {
+    try {
+      const bridge = ctx.clawbot
+      if (!bridge) return sendError(res, 503, '微信 Clawbot 后端桥未加载，请重启念风')
+      return sendJson(res, 200, await fn(bridge))
+    } catch (err) {
+      return sendError(res, Number(err?.status) || 502, err?.message || String(err))
+    }
+  }
+
+  route('GET', '/api/clawbot/status', async (req, res, params, url) =>
+    withClawbot(res, bridge =>
+      url.searchParams.get('all') === 'true'
+        ? bridge.status({ all: true })
+        : bridge.status({ channelId: url.searchParams.get('channelId') || '' }),
+    ),
+  )
+
+  route('POST', '/api/clawbot/login/start', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge => bridge.startLogin({ channelId: body.channelId }))
+  })
+
+  route('GET', '/api/clawbot/login/status', async (req, res, params, url) =>
+    withClawbot(res, bridge => bridge.loginStatus({ channelId: url.searchParams.get('channelId') || '' })),
+  )
+
+  route('POST', '/api/clawbot/logout', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge => bridge.logout({ channelId: body.channelId }))
+  })
+
+  route('POST', '/api/clawbot/send', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge =>
+      bridge.sendText({
+        channelId: body.channelId,
+        toUserId: body.toUserId,
+        text: body.text,
+        contextToken: body.contextToken,
+      }),
+    )
+  })
+
+  route('POST', '/api/clawbot/typing/start', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge =>
+      bridge.startTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }),
+    )
+  })
+
+  route('POST', '/api/clawbot/typing/stop', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge =>
+      bridge.stopTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }),
+    )
+  })
+
+  route('GET', '/api/clawbot/inbox', async (req, res, params, url) =>
+    withClawbot(res, bridge => bridge.inbox({ channelId: url.searchParams.get('channelId') || '' })),
+  )
+
+  route('POST', '/api/clawbot/inbox/ack', async (req, res) => {
+    const body = await readBody(req)
+    return withClawbot(res, bridge => bridge.ackInbox({ channelId: body.channelId, ids: body.ids }))
   })
 
   /* ---------------- SSE 事件通道 ---------------- */
@@ -513,7 +591,7 @@ export function apply(ctx, config = {}) {
         const wantsHtml = String(req.headers.accept || '').includes('text/html')
         if (tokens.query === accessToken && tokens.cookie !== accessToken && req.method === 'GET' && wantsHtml) {
           res.writeHead(302, {
-            'Set-Cookie': `fengyu_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+            'Set-Cookie': `nianfeng_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
             Location: pathname || '/',
           })
           res.end()
@@ -549,7 +627,7 @@ export function apply(ctx, config = {}) {
       if (await serveStatic(req, res, pathname)) return
 
       if (pathname === '/' || pathname === '/index.html') {
-        sendJson(res, 200, { name: '风语后端', hint: 'WebUI 由 start.mjs 启动的 5173 端口提供；或用 npm run serve 单端口部署。', api: '/api/health' })
+        sendJson(res, 200, { name: '念风后端', hint: 'WebUI 由 start.mjs 启动的 5173 端口提供；或用 npm run serve 单端口部署。', api: '/api/health' })
         return
       }
       sendError(res, 404, 'Not Found')

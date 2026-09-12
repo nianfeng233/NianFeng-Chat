@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 设置项 · 网络（真实版）
  * 展示 WebUI ↔ 本地后端的真实状态，并直接修改后端的全局请求超时。
@@ -7,7 +12,7 @@ export const name = 'settings-item-network'
 export const version = '2.0.0'
 export const displayName = '设置项 · 网络'
 export const description = '设置页 · 后端连接状态与模型请求超时。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🌐'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0', config: '^1.0.0' }
@@ -124,7 +129,7 @@ export function apply(ctx) {
           ))}
           <div class="settings-note">
             DeepSeek 等被网络限制的提供商：在这里填本机代理（例如 http://127.0.0.1:7890），或在提供商高级配置里单独填写。
-            代理只用于你显式配置的提供商请求，风语不会自动走系统代理。
+            代理只用于你显式配置的提供商请求，念风不会自动走系统代理。
           </div>`)
 
         container.querySelector('[data-action="recheck"]')?.addEventListener('click', async () => {
@@ -154,7 +159,7 @@ export function apply(ctx) {
           await api.setConfig({ network: { webuiHost: host, webuiPort: port, webuiToken: token } })
           toast.success('WebUI 访问配置已保存')
           await load()
-          const answer = await modal.confirm('立即重启风语？', '监听地址 / 端口 / 访问令牌需要重启后生效。\n\n点「确定」立即重启；点「取消」稍后手动重启（配置已保存）。')
+          const answer = await modal.confirm('立即重启念风？', '监听地址 / 端口 / 访问令牌需要重启后生效。\n\n点「确定」立即重启；点「取消」稍后手动重启（配置已保存）。')
           if (!answer?.ok) {
             toast.info('已保存，下次启动时生效')
             return

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 设置项 · 隐私与权限
  * 对标 deepseek-harness 的 permission presets：
@@ -9,7 +14,7 @@ export const name = 'settings-item-privacy'
 export const version = '3.0.0'
 export const displayName = '设置项 · 隐私'
 export const description = '设置页 · 插件权限预设、按插件授权与本地数据说明。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🛡️'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0' }
@@ -36,7 +41,7 @@ export function apply(ctx) {
         const preset = permissions.preset()
         const presetList = permissions.presets()
         const plugins = permissions.list()
-        container.innerHTML = page('隐私', '风语是本地应用：这里管理插件能做什么，以及数据与密钥放在哪里。', `
+        container.innerHTML = page('隐私', '念风是本地应用：这里管理插件能做什么，以及数据与密钥放在哪里。', `
           ${section('权限预设', card(
             row(
               '默认权限',

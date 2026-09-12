@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V14 · channel-detail-host
  * 渠道详情：未选择时是空状态；选中后展示真实信息与操作。
@@ -9,7 +14,7 @@ export const name = 'channel-detail-host'
 export const version = '3.0.0'
 export const displayName = '渠道详情'
 export const description = '视觉内容 · 渠道详情与基础操作入口。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔎'
 export const core = true
 export const depends = { 'channel-view': '^1.0.0', 'channel-registry': '^1.0.0' }
@@ -32,7 +37,16 @@ export function apply(ctx) {
   useStyle(ctx, CHANNEL_DETAIL_CSS)
 
   ctx.slots.register('channel:detail', container => {
+    let detailCleanup = null
+
     const render = () => {
+      try {
+        detailCleanup?.()
+      } catch (_) {
+        /* ignore */
+      }
+      detailCleanup = null
+
       const channel = channels.active()
       if (!channel) {
         container.innerHTML = `
@@ -45,6 +59,15 @@ export function apply(ctx) {
       }
 
       const type = channels.type(channel.type)
+      // 渠道类型可提供自己的详情渲染器（例如微信 Clawbot 的接入二维码/登录状态）。
+      if (typeof type?.detail === 'function') {
+        try {
+          detailCleanup = type.detail({ container, channel, type }) || null
+        } catch (err) {
+          ctx.logger.error(`渠道 ${channel.type} 自定义详情渲染失败`, err)
+        }
+        if (detailCleanup) return
+      }
       const color = STATUS_COLOR[channel.status] || STATUS_COLOR.offline
       const conversation = sessions.list().find(c => c.meta?.channelId === channel.id)
 
@@ -140,6 +163,12 @@ export function apply(ctx) {
 
     render()
     return () => {
+      try {
+        detailCleanup?.()
+      } catch (_) {
+        /* ignore */
+      }
+      detailCleanup = null
       offs.forEach(off => off())
       container.innerHTML = ''
     }

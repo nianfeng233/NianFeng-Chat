@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F14 · backend-client
  * WebUI 与本地后端之间的唯一通道：
@@ -12,7 +17,7 @@ export const name = 'backend-client'
 export const version = '1.0.0'
 export const displayName = '后端连接'
 export const description = '基础服务 · WebUI ↔ 本地后端的 REST / SSE 通道与在线状态。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔌'
 export const core = true
 export const inject = ['config']
@@ -246,7 +251,7 @@ export function apply(ctx) {
           }
           ctx.emit('backend:event', { event: type, data })
         }
-        for (const type of ['hello', 'channel:message', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'sessions/changed', 'settings/updated']) {
+        for (const type of ['hello', 'channel:message', 'clawbot:message', 'clawbot:status', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'sessions/changed', 'settings/updated']) {
           eventSource.addEventListener(type, forward(type))
         }
         eventSource.onerror = () => {

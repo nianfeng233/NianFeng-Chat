@@ -1,11 +1,38 @@
-/**
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ *
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 84 个插件，按目录名排序；真正的加载顺序由
+ * 共 85 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
+  {
+    "id": "wechat-clawbot",
+    "version": "1.0.0",
+    "displayName": "微信clawbot",
+    "description": "渠道插件 · 微信 Clawbot 扫码接入、消息收发与 typing 状态。",
+    "core": false,
+    "enabled": true,
+    "icon": "💬",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "channel-base": "^1.0.0",
+      "channel-list": "^1.0.0",
+      "channel-detail-host": "^1.0.0",
+      "session-service": "^1.0.0"
+    },
+    "provides": [],
+    "permissions": [
+      "network"
+    ],
+    "path": "./plugins/channels/wechat-clawbot/index.mjs",
+    "dir": "plugins/channels/wechat-clawbot"
+  },
   {
     "id": "channel-registry",
     "version": "1.0.0",
@@ -546,7 +573,7 @@ export const plugins = [
   {
     "id": "official-service",
     "version": "1.0.0",
-    "displayName": "风语官方服务",
+    "displayName": "念风官方服务",
     "description": "功能插件 · 账号 / 登录 / 官方内置模型（官方服务端尚未制作，暂不可用）。",
     "core": false,
     "enabled": true,
@@ -744,9 +771,9 @@ export const plugins = [
   },
   {
     "id": "notification",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "displayName": "消息通知",
-    "description": "基础服务 · 右下角通知中心（系统通知 / 角色消息 / 其他）、桌面通知与提示音。",
+    "description": "基础服务 · 右下角通知中心（系统通知 / 角色消息 / 其他）、系统通知头像、自定义提示音。",
     "core": false,
     "enabled": true,
     "icon": "🔔",
@@ -1664,9 +1691,9 @@ export const plugins = [
   },
   {
     "id": "settings-item-notifications",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "displayName": "设置项 · 通知",
-    "description": "设置页 · 消息提醒、系统通知权限、通知分类与测试。",
+    "description": "设置页 · 消息提醒、系统通知权限、提示音与测试。",
     "core": false,
     "enabled": true,
     "icon": "🔔",

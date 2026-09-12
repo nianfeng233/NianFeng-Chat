@@ -1,8 +1,13 @@
-# Fengyu
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# NianFeng-Chat
 
 English | [简体中文](README.md)
 
-Fengyu is a local-first AI chat client. Both the frontend and the local backend run on cordis,
+NianFeng-Chat is a local-first, plugin-based AI chat client. Both the frontend and the local backend run on cordis,
 and features are organized as plugins. The plugin directory and the data directory can both be
 placed outside the application directory. The same source tree builds both a Web deployment and
 a Windows desktop application.
@@ -12,7 +17,7 @@ a Windows desktop application.
 
 - Current version: v0.41.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
-- Repository: <https://github.com/nianfeng233/fengyu-chat>
+- Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 
 ## Features and Architecture
 
@@ -21,7 +26,7 @@ a Windows desktop application.
 - **Local backend**: a Node.js cordis application with a hand-written HTTP/SSE layer and no Web
   framework. It handles model access, session persistence, file serving, and related services.
 - **Desktop shell**: Rust + WebView2 borderless window with an embedded portable Node runtime,
-  packaged as a single `风语.exe`.
+  packaged as a single `念风Chat.exe`.
 - **Selectable services**: themes, backgrounds, bubble styles, models, and languages can each have
   multiple implementations that are selected in Settings.
 - **External plugins**: built-in plugins ship with each release; user plugins can live in
@@ -92,7 +97,7 @@ npm run sync-plugins
 ```
 
 External plugins live in `<data-dir>/plugins/` by default (for the exe:
-`%LOCALAPPDATA%\FengyuChat\user_data\plugins\`) and use this layout:
+`%LOCALAPPDATA%\NianFengChat\user_data\plugins\`) and use this layout:
 
 ```
 <external-dir>/views/my-plugin/index.mjs
@@ -115,7 +120,7 @@ export function apply(ctx) {
 ## Building
 
 ```bash
-npm run build:release   # Web source + Web deploy + desktop source + Fengyu.exe
+npm run build:release   # Web source + Web deploy + desktop source + NianFeng.exe
 npm run build:desktop   # desktop only
 ```
 
@@ -124,9 +129,9 @@ Artifacts are written to `release/`:
 - `release/web/source/`: clean Web source;
 - `release/web/deploy/`: Web deployment with a portable Node runtime;
 - `release/desktop/source/`: desktop shell source and runtime app;
-- `release/desktop/deploy/风语.exe`: single-file Windows desktop build.
+- `release/desktop/deploy/念风Chat.exe`: single-file Windows desktop build.
 
-`node.exe`, `风语.exe`, and deployment archives are large and are distributed as GitHub Release
+`node.exe`, `念风Chat.exe`, and deployment archives are large and are distributed as GitHub Release
 assets rather than committed to Git.
 
 ## Tests

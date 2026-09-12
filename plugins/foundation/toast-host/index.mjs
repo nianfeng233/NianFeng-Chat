@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F9 · toast-host
  * 轻提示宿主。demo 里用 alert 的地方，在插件架构里统一改成 toast。
@@ -6,7 +11,7 @@ export const name = 'toast-host'
 export const version = '1.0.0'
 export const displayName = '轻提示宿主'
 export const description = '基础服务 · 右下角浮动提示（info / success / warn / error）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💬'
 export const core = true
 export const inject = ['event-bus']

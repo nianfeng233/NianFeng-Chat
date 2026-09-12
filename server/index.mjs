@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端启动器：用真实 cordis 组装后端插件。
  *
@@ -17,6 +22,7 @@ import * as hubPlugin from './plugins/hub.mjs'
 import * as modelsPlugin from './plugins/models.mjs'
 import * as instancePlugin from './plugins/instance.mjs'
 import * as pluginRegistryPlugin from './plugins/plugin-registry.mjs'
+import * as wechatClawbotBridge from '../plugins/channels/wechat-clawbot/bridge.mjs'
 import * as httpPlugin from './plugins/http.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -26,7 +32,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
   const ctx = new Context()
 
   ctx.provide('info', {
-    name: '风语后端',
+    name: '念风后端',
     version: pkg.version,
     node: process.version,
     startedAt: Date.now(),
@@ -68,6 +74,8 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [modelsPlugin, {}],
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
+    // 微信 Clawbot 后端桥：登录/长轮询/发送消息/typing；前端插件在同目录 index.mjs
+    [wechatClawbotBridge, {}],
     [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)
@@ -111,7 +119,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
 // 直接运行：node server/index.mjs
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // WebUI 监听与访问令牌来自当前数据目录的 config.json（明文 network 段）。
-  // 桌面壳会把 FENGYU_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
+  // 桌面壳会把 NIANFENG_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
   // 交给 Rust 在创建 WebView 时带 ?token= 打开，避免启用 token 后桌面白屏。
   const resolved = await resolveDataDir(ROOT)
   let network = {}
@@ -120,13 +128,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } catch (_) {
     network = {}
   }
-  const accessToken = String(process.env.FENGYU_WEBUI_TOKEN ?? network.webuiToken ?? '').trim()
-  const host = String(process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
+  const accessToken = String(process.env.NIANFENG_WEBUI_TOKEN || process.env.FENGYU_WEBUI_TOKEN || network.webuiToken || '').trim()
+  const host = String(process.env.NIANFENG_WEBUI_HOST || process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
   const configuredPort = Number(network.webuiPort) > 0 ? Number(network.webuiPort) : 0
   const port = configuredPort || Number(process.env.PORT || 8788)
   await ensurePortsFree([port], { autoStop: true, log: console })
-  if (process.env.FENGYU_HOME_DIR) {
-    const tokenFile = join(resolve(process.env.FENGYU_HOME_DIR), '.webui-token')
+  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
+  if (homeEnv) {
+    const tokenFile = join(resolve(homeEnv), '.webui-token')
     try {
       if (accessToken) await writeFile(tokenFile, accessToken, 'utf8')
       else await rm(tokenFile, { force: true })
@@ -138,26 +147,26 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const backend = await startBackend({
     port,
     host,
-    staticDir: process.env.FENGYU_STATIC_DIR || undefined,
-    dataDir: process.env.FENGYU_DATA_DIR || undefined,
+    staticDir: process.env.NIANFENG_STATIC_DIR || process.env.FENGYU_STATIC_DIR || undefined,
+    dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     accessToken,
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)
-  console.log(`  │  风语后端 · cordis v4                        │`)
+  console.log(`  │  念风后端 · cordis v4                        │`)
   console.log(`  │  ${backend.url.padEnd(44, ' ')} │`)
   console.log(`  └──────────────────────────────────────────────┘`)
   console.log(`  数据目录：${backend.dataDir}`)
-  if (process.env.FENGYU_HOME_DIR) {
+  if (homeEnv) {
     try {
-      await writeFile(join(resolve(process.env.FENGYU_HOME_DIR), '.webui-port'), String(backend.port), 'utf8')
+      await writeFile(join(resolve(homeEnv), '.webui-port'), String(backend.port), 'utf8')
     } catch (_) {
       /* 端口文件仅用于桌面壳导航，写不了不影响服务 */
     }
   }
   console.log('  按 Ctrl+C 停止')
   // 桌面壳 / 部署脚本通过这一行判断服务已就绪
-  console.log(`FENGYU_READY ${backend.url}`)
+  console.log(`NIANFENG_READY ${backend.url}`)
   const shutdown = async () => {
     console.log('\n正在关闭…')
     await backend.close()

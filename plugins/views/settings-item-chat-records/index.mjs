@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V? · settings-item-chat-records
  * 设置 → 聊天记录：
@@ -11,7 +16,7 @@ export const name = 'settings-item-chat-records'
 export const version = '2.0.0'
 export const displayName = '设置项 · 聊天记录'
 export const description = '设置页 · 图形化 / JSON 双模式查看与编辑聊天记录，草稿式保存。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'chat-store': '^1.0.0', 'session-service': '^1.0.0' }

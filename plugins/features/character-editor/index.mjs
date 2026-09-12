@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 角色编辑（捏人窗口）
  *
@@ -12,7 +17,7 @@ export const name = 'character-editor'
 export const version = '1.0.0'
 export const displayName = '角色编辑'
 export const description = '功能插件 · 新建 / 编辑会话角色（人格、模型、头像）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🎭'
 export const core = true
 export const depends = { 'session-service': '^1.0.0', 'model-registry': '^1.0.0' }

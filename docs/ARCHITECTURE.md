@@ -1,4 +1,9 @@
-# 风语 · 插件化架构（实现版）
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# 念风 · 插件化架构（实现版）
 
 > 本文描述当前架构、模块边界与数据流。
 > 每一个设计点都标注了代码位置，以及与原草稿的差异。
@@ -17,7 +22,7 @@
 
 ## 二、两个 cordis 应用
 
-风语由两个独立进程/Context 组成，共享同一套插件思想：
+念风由两个独立进程/Context 组成，共享同一套插件思想：
 
 ### 1. 前端应用（浏览器）
 
@@ -29,7 +34,7 @@
 * **事件总线 / 日志**：`ctx.emit/on`、`ctx.logger`
 * **服务注册**：`ctx.provide()` 自动随 fiber 释放，重复注册由 cordis 直接报错
 
-风语运行时（`src/runtime/`）在 cordis 之上补：
+念风运行时（`src/runtime/`）在 cordis 之上补：
 
 | 能力 | 位置 | 说明 |
 |---|---|---|
@@ -78,7 +83,7 @@ export function apply(ctx) {
 * `ctx` 是 `compat.mjs` 生成的兼容视图，原型指向该插件 fiber 的真实 cordis Context。
 * `ctx.effect(fn)` 语义：**把 fn 注册为卸载清理函数**（cordis 原生是 `effect(execute)` 立即执行并注册返回值，兼容层做了统一）。
 
-> **范围说明**：风语仓库是**纯客户端单机项目**。官方服务端（账户体系 / 官方模型 / 计费）由
+> **范围说明**：念风仓库是**纯客户端单机项目**。官方服务端（账户体系 / 官方模型 / 计费）由
 > 独立的官网项目提供，不包含在本仓库内，也不做本地模拟。后端 `models.registerProvider()`
 > 是保留给未来"托管提供商"的扩展点；官网项目发布后，客户端只需新增一个调用方插件。
 
@@ -125,6 +130,14 @@ export function apply(ctx) {
 后端事件（`/api/events`）：`channel:message`、
 `provider/status`、`chat/start|done|error`、`sessions/changed`、`settings/updated`。
 
+### 微信 Clawbot 渠道
+
+`wechat-clawbot` 插件是当前唯一内置的真实渠道：
+
+- 前端 `plugins/channels/wechat-clawbot/index.mjs` 负责类型注册、添加/编辑窗口、详情与扫码；
+- 后端 `plugins/channels/wechat-clawbot/bridge.mjs` 负责 iLink 登录、`getupdates` 长轮询、`sendmessage` 与 typing；
+- 入站消息落为 `wechat-clawbot:<channelId>` 渠道记录后触发 `chat-flow`；
+- `chat:request-done`（整轮工具调用结束）之后才发送微信回复并调用 `sendtyping status=2`。
 ---
 
 ## 五、数据流

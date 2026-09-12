@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F4 · i18n
  * 多语言基础服务。插件通过 t('key') 取文案，切换语言会广播 i18n:changed。
@@ -12,7 +17,7 @@ export const name = 'i18n'
 export const version = '2.0.0'
 export const displayName = '多语言'
 export const description = '基础服务 · 语言包注册与切换；具体语种由独立语言包插件提供。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🌏'
 // 会话列表、输入框、渠道列表等核心 UI 都依赖 i18n 服务；它属于基础服务，
 // 不允许被单独禁用，否则会让这些核心插件一起进入 inactive。

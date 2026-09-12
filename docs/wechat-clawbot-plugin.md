@@ -1,0 +1,69 @@
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# 微信clawbot 渠道插件 · 更新说明
+
+> 更新分支：`update/wechat-clawbot`（预览分支，确认稳定后再合并 `main`）
+> 基线版本：念风Chat v0.41.0（原“风语”仓库重命名前）
+
+## 1. 插件位置与分发
+
+| 用途 | 路径 |
+|---|---|
+| 内置插件（前端） | `plugins/channels/wechat-clawbot/index.mjs` |
+| 内置插件（后端桥） | `plugins/channels/wechat-clawbot/bridge.mjs` |
+| 独立分发副本 | `extensions/wechat-clawbot/`（`npm run sync:clawbot-plugin` 同步） |
+| 单独打包 | `npm run build:clawbot-plugin`，产物在 `release/plugins/wechat-clawbot/` 与同名 zip |
+
+插件目录自带 `manifest.json` 与 `README.md`，压缩目录即可单独分发。
+
+## 2. 新增功能
+
+1. 「渠道 → 添加渠道」中新增 **微信clawbot** 类型；
+2. 添加时弹出渠道设置窗口，可选择角色、渠道分类（私聊 / 群聊 / 隐私）与权限；
+3. 渠道详情显示接入状态、角色、分类、权限、微信账号与聊天记录入口；
+4. 点击「接入」按 Clawbot / iLink 流程获取二维码，本地渲染，手机微信扫码后上线；
+5. 微信消息写入所选角色的 clawbot 渠道聊天记录，并触发念风完整模型链路；
+6. 模型整轮调用（含工具调用与全部回复消息）彻底结束后，才关闭微信 typing 状态；
+7. 「设置 → 聊天记录」可按角色查看 / 编辑该渠道记录。
+
+## 3. 对本体做的必要改动
+
+| 文件 | 改动 |
+|---|---|
+| `plugins/domain/channel-registry/index.mjs` | 渠道类型注册增加 `create / detail / settingsSchema` 扩展点；移除微信占位 |
+| `plugins/features/channel-base/index.mjs` | `defineChannel()` 透传上述扩展点 |
+| `plugins/views/channel-list/index.mjs` | 添加渠道时优先调用类型自带的 `create()` |
+| `plugins/views/channel-detail-host/index.mjs` | 渠道详情支持类型自带的 `detail()` 渲染器 |
+| `plugins/features/chat-flow/index.mjs` | `message:send` 支持 `skipUserAppend`，供渠道先落库再触发模型 |
+| `plugins/foundation/backend-client/index.mjs` | 订阅 `clawbot:message` / `clawbot:status` 后端事件 |
+| `server/index.mjs` | 加载 Clawbot 后端桥插件 |
+| `server/plugins/http.mjs` | 新增 `/api/clawbot/*` 路由与健康能力声明 |
+| `server/data-dir.mjs` / `start.mjs` / `server/index.mjs` | 兼容旧 `FENGYU_*` 环境变量与旧 AppData 指针 |
+
+## 4. 项目重命名
+
+- 中文名：**念风Chat**；英文名：**NianFeng-Chat**；仓库：`https://github.com/nianfeng233/NianFeng-Chat`
+- 包名：`nianfeng-chat`；桌面端产物：`念风Chat.exe`
+- 旧品牌 “风语 / Fengyu / fengyu / FENGYU_” 已统一替换；所有文本源文件补充了“念风chat”文件头标记
+- 应用数据目录新增 `nianfeng` / `NianFengChat`，并保留旧目录一次性回退读取，避免升级丢数据
+
+## 5. 头像统一修复
+
+- 全项目唯一头像 / 品牌 logo 常量：`src/util/identity.mjs` 的 `BRAND_LOGO`
+- 用户头像、消息头像、通知图标、顶栏品牌、网页 favicon 均引用该常量
+- 修复 `cssUrl()` 使用双引号导致 `style="background-image:url("..."")"` 被截断、消息头像空白的问题；现在统一输出单引号 `url('...')`
+
+## 6. 验证与构建
+
+```bash
+npm run check:kernels     # 155 个模块语法 / 导入检查
+npm test                  # 全量测试，包含 test:clawbot（本地 mock iLink）
+npm run build:release     # 同时生成 Web 与桌面版；exe 内含 wechat-clawbot 内置插件
+npm run build:clawbot-plugin
+```
+
+当前测试结果：`npm test` 全部通过；`test:clawbot` 15/15，`smoke` 209/209，
+`test-backend` 63/63，其余测试均通过。

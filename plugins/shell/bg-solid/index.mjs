@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * S4 · bg-solid
  * 纯色背景：极简纯白，无动画（demo 设置页里的备选背景）。
@@ -6,7 +11,7 @@ export const name = 'bg-solid'
 export const version = '1.0.0'
 export const displayName = '纯色背景'
 export const description = '可选中背景 · 极简纯色，无动画。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⬜'
 export const core = false
 export const depends = { 'bg-provider': '^1.0.0' }

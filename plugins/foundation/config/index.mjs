@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F2 · config
  * 用户偏好持久化。点号路径读写（selectable.theme.activeId / plugins.disabled …），
@@ -9,7 +14,7 @@ export const name = 'config'
 export const version = '1.1.0'
 export const displayName = '配置中心'
 export const description = '基础服务 · 用户偏好持久化（本地 + 后端 preferences），支持点号路径与 watch。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⚙️'
 export const core = true
 export const depends = { storage: '^1.0.0' }
@@ -20,7 +25,7 @@ const NS = 'config'
 const KEY = 'data'
 
 const DEFAULTS = {
-  'app.name': '风语',
+  'app.name': '念风',
   'app.version': '0.40.0',
   'ui.compact': false,
   'ui.animation': true,

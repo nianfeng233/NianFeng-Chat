@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 语法 + 模块图检查。
  * 用法：npm run check:kernels
@@ -10,7 +15,9 @@ import { basename, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const SKIP_DIRS = new Set(['node_modules', '.git', '.edge-profile', 'scripts', 'release', '.tmp', 'user_data', 'data'])
+// extensions/ 是独立分发副本，目录层级与外置安装布局一致（/user-plugins/channels/...），
+// 不适合在本仓库根目录下直接 import，因此语法检查跳过；内置源仍在 plugins/ 下。
+const SKIP_DIRS = new Set(['node_modules', '.git', '.edge-profile', 'scripts', 'release', '.tmp', 'user_data', 'data', 'extensions'])
 
 async function walk(dir, out = []) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端 · instance
  * 管理「当前实例指向的数据目录」：
@@ -98,7 +103,7 @@ export function apply(ctx, config = {}) {
       if (process.platform !== 'win32') {
         return Promise.reject(createError(400, '当前平台暂不支持系统目录选择器，请手动填写路径'))
       }
-      const description = String(options?.description || '选择风语的数据目录').replace(/'/g, "''")
+      const description = String(options?.description || '选择念风的数据目录').replace(/'/g, "''")
       const script = [
         'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
         "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",

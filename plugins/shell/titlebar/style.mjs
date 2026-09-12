@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** titlebar 样式：demo 的 .titlebar / 品牌 / 用户 / 窗口按钮 */
 export const TITLEBAR_CSS = `
   .titlebar{

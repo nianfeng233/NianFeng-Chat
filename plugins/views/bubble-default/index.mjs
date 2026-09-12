@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V10 · bubble-default
  * 默认气泡实现（Telegram 风格 · 双勾 / 时间戳智能摆放）。
@@ -7,7 +12,7 @@ export const name = 'bubble-default'
 export const version = '1.0.0'
 export const displayName = '默认气泡'
 export const description = '可选中气泡 · Telegram 风格，双勾 / 时间戳智能摆放。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💠'
 export const core = true
 export const depends = { 'message-list': '^1.0.0' }
@@ -27,7 +32,7 @@ export function apply(ctx) {
 
   const renderRow = (message, conversation) => {
     const isMe = message.role === 'user'
-    // 头像统一走 identity：用户头像默认风语 logo 并可随 ui.avatarImage 更换；
+    // 头像统一走 identity：用户头像默认念风 logo 并可随 ui.avatarImage 更换；
     // 角色头像统一为自定义图片或“名字首字 + 调色板”色块。
     const avatar = isMe ? userAvatarHtml(config) : characterAvatarHtml(conversation)
 

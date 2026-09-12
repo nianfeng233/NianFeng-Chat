@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V11 · composer
  * 输入区：Enter 发送 / Shift+Enter 换行、工具条、可拖拽高度、紧凑模式。
@@ -7,7 +12,7 @@ export const name = 'composer'
 export const version = '1.0.0'
 export const displayName = '输入区'
 export const description = '视觉内容 · 消息输入、工具条与高度拖拽。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
 export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }

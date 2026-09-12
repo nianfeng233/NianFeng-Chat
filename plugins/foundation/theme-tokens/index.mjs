@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F5 · theme-tokens
  * 全局 CSS 变量 + 可选中型主题服务（浅色 / 深色 / 跟随系统）。
@@ -7,7 +12,7 @@ export const name = 'theme-tokens'
 export const version = '1.0.0'
 export const displayName = '主题变量'
 export const description = '基础服务 · 全局 CSS 变量管理，支持浅色 / 深色 / 跟随系统切换。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🎨'
 export const core = true
 export const depends = { config: '^1.0.0' }

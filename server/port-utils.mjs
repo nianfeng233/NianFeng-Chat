@@ -1,10 +1,15 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 端口 / 旧实例工具（后端与启动脚本共用）。
  *
- * 风语在开发模式会占用 WEB_PORT(5173) 与 BACKEND_PORT(8788)。
+ * 念风在开发模式会占用 WEB_PORT(5173) 与 BACKEND_PORT(8788)。
  * 用户重复双击 start.cmd / serve.cmd / backend.cmd 时，新进程不应该
- * 直接报"端口被占用"，而是先确认占用者是不是旧的风语实例：
- *   - 是风语：自动结束旧实例后继续启动
+ * 直接报"端口被占用"，而是先确认占用者是不是旧的念风实例：
+ *   - 是念风：自动结束旧实例后继续启动
  *   - 是别的程序：明确报错，不误杀
  */
 import { execFileSync } from 'node:child_process'
@@ -55,14 +60,14 @@ export function killProcess(pid) {
   return true
 }
 
-/** 这个端口后面是不是一个风语实例？后端端口看 /api/health，Web 端口看页面标题 */
-export async function looksLikeFengyu(port) {
+/** 这个端口后面是不是一个念风实例？后端端口看 /api/health，Web 端口看页面标题 */
+export async function looksLikeNianFeng(port) {
   const timeout = ms => AbortSignal.timeout(ms)
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: timeout(1200) })
     if (res.ok) {
       const data = await res.json().catch(() => null)
-      if (data && (data.name === '风语后端' || data.ok === true)) return true
+      if (data && (data.name === '念风后端' || data.ok === true)) return true
     }
   } catch (_) {
     /* 继续尝试页面 */
@@ -70,14 +75,14 @@ export async function looksLikeFengyu(port) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/`, { signal: timeout(1000) })
     const text = await res.text()
-    return text.includes('风语')
+    return text.includes('念风')
   } catch (_) {
     return false
   }
 }
 
 /**
- * 确保端口可用；被旧风语占用时自动关闭，被其他程序占用时抛错。
+ * 确保端口可用；被旧念风占用时自动关闭，被其他程序占用时抛错。
  * @returns {Promise<{stopped:number[]}>}
  */
 export async function ensurePortsFree(ports, { autoStop = true, log = console } = {}) {
@@ -93,16 +98,16 @@ export async function ensurePortsFree(ports, { autoStop = true, log = console } 
       stopped.push(port)
       continue
     }
-    if (!(await looksLikeFengyu(port))) {
+    if (!(await looksLikeNianFeng(port))) {
       throw new Error(`端口 ${port} 被其他程序占用（PID ${pid}），请先关闭它或改用 BACKEND_PORT / WEB_PORT`)
     }
     try {
       killProcess(pid)
       killedPids.add(pid)
       stopped.push(port)
-      log.warn?.(`检测到旧的风语实例，已自动关闭：端口 ${port}（PID ${pid}）`)
+      log.warn?.(`检测到旧的念风实例，已自动关闭：端口 ${port}（PID ${pid}）`)
     } catch (err) {
-      throw new Error(`端口 ${port} 被旧风语实例占用，自动关闭失败：${err.message}；请运行 npm run stop 或双击 stop.cmd`)
+      throw new Error(`端口 ${port} 被旧念风实例占用，自动关闭失败：${err.message}；请运行 npm run stop 或双击 stop.cmd`)
     }
   }
   if (stopped.length) await new Promise(resolve => setTimeout(resolve, 400))

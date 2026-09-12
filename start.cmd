@@ -1,12 +1,15 @@
 @echo off
+rem 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+rem 项目全称：念风 Chat（NianFeng-Chat）
+rem 仓库：https://github.com/nianfeng233/NianFeng-Chat
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
-title 风语 · AI Chat
+title 念风Chat
 
 echo.
 echo   ============================================
-echo    风语 · AI Chat  （后端 + WebUI 一键启动）
+echo    念风Chat  （后端 + WebUI 一键启动）
 echo   ============================================
 echo.
 
@@ -44,14 +47,14 @@ if not exist "node_modules\cordis\lib\index.js" (
     )
 )
 
-echo   正在启动，浏览器会自动打开；关闭本窗口即退出风语。
+echo   正在启动，浏览器会自动打开；关闭本窗口即退出念风。
 echo.
 node start.mjs
 set "EXITCODE=%ERRORLEVEL%"
 
 if not "%EXITCODE%"=="0" (
     echo.
-    echo   [错误] 风语启动失败（退出码 %EXITCODE%）。
+    echo   [错误] 念风启动失败（退出码 %EXITCODE%）。
     echo   请把上面的日志发给开发者，或查看 README.md 的常见问题。
     echo.
     pause

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F8 · context-menu-host
  * 右键菜单宿主：渠道分组右键、消息右键等场景共用。
@@ -6,7 +11,7 @@ export const name = 'context-menu-host'
 export const version = '1.0.0'
 export const displayName = '右键菜单宿主'
 export const description = '基础服务 · 统一的右键上下文菜单。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🖱️'
 export const core = true
 export const inject = ['event-bus']

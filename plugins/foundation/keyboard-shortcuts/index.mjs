@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F11 · keyboard-shortcuts
  * 快捷键注册与分发。其他插件把快捷键交给它统一管理，
@@ -7,7 +12,7 @@ export const name = 'keyboard-shortcuts'
 export const version = '1.0.0'
 export const displayName = '快捷键'
 export const description = '基础服务 · 快捷键注册与分发，冲突检测。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⌨️'
 // 核心视图导航（rail-nav-buttons 等）依赖快捷键服务提供；它属于基础服务，
 // 不允许被单独禁用，否则导航快捷键会整体失效。

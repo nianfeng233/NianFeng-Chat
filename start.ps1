@@ -1,5 +1,8 @@
-﻿<#
-    风语 · AI Chat — PowerShell 启动脚本
+# 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+# 项目全称：念风 Chat（NianFeng-Chat）
+# 仓库：https://github.com/nianfeng233/NianFeng-Chat
+<#
+    念风Chat — PowerShell 启动脚本
 
     用法：
       .\start.ps1                     启动 后端 + WebUI（自动打开浏览器）
@@ -37,7 +40,7 @@ function Fail([string]$Message) {
 
 Write-Host ""
 Write-Host "  ============================================"
-Write-Host "   风语 · AI Chat  (后端 + WebUI)"
+Write-Host "   念风Chat  (后端 + WebUI)"
 Write-Host "  ============================================"
 Write-Host ""
 
@@ -83,10 +86,10 @@ if ($Serve) { $startArgs += '--serve' }
 if ($NoOpen) { $startArgs += '--no-open' }
 
 Write-Host ""
-Write-Host "  正在启动，浏览器会自动打开；按 Ctrl+C 退出风语。"
+Write-Host "  正在启动，浏览器会自动打开；按 Ctrl+C 退出念风。"
 Write-Host ""
 
 & node start.mjs @startArgs
 if ($LASTEXITCODE -ne 0) {
-    Fail "风语已退出（退出码 $LASTEXITCODE）。请查看上面的日志。"
+    Fail "念风已退出（退出码 $LASTEXITCODE）。请查看上面的日志。"
 }

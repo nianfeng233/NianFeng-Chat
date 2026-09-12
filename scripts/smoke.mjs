@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 端到端冒烟测试（Node + 极简 DOM 垫片）
  * 用法：npm run test:smoke
@@ -96,7 +101,7 @@ async function main() {
 
   section('① 启动真实后端 + 前端')
   const backend = await startTestBackend()
-  localStorage.setItem('fengyu:config', JSON.stringify({ data: { backend: { url: `${backend.url}/api` } } }))
+  localStorage.setItem('nianfeng:config', JSON.stringify({ data: { backend: { url: `${backend.url}/api` } } }))
 
   const { boot } = await import('../src/main.mjs')
   const { app, ctx, loader } = await boot()
@@ -264,13 +269,13 @@ async function main() {
   const config = ctx.inject('config')
   const scrollEl = document.getElementById('msgScroll')
   const scrollHtml = () => String(scrollEl?.innerHTML || '')
-  check('用户消息头像默认使用风语 logo', scrollHtml().includes('public/assets/logo.png'))
+  check('用户消息头像默认使用念风 logo', scrollHtml().includes('public/assets/logo.png'))
   config.set('ui.avatarImage', 'data:image/png;base64,SMOKE')
   await sleep(80)
   check('更换头像后消息头像同步更新', scrollHtml().includes('data:image/png;base64,SMOKE'))
   config.set('ui.avatarImage', '')
   await sleep(80)
-  check('清除头像后恢复风语 logo', scrollHtml().includes('public/assets/logo.png'))
+  check('清除头像后恢复念风 logo', scrollHtml().includes('public/assets/logo.png'))
 
   const i18n = ctx.inject('i18n')
   const localePacks = i18n.locales()
@@ -318,8 +323,13 @@ async function main() {
   check('渠道列表渲染出分组', document.querySelectorAll('#groupsContainer .group').length >= 1)
 
   const channelRegistry = ctx.inject('channel-registry')
-  check('未实现渠道路径被明确标注', channelRegistry.plannedList().length >= 3, channelRegistry.plannedList().map(p => p.type).join(','))
-  check('没有注册任何"假渠道类型"', channelRegistry.typeList().length === 0, channelRegistry.typeList().map(t => t.id).join(','))
+  const plannedTypes = channelRegistry.plannedList().map(p => p.type)
+  const registeredTypes = channelRegistry.typeList().map(t => t.id)
+  check('未实现渠道路径被明确标注 discord/email', plannedTypes.includes('discord') && plannedTypes.includes('email') && !plannedTypes.includes('wechat'), plannedTypes.join(','))
+  check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot') && registeredTypes.every(id => id === 'wechat-clawbot'), registeredTypes.join(','))
+  const clawbotType = channelRegistry.type('wechat-clawbot')
+  check('微信clawbot 提供自定义添加窗口', typeof clawbotType?.create === 'function')
+  check('微信clawbot 提供自定义渠道详情', typeof clawbotType?.detail === 'function')
   const group = channelRegistry.groups('private')[0]
   const channel = channelRegistry.addChannel('private', group.id, { type: 'custom', name: '测试渠道' })
   channelRegistry.activate('private', channel.id)
@@ -507,7 +517,7 @@ async function main() {
   settingsContainer.open('model')
   await sleep(80)
   const modelContent = document.querySelector('.settings-content')
-  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用风语内置模型'))
+  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用念风内置模型'))
   const builtinToggle = document.querySelector('.settings-content [data-action="toggle-builtin"]')
   check('内置模型开关默认开启', !!builtinToggle && builtinToggle.classList.contains('on'))
   check('当前生效有模型选择按钮', !!document.querySelector('.settings-content [data-active-model]'))

@@ -1,10 +1,15 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 生成可分发版本。
  *
  * 输出目录（默认 release/）：
  *   web/source/       纯净源码（不带个人数据、不带 node_modules）
  *   web/deploy/       可部署的 Web 版（app/ + 便携 Node 运行时 + 启动脚本）
- *   desktop/source/   桌面壳源码（Rust + 无官方服务插件的运行时 app + 嵌入资源）
+ *   desktop/source/   桌面壳源码（Rust + 无官方服务插件、含微信clawbot 内置渠道的运行时 app + 嵌入资源）
  *   desktop/deploy/   打包好的单文件 .exe（嵌入式 Node 运行时 + WebView2）
  *
  * 用法：
@@ -14,8 +19,8 @@
  *
  * 桌面版会移除 official-service 插件（账号页 / 内置模型入口一起消失），
  * 并把干净的 app 与 node.exe 一起嵌进 exe；首次运行解压到
- * %LOCALAPPDATA%\\FengyuChat，用户数据保存在
- * %LOCALAPPDATA%\\FengyuChat\\user_data。
+ * %LOCALAPPDATA%\\NianFengChat，用户数据保存在
+ * %LOCALAPPDATA%\\NianFengChat\\user_data。
  */
 import { execFileSync } from 'node:child_process'
 import { cp, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -150,12 +155,12 @@ async function buildWebRelease() {
   }
 
   await writeFile(
-    join(deployDir, '启动风语.cmd'),
+    join(deployDir, '启动念风.cmd'),
     [
       '@echo off',
       'chcp 65001 >nul',
       'setlocal',
-      'set "FENGYU_HOME_DIR=%~dp0"',
+      'set "NIANFENG_HOME_DIR=%~dp0"',
       '"%~dp0runtime\\node.exe" "%~dp0app\\start.mjs" --serve',
       'if errorlevel 1 pause',
       '',
@@ -165,13 +170,14 @@ async function buildWebRelease() {
   await writeFile(
     join(deployDir, '部署说明.txt'),
     [
-      '风语 AI Chat · Web 可部署版',
+      '念风Chat · Web 可部署版',
       '',
-      '1. 双击「启动风语.cmd」即可运行，程序会启动本地服务并自动打开默认浏览器。',
+      '1. 双击「启动念风.cmd」即可运行，程序会启动本地服务并自动打开默认浏览器。',
       '2. 首次启动会读取本机 AppData 的数据目录指针，自动恢复上次使用的数据；之后固定使用当前目录 user_data 下的指针，不会反复覆盖数据目录。删除 user_data 可恢复全新状态。',
       '3. 默认端口 5173，如果被占用会明确提示；可通过环境变量 WEB_PORT 修改。',
       '4. 本目录自带便携 Node 运行时（runtime/node.exe），无需另装 Node.js。',
-      '5. 外部插件：默认放在本目录 user_data\\plugins\\（也可在「设置 → 插件 → 插件目录」指定任意目录），放入插件文件夹后重新扫描/刷新即可，无需重新生成 registry.mjs。',
+      '5. 内置微信clawbot 渠道插件：添加渠道菜单选择「微信clawbot」，详情点「接入」扫码即可使用。',
+      '6. 外部插件：默认放在本目录 user_data\\plugins\\（也可在「设置 → 插件 → 插件目录」指定任意目录），放入插件文件夹后重新扫描/刷新即可，无需重新生成 registry.mjs。',
       '',
     ].join('\r\n'),
     'utf8',
@@ -231,11 +237,11 @@ async function buildDesktopRelease() {
       'cargo build --release',
       'if errorlevel 1 ( echo 构建失败 & pause & exit /b 1 )',
       'if not exist "..\\deploy" mkdir "..\\deploy"',
-      'copy /y "target\\release\\fengyu-desktop.exe" "..\\deploy\\风语.exe" >nul',
+      'copy /y "target\\release\\nianfeng-desktop.exe" "..\\deploy\\念风Chat.exe" >nul',
       'copy /y "..\\LICENSE" "..\\deploy\\LICENSE" >nul',
       'copy /y "..\\THIRD-PARTY-NOTICES.md" "..\\deploy\\THIRD-PARTY-NOTICES.md" >nul',
       'if exist "..\\docs" xcopy /e /i /y "..\\docs" "..\\deploy\\docs" >nul',
-      'echo 已生成 ..\\deploy\\风语.exe',
+      'echo 已生成 ..\\deploy\\念风Chat.exe',
       'pause',
       '',
     ].join('\r\n'),
@@ -244,11 +250,11 @@ async function buildDesktopRelease() {
   await writeFile(
     join(sourceRoot, 'README.md'),
     [
-      '# 风语桌面壳（Rust + WebView2）源码',
+      '# 念风桌面壳（Rust + WebView2）源码',
       '',
       '- `desktop/app/`：干净的运行时资源（不含 official-service，账号页与内置模型入口已按桌面版要求移除）。',
       '- `desktop/runtime/node.exe`：准备嵌入的便携 Node 运行时。',
-      '- `desktop/src/`：Rust 桌面壳源码与自动生成的嵌入资源清单；首次运行会解压到 `%LOCALAPPDATA%\\FengyuChat`。',
+      '- `desktop/src/`：Rust 桌面壳源码与自动生成的嵌入资源清单；首次运行会解压到 `%LOCALAPPDATA%\\NianFengChat`。',
       '',
       '构建：双击 `构建桌面版.cmd`，或执行 `cd desktop && cargo build --release`。',
       `本次打包嵌入文件数：${embeds}`,
@@ -268,22 +274,23 @@ async function buildDesktopRelease() {
   await writeFile(
     join(deployDir, '使用说明.txt'),
     [
-      '风语 AI Chat · 无边框桌面版',
+      '念风Chat · 无边框桌面版',
       '',
-      '1. 双击「风语.exe」启动，首次运行会自动释放资源（约 1~3 秒）。',
+      '1. 双击「念风Chat.exe」启动，首次运行会自动释放资源（约 1~3 秒）。',
       '2. 无边框窗口，可以直接拖动顶部栏；右上角有最小化 / 最大化 / 关闭按钮。',
-      '3. 首次启动会读取本机 AppData 指针并恢复历史数据目录；之后数据目录记录在 %LOCALAPPDATA%\\FengyuChat\\user_data\\instance.json，不会反复覆盖。',
-      '4. 按风语官方服务插件要求，桌面版不包含账号页与内置模型入口；自定义模型 / 本地 Ollama 均可用。',
+      '3. 首次启动会读取本机 AppData 指针并恢复历史数据目录；之后数据目录记录在 %LOCALAPPDATA%\\NianFengChat\\user_data\\instance.json，不会反复覆盖。',
+      '4. 按念风官方服务插件要求，桌面版不包含账号页与内置模型入口；自定义模型 / 本地 Ollama 均可用。',
       '5. 第三方组件与许可证声明见本目录的 THIRD-PARTY-NOTICES.md。',
-      '6. 外部插件：默认放在 %LOCALAPPDATA%\\FengyuChat\\user_data\\plugins\\，也可在「设置 → 插件 → 插件目录」指定任意目录；放入插件文件夹后重新扫描/刷新即可，升级 exe 不会删除外部插件。',
+      '6. 内置微信clawbot 渠道插件：添加渠道菜单选择「微信clawbot」，详情点「接入」扫码。',
+      '7. 外部插件：默认放在 %LOCALAPPDATA%\\NianFengChat\\user_data\\plugins\\，也可在「设置 → 插件 → 插件目录」指定任意目录；放入插件文件夹后重新扫描/刷新即可，升级 exe 不会删除外部插件。',
       '',
     ].join('\r\n'),
     'utf8',
   )
 
-  if (process.env.FENGYU_SKIP_DESKTOP_BUILD === '1') {
-    console.log('⏭ 已设置 FENGYU_SKIP_DESKTOP_BUILD=1，跳过桌面编译。')
-    console.log(`   请在 ${relative(ROOT, crateDir)} 执行 cargo build --release，并把 target\\release\\${process.platform === 'win32' ? 'fengyu-desktop.exe' : 'fengyu-desktop'} 复制为 ${relative(ROOT, join(deployDir, '风语.exe'))}`)
+  if (process.env.NIANFENG_SKIP_DESKTOP_BUILD === '1') {
+    console.log('⏭ 已设置 NIANFENG_SKIP_DESKTOP_BUILD=1，跳过桌面编译。')
+    console.log(`   请在 ${relative(ROOT, crateDir)} 执行 cargo build --release，并把 target\\release\\${process.platform === 'win32' ? 'nianfeng-desktop.exe' : 'nianfeng-desktop'} 复制为 ${relative(ROOT, join(deployDir, '念风Chat.exe'))}`)
     return
   }
 
@@ -300,11 +307,11 @@ async function buildDesktopRelease() {
     console.error('无法自动调用 cargo。请确认已安装 Rust MSVC 工具链，并在 source/desktop 目录手动执行：cargo build --release')
     throw err
   }
-  const exeName = process.platform === 'win32' ? 'fengyu-desktop.exe' : 'fengyu-desktop'
-  await copyFile(join(crateDir, 'target', 'release', exeName), join(deployDir, '风语.exe'))
+  const exeName = process.platform === 'win32' ? 'nianfeng-desktop.exe' : 'nianfeng-desktop'
+  await copyFile(join(crateDir, 'target', 'release', exeName), join(deployDir, '念风Chat.exe'))
   // Cargo 的 target 目录只用于本次编译，不进入交付源码。
   await rm(join(crateDir, 'target'), { recursive: true, force: true })
-  console.log(`✔ 桌面版生成完成：${relative(ROOT, join(deployDir, '风语.exe'))}`)
+  console.log(`✔ 桌面版生成完成：${relative(ROOT, join(deployDir, '念风Chat.exe'))}`)
 }
 
 async function main() {
@@ -316,7 +323,7 @@ async function main() {
   await writeFile(
     join(RELEASE, 'README.md'),
     [
-      '# 风语 AI Chat 分发目录',
+      '# 念风Chat 分发目录',
       '',
       '由 `scripts/package-release.mjs` 自动生成，不含个人数据（user_data / data / .tmp / 本地配置）。',
       '',
@@ -325,12 +332,12 @@ async function main() {
       '- `web/source/`：纯净源码（不含 node_modules，适合推送到 GitHub）。',
       '- `web/deploy/`：Web 可部署版（内含 app、便携 Node 运行时与启动脚本）。',
       '- `desktop/source/`：桌面壳源码（Rust + WebView2 外壳 + 无 official-service 的运行时 app）。',
-      '- `desktop/deploy/`：打包好的单文件 `风语.exe`（已内嵌 Node 运行时与 app 资源，不含 official-service 插件）。',
+      '- `desktop/deploy/`：打包好的单文件 `念风Chat.exe`（已内嵌 Node 运行时与 app 资源，不含 official-service 插件）。',
       '',
       '## 说明',
       '',
       '- 两个版本都包含源码与可直接使用的部署产物。',
-      '- 桌面版不包含官方服务插件，禁止账号页与「使用风语内置模型」入口。',
+      '- 桌面版不包含官方服务插件，禁止账号页与「使用念风内置模型」入口。',
       '- 各目录均已携带 `LICENSE`、`THIRD-PARTY-NOTICES.md`；依赖清单见 `docs/DEPENDENCIES.md`。',
       '- 重新生成：`npm run build:release`（只生成桌面版：`npm run build:desktop`）。',
       '',
