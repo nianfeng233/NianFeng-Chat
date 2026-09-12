@@ -26,7 +26,7 @@ const KEY = 'data'
 
 const DEFAULTS = {
   'app.name': '念风',
-  'app.version': '0.40.0',
+  'app.version': '0.42.0',
   'ui.compact': false,
   'ui.animation': true,
   'ui.signature': '',
@@ -163,6 +163,11 @@ export function apply(ctx) {
         }
       }
       pulled = true
+      // 通知需要把本地数据合并到共享数据目录的插件（例如渠道注册中心）：
+      // remotePrefs 为 null 表示后端从未保存过对应数据，可安全把本机数据首次发布过去。
+      ctx.emit('config:remote-synced', {
+        remote: remotePrefs && typeof remotePrefs === 'object' ? structuredClone(remotePrefs) : null,
+      })
     } catch (err) {
       ctx.logger.debug(`偏好读取后端失败：${err.message}`)
     } finally {
@@ -200,6 +205,13 @@ export function apply(ctx) {
     },
     watch(key, callback) {
       return ctx.on('config:changed', payload => {
+        // key === '*' 表示整份偏好被替换（例如从后端合并恢复），
+        // 此时所有具体键的 watcher 都应该收到该键的最新值。
+        if (payload.key === '*') {
+          const value = key && payload.value && typeof payload.value === 'object' ? getPath(payload.value, key) : payload.value
+          callback(value, key || '*')
+          return
+        }
         if (!key || payload.key === key || payload.key?.startsWith(key + '.')) callback(payload.value, payload.key)
       })
     },
@@ -285,13 +297,38 @@ function deepEqual(a, b) {
   }
 }
 
+/** 把对象/数组里的所有叶子路径展开；数组作为整体，不继续下钻 */
+function flattenValues(target, prefix = '', out = new Map()) {
+  for (const [key, value] of Object.entries(target || {})) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (value && typeof value === 'object' && !Array.isArray(value)) flattenValues(value, path, out)
+    else out.set(path, value)
+  }
+  return out
+}
+
 function mergeRemotePreferences(local, remote) {
   const merged = structuredClone(local)
-  for (const [key, defaultValue] of flattenDefaults(DEFAULTS)) {
-    if (!hasPath(remote, key)) continue
-    const remoteValue = getPath(remote, key)
-    const localValue = hasPath(merged, key) ? getPath(merged, key) : undefined
-    if (deepEqual(localValue, defaultValue) && !deepEqual(remoteValue, defaultValue)) {
+  // app.channels 是整份渠道数据，按 updatedAt 整体取新：
+  // 否则本地浏览器的默认空渠道会挡住 exe / 其它端同步过来的渠道列表。
+  const remoteAppChannels = remote?.app?.channels
+  if (remoteAppChannels && typeof remoteAppChannels === 'object' && !Array.isArray(remoteAppChannels)) {
+    const localAppChannels = merged?.app?.channels
+    const remoteAt = Number(remoteAppChannels.updatedAt) || 0
+    const localAt = Number(localAppChannels?.updatedAt) || 0
+    if (!localAppChannels || remoteAt > localAt) {
+      setPath(merged, 'app.channels', structuredClone(remoteAppChannels))
+    }
+  }
+  // 不再只合并 DEFAULTS 里声明过的键：像 chat.composerHeight 这种运行时
+  // 动态偏好也必须能从后端恢复，否则换端口/换 origin/重装后界面状态会丢。
+  for (const [key, remoteValue] of flattenValues(remote)) {
+    // app.channels 已在上面按 updatedAt 整体处理，避免叶子级合并把两组渠道搅在一起。
+    if (key === 'app.channels' || key.startsWith('app.channels.')) continue
+    const localHas = hasPath(merged, key)
+    const localValue = localHas ? getPath(merged, key) : undefined
+    const defaultValue = hasPath(DEFAULTS, key) ? getPath(DEFAULTS, key) : undefined
+    if (!localHas || deepEqual(localValue, defaultValue)) {
       setPath(merged, key, remoteValue)
     }
   }

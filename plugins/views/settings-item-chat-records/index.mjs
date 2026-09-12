@@ -83,6 +83,8 @@ const CSS = `
   .record-card-content{margin-top:6px;font-size:12.5px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .record-card-doc{padding:6px 8px;border-radius:8px;background:rgba(90,120,180,.08);border:1px dashed rgba(90,120,180,.3);font-size:12px}
   .record-card-tag{margin-left:auto;color:var(--text-4);font-size:10.5px}
+  .record-card-del{flex:0 0 auto;width:24px;height:24px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
+  .record-card-del:hover{background:rgba(198,91,91,.12);color:#c65b5b}
   .record-source{flex:1;min-height:440px;resize:vertical;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:rgba(255,255,255,.62);color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.65;outline:none;white-space:pre;tab-size:2}
   .record-source:focus{border-color:var(--accent)}
   .record-source[hidden]{display:none}
@@ -266,6 +268,7 @@ export function apply(ctx) {
                 <span>${escapeHtml(message.time || String(message.timestamp || '').slice(11, 16) || '')}</span>
                 <span>${escapeHtml(message.sender_name || '')}</span>
                 <span class="record-card-tag">${escapeHtml(message.message_id || message.id || '')}</span>
+                <button class="record-card-del" data-record-delete="${index}" type="button" title="删除这条消息（需点保存生效）">🗑</button>
               </div>
               <div class="record-card-content">${content}</div>
             </div>`
@@ -273,6 +276,17 @@ export function apply(ctx) {
           .join('')
         for (const card of cardsEl.querySelectorAll('[data-record-card]')) {
           card.addEventListener('click', () => openEditor(Number(card.dataset.recordCard)))
+          card.querySelector('[data-record-delete]')?.addEventListener('click', event => {
+            event.stopPropagation()
+            const index = Number(event.currentTarget.dataset.recordDelete)
+            if (!Number.isInteger(index) || index < 0 || index >= draft.length) return
+            draft.splice(index, 1)
+            setDirty(true)
+            setError('')
+            updateJsonSource()
+            renderCards()
+            renderList()
+          })
         }
       }
 
@@ -537,9 +551,19 @@ export function apply(ctx) {
         if (payload?.channelId === activeChannel && !dirty) loadChannel(activeChannel)
         else renderList()
       })
+      // 渠道详情点「打开聊天记录」时，定位到对应渠道而不是另开普通会话。
+      const offSelect = events.on('chat-records:select', payload => {
+        const channelId = String(payload?.channelId || '')
+        const record = channelId ? store.channelRecord(channelId) : null
+        if (!record) return
+        listInitialized = true
+        expandedRoles.add(record.roleId || record.conversationId)
+        loadChannel(channelId)
+      })
 
       return () => {
         offReplaced()
+        offSelect()
         container.innerHTML = ''
       }
     },

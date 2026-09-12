@@ -75,9 +75,12 @@ export function apply(ctx) {
     return decision
   }
 
+  /** 保留权限层给出的真实原因（无权限 / 需要确认 / 用户拒绝），不要一律吞成“目标渠道不可用”。 */
+  const denied = decision => ({ ok: false, code: decision.code, error: decision.error || '目标渠道不可用' })
+
   const readMessages = async (args, context) => {
     const decision = await authorize(args, context, 'read')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
     const query = args.query ?? (args.semantic ? String(args.semantic) : '')
     const result = store.search({
       channelId: decision.channelId,
@@ -124,7 +127,7 @@ export function apply(ctx) {
 
   const chatSend = async (args, context) => {
     const decision = await authorize(args, context, 'send')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
 
     const conv = sessions.get(context.conversationId)
     const channelId = decision.channelId
@@ -200,7 +203,7 @@ export function apply(ctx) {
 
   const sendDocument = async (args, context) => {
     const decision = await authorize(args, context, 'send')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
 
     const channelId = decision.channelId
     const isCurrent = channelId === context.channelId
@@ -281,7 +284,7 @@ export function apply(ctx) {
         action: 'read',
         channel: doc.channel_id,
       })
-      if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+      if (!decision.ok) return denied(decision)
     }
     const maxTokens = Math.max(100, Math.min(Number(args.max_tokens) || 0 || Number(config.get('chat.readTokens', 1500)) || 1500, 4000))
     const result = documents.read(docId, { offset: args.offset ?? 0, maxTokens })

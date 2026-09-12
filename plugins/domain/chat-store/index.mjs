@@ -268,7 +268,17 @@ export function apply(ctx) {
       const byConv = sessions.get(raw)
       if (byConv) return ensureConversation(byConv, { persistMeta: true })
       // 允许只写下半段，如 "web:xxx"
-      if (!raw.includes(':')) return channelRecord(novaChannelId(raw))
+      if (!raw.includes(':')) {
+        const byNova = channelRecord(novaChannelId(raw))
+        if (byNova) return byNova
+        // 模型通常只知道渠道显示名，不知道内部 channelId；支持按会话名精确 /
+        // 唯一模糊匹配，避免把“读取某渠道记录”误判成未知渠道。
+        const wanted = raw.toLowerCase()
+        const exact = sessions.list().find(conv => String(conv.name || '').trim().toLowerCase() === wanted)
+        if (exact) return ensureConversation(exact, { persistMeta: true })
+        const partial = sessions.list().filter(conv => String(conv.name || '').toLowerCase().includes(wanted))
+        if (partial.length === 1) return ensureConversation(partial[0], { persistMeta: true })
+      }
       return null
     },
 
@@ -483,6 +493,26 @@ export function apply(ctx) {
       const all = groupRounds(service.messagesOf(channelId))
       const take = Number.isFinite(Number(limit)) ? Math.max(0, Number(limit)) : 5
       return take > 0 ? all.slice(-take) : []
+    },
+
+    /** 渠道清单：供 context-builder 把可读 / 可写渠道名告诉模型，工具调用不再只认内部 ID。 */
+    channels() {
+      return Object.values(data.channels).map(record => {
+        const conv = sessions.get(record.conversationId)
+        return {
+          channelId: record.channelId,
+          conversationId: record.conversationId,
+          name: conv?.name || record.channelId,
+          roleId: record.roleId,
+          group: record.group,
+          source: record.source,
+          crossReadable: record.crossReadable === true,
+          crossSendable: record.crossSendable === true,
+          messages: record.seq || 0,
+          hiddenFromSessionList: conv?.meta?.hiddenFromSessionList === true,
+          lastAt: record.lastAt || null,
+        }
+      })
     },
 
     /** 角色级工作记忆：只聚合普通私聊渠道，按 timestamp 合并去重，取最近 limit 轮 */

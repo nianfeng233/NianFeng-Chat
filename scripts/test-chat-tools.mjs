@@ -244,6 +244,7 @@ async function main() {
   const builder = ctx.inject('context-builder')
   const permissions = ctx.inject('chat-permissions')
   const flow = ctx.inject('chat-flow')
+  const channelRegistry = ctx.inject('channel-registry')
   config.set('chat.simulateTyping', false)
 
   check('chat-flow 运行在工具模式', flow.mode() === 'tools', flow.mode())
@@ -365,6 +366,25 @@ async function main() {
   check('新渠道上下文合并了工作记忆', builtText.includes('你好') && builtText.includes('"trust":"untrusted"'), builtText.slice(0, 160))
   check('上下文带当前时间 / 时区 / 渠道元数据', builtText.includes('当前时间：') && builtText.includes('当前渠道：') && built.messages[0].role === 'system')
   check('context-builder 受 token 预算约束', built.stats.memoryTokens <= built.stats.budget, JSON.stringify(built.stats))
+
+  console.log('\n⑦b 渠道设置里勾选跨渠道权限：来源侧策略直接生效')
+  sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossReadable: true, sensitiveConfirm: false } })
+  store.channelForConversation(conv1.id)
+  config.set('chat.confirmSensitive', true)
+  const sourceAllowed = await permissions.authorize({ conversationId: conv1.id, action: 'read', channel: channel2.channelId })
+  check('渠道设置即可放行跨渠道读取（无需额外 grants）', sourceAllowed.ok === true, JSON.stringify(sourceAllowed))
+  const sourceRead = await tools.execute('read_messages', { channel: conv2.name, limit: 5 }, {
+    conversationId: conv1.id,
+    channelId: channel1.channelId,
+    roleId: 'role-test',
+    userId: 'web-user',
+    sentContents: new Map(),
+  })
+  check('按渠道名解析并读取记录', sourceRead.ok === true && sourceRead.channel === channel2.channelId, JSON.stringify(sourceRead).slice(0, 160))
+  const crossPrompt = builder.build({ conversationId: conv1.id, roleId: 'role-test' })
+  check('上下文告知模型已开启跨渠道权限', String(crossPrompt.messages[0]?.content || '').includes('跨渠道读取'), String(crossPrompt.messages[0]?.content || '').slice(0, 120))
+  sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossReadable: false, sensitiveConfirm: true } })
+  store.channelForConversation(conv1.id)
 
   console.log('\n⑧ 高权限用户的跨渠道访问与敏感确认')
   sessions.update(conv2.id, { meta: { ...sessions.get(conv2.id).meta, crossReadable: true, crossSendable: true } })
@@ -558,6 +578,18 @@ async function main() {
     firstChannelButton.click()
     await sleep(30)
     const channelId = firstChannelButton.dataset.channel
+    const otherRecord = store.listChannels().find(record => record.channelId !== channelId)
+    if (otherRecord) {
+      ctx.emit('chat-records:select', { channelId: otherRecord.channelId })
+      await sleep(30)
+      check(
+        '打开聊天记录事件能定位到指定渠道',
+        String(document.querySelector('[data-record-path]')?.textContent || '').includes(otherRecord.channelId),
+        String(document.querySelector('[data-record-path]')?.textContent || ''),
+      )
+      ctx.emit('chat-records:select', { channelId })
+      await sleep(30)
+    }
     const firstCard = document.querySelector('[data-record-card]')
     check('图形视图显示消息卡片', !!firstCard)
     if (firstCard) {
@@ -581,6 +613,15 @@ async function main() {
           !store.messagesOf(channelId).some(message => message.content === '草稿修改内容') &&
             !String(document.querySelector('[data-record-card] .record-card-content')?.textContent || '').includes('草稿修改内容'),
         )
+        const cardsBeforeDelete = document.querySelectorAll('[data-record-card]').length
+        const storeBeforeDelete = store.messagesOf(channelId).length
+        document.querySelector('[data-record-delete]').click()
+        await sleep(20)
+        check('删除按钮只删除草稿中的消息', document.querySelectorAll('[data-record-card]').length === cardsBeforeDelete - 1)
+        check('删除草稿不会立即写回 chat-store', store.messagesOf(channelId).length === storeBeforeDelete)
+        document.querySelector('[data-record-reload]').click()
+        await sleep(20)
+        check('取消修改后可以恢复被删掉的消息', document.querySelectorAll('[data-record-card]').length === cardsBeforeDelete)
         document.querySelector('[data-record-card]').click()
         await sleep(10)
         document.querySelector('[data-editor-field="content"]').value = '整体保存后的内容'
@@ -725,6 +766,76 @@ async function main() {
     toolRoles,
   )
   check('下一轮上下文以 system,user,assistant,tool,user 结尾', toolRoles.endsWith('system,user,assistant,tool,user'), toolRoles)
+
+  console.log('\n⑩j 工具协议异常序列修复')
+  const convOrphan = sessions.create({ name: '工具协议修复测试', meta: { roleId: 'role-orphan' } })
+  const channelOrphan = store.channelForConversation(convOrphan.id)
+  store.appendTranscript(channelOrphan.channelId, [
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call-bad', type: 'function', function: { name: 'read_messages', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call-other', name: 'read_messages', content: '{"ok":true}' },
+  ])
+  store.appendTranscript(channelOrphan.channelId, [{ role: 'user', content: '保留这条用户消息' }])
+  const builtOrphan = builder.build({ conversationId: convOrphan.id, roleId: 'role-orphan' })
+  check(
+    '孤立 tool / 不完整工具轮次不会发给模型',
+    !builtOrphan.messages.some(message => message.role === 'tool') &&
+      builtOrphan.messages.some(message => String(message.content || '').includes('保留这条用户消息')),
+    JSON.stringify(builtOrphan.messages.map(message => ({ role: message.role, tool_call_id: message.tool_call_id }))),
+  )
+  store.clearTranscript(channelOrphan.channelId)
+  store.appendTranscript(channelOrphan.channelId, [
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call-good', type: 'function', function: { name: 'read_messages', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call-good', name: 'read_messages', content: '{"ok":true}' },
+  ])
+  const builtGood = builder.build({ conversationId: convOrphan.id, roleId: 'role-orphan' })
+  check(
+    '合法工具序列保留',
+    builtGood.messages.some(message => message.role === 'assistant' && message.tool_calls?.length) &&
+      builtGood.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call-good'),
+    JSON.stringify(builtGood.messages.map(message => message.role)),
+  )
+
+  console.log('\n⑪ 渠道数据跨 web/exe 共享持久化')
+  const group = channelRegistry.groups('private')[0]
+  const sharedChannel = channelRegistry.addChannel('private', group.id, {
+    type: 'custom',
+    name: '共享渠道测试',
+    color: '#123456',
+    status: 'offline',
+    meta: { note: 'shared' },
+  })
+  const channelPushed = await waitFor(
+    () =>
+      backend.ctx.settings
+        .get()
+        .preferences?.app?.channels?.groups?.private?.flatMap?.(item => item.channels || [])
+        .some(channel => channel.id === sharedChannel.id),
+    { timeout: 5000 },
+  )
+  check('渠道变更写入后端共享 config.json', channelPushed === true, JSON.stringify(backend.ctx.settings.get().preferences?.app?.channels || null).slice(0, 160))
+  const remoteChannels = {
+    groups: {
+      private: [
+        {
+          id: 'g-remote-private',
+          name: '远端分组',
+          expanded: true,
+          channels: [{ id: 'ch-remote-shared', type: 'custom', name: '远端共享渠道', color: '#654321', status: 'offline', meta: {} }],
+        },
+      ],
+      group: [{ id: 'g-remote-group', name: '我的渠道', expanded: true, channels: [] }],
+      privacy: [{ id: 'g-remote-privacy', name: '我的渠道', expanded: true, channels: [] }],
+    },
+    activeKey: null,
+    updatedAt: Date.now() + 10 * 60 * 1000,
+  }
+  config.set('app.channels', remoteChannels)
+  await sleep(50)
+  check(
+    'config 同步的渠道数据被注册中心采纳',
+    channelRegistry.findChannel('private', 'ch-remote-shared')?.name === '远端共享渠道',
+    JSON.stringify(channelRegistry.channels('private').map(channel => channel.id)),
+  )
 
   console.log('\n⑫ 收尾')
   await backend.ctx.sessions.flush()

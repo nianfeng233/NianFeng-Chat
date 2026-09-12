@@ -201,7 +201,7 @@ export function apply(ctx) {
           exportService.exportAll(format)
           return
         }
-        const data = { version: '0.40.0', exportedAt: new Date().toISOString(), ...storage.exportAll() }
+        const data = { version: '0.42.0', exportedAt: new Date().toISOString(), ...storage.exportAll() }
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')

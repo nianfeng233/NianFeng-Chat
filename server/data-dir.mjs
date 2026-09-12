@@ -81,7 +81,7 @@ export async function writeAppPointer(dataDir) {
 export async function readAppPointer() {
   const current = await readInstanceFile(join(appConfigDir(), 'instance.json'))
   if (current) return current
-  // 兼容旧品牌（风语 / Fengyu）目录：只读一次并迁移为念风指针，避免升级后丢历史数据目录。
+  // 兼容旧版本目录：只读一次并迁移为念风指针，避免升级后丢历史数据目录。
   try {
     const legacy = await readInstanceFile(join(legacyAppConfigDir(), 'instance.json'))
     if (legacy?.dataDir) {

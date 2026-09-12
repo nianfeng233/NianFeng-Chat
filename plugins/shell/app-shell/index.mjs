@@ -75,7 +75,7 @@ export function apply(ctx) {
   const service = {
     name: 'app-shell',
     refs,
-    version: '0.40.0',
+    version: '0.42.0',
     /** 外壳就绪：拿到 grid 各节点引用（拖拽调宽等行为挂这里） */
     onReady(cb) {
       if (refs.appEl) cb(refs)

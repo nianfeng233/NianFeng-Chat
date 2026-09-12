@@ -42,6 +42,7 @@ async function main() {
   console.log('\n① mock iLink 服务')
   const calls = []
   let updatesServed = 0
+  let qrSeq = 0
   const mock = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
     const body = req.method === 'POST' ? await readBody(req) : {}
@@ -51,9 +52,17 @@ async function main() {
       res.end(JSON.stringify(payload))
     }
     if (url.pathname === '/ilink/bot/get_bot_qrcode') {
-      send({ ret: 0, qrcode: 'mock-ticket-1', qrcode_img_content: 'https://weixin.qq.com/mock-login?t=1' })
+      qrSeq += 1
+      send({ ret: 0, qrcode: `mock-ticket-${qrSeq}`, qrcode_img_content: `https://weixin.qq.com/mock-login?t=${qrSeq}` })
     } else if (url.pathname === '/ilink/bot/get_qrcode_status') {
-      send({ ret: 0, status: 'confirmed', bot_token: 'mock-token', ilink_bot_id: 'mock-bot-1', ilink_user_id: 'mock-user-1' })
+      const ticket = url.searchParams.get('qrcode') || ''
+      send({
+        ret: 0,
+        status: 'confirmed',
+        bot_token: `mock-token-${ticket}`,
+        ilink_bot_id: `mock-bot-${ticket}`,
+        ilink_user_id: 'mock-user-1',
+      })
     } else if (url.pathname === '/ilink/bot/msg/notifystart') {
       send({ ret: 0 })
     } else if (url.pathname === '/ilink/bot/getupdates') {
@@ -99,10 +108,13 @@ async function main() {
   check('后端已启动', backend.port > 0, backend.url)
 
   try {
-    console.log('\n③ 二维码登录')
+    console.log('\n③ 二维码登录：全新 ticket / 新连接')
     const start = await (await api(backend.url, '/api/clawbot/login/start', { method: 'POST', body: { channelId: 'test-clawbot' } })).json()
-    check('返回二维码内容', start.qr?.content === 'https://weixin.qq.com/mock-login?t=1', JSON.stringify(start))
-    check('二维码 ticket 已保存', !!start.qr?.status)
+    check('返回二维码内容', /^https:\/\/weixin\.qq\.com\/mock-login\?t=\d+$/.test(start.qr?.content || ''), JSON.stringify(start))
+    check('二维码已生成并带 loginId', start.qr?.status === 'wait_scan' && !!start.qr?.id, JSON.stringify(start.qr))
+    const firstQrCall = calls.find(call => call.path === '/ilink/bot/get_bot_qrcode')
+    const firstTokenList = firstQrCall?.body?.local_token_list
+    check('首次获取二维码不携带旧 token', !firstTokenList || firstTokenList.length === 0, JSON.stringify(firstQrCall?.body))
 
     let login = null
     for (let i = 0; i < 30; i++) {
@@ -110,7 +122,11 @@ async function main() {
       if (login?.loggedIn) break
       await sleep(120)
     }
-    check('扫码确认后进入已登录', login?.loggedIn === true && login?.accountId === 'mock-bot-1', JSON.stringify(login))
+    check(
+      '扫码确认后进入已登录',
+      login?.loggedIn === true && String(login?.accountId || '').startsWith('mock-bot-mock-ticket-'),
+      JSON.stringify(login),
+    )
 
     console.log('\n④ getupdates 入站消息')
     let inbox = { messages: [] }
@@ -137,18 +153,74 @@ async function main() {
     const sendCall = calls.find(call => call.path === '/ilink/bot/sendmessage')
     check('sendmessage 携带正确文本与目标', sendCall?.body?.msg?.to_user_id === 'mock-user-1' && sendCall?.body?.msg?.item_list?.[0]?.text_item?.text === '念风回复', JSON.stringify(sendCall?.body))
 
+    console.log('\n⑤c 重新获取二维码：新 id / 新码 / 不携带旧 token')
+    const restartQr = await (await api(backend.url, '/api/clawbot/login/start', { method: 'POST', body: { channelId: 'test-clawbot' } })).json()
+    check(
+      '再次获取二维码得到新 id 与新码',
+      !!restartQr.qr?.id && restartQr.qr.id !== start.qr?.id && restartQr.qr.content !== start.qr?.content,
+      JSON.stringify(restartQr.qr),
+    )
+    const qrCalls = calls.filter(call => call.path === '/ilink/bot/get_bot_qrcode')
+    check(
+      '每次获取二维码都不携带已保存 token',
+      qrCalls.length >= 2 &&
+        qrCalls.every(call => {
+          const list = call.body?.local_token_list
+          return !list || (Array.isArray(list) && list.length === 0)
+        }),
+      JSON.stringify(qrCalls.map(call => call.body)),
+    )
+    let relogin = null
+    for (let i = 0; i < 30; i++) {
+      relogin = await (await api(backend.url, `/api/clawbot/login/status?channelId=test-clawbot`)).json()
+      if (relogin?.loggedIn) break
+      await sleep(120)
+    }
+    check(
+      '重新扫码确认后使用独立的微信连接',
+      relogin?.loggedIn === true && relogin?.accountId && relogin.accountId !== login?.accountId,
+      JSON.stringify(relogin),
+    )
+
+    console.log('\n⑤d 第二个 clawbot 渠道：多连接并行')
+    await api(backend.url, '/api/clawbot/login/start', { method: 'POST', body: { channelId: 'test-clawbot-b' } })
+    let loginB = null
+    for (let i = 0; i < 30; i++) {
+      loginB = await (await api(backend.url, '/api/clawbot/login/status?channelId=test-clawbot-b')).json()
+      if (loginB?.loggedIn) break
+      await sleep(120)
+    }
+    check('第二个渠道可独立扫码登录', loginB?.loggedIn === true && loginB?.accountId !== relogin?.accountId, JSON.stringify(loginB))
+    let statusA = null
+    let statusB = null
+    for (let i = 0; i < 40; i++) {
+      statusA = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot')).json()
+      statusB = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot-b')).json()
+      if (statusA?.status === 'online' && statusB?.status === 'online') break
+      await sleep(120)
+    }
+    check('两个 clawbot 渠道可同时在线', statusA?.status === 'online' && statusB?.status === 'online', JSON.stringify({ statusA, statusB }))
+    const sendB = await (await api(backend.url, '/api/clawbot/send', {
+      method: 'POST',
+      body: { channelId: 'test-clawbot-b', toUserId: 'mock-user-1', text: '第二个渠道的回复', contextToken: 'ctx-1' },
+    })).json()
+    check('第二个渠道可独立发送消息', sendB.ok === true, JSON.stringify(sendB))
+
     console.log('\n⑤b 重启后端：token 持久化与自动重连')
     await backend.close()
     backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
     check('重启后后端已启动', backend.port > 0, backend.url)
     let restartedStatus = null
+    let restartedStatusB = null
     for (let i = 0; i < 40; i++) {
       restartedStatus = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot')).json()
-      if (restartedStatus?.loggedIn && restartedStatus?.status === 'online') break
+      restartedStatusB = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot-b')).json()
+      if (restartedStatus?.loggedIn && restartedStatus?.status === 'online' && restartedStatusB?.loggedIn && restartedStatusB?.status === 'online') break
       await sleep(120)
     }
     check('重启后保留 token 并自动登录', restartedStatus?.loggedIn === true, JSON.stringify(restartedStatus))
     check('重启后消息链路恢复在线', restartedStatus?.status === 'online', JSON.stringify(restartedStatus))
+    check('重启后两个渠道都恢复在线', restartedStatusB?.loggedIn === true && restartedStatusB?.status === 'online', JSON.stringify(restartedStatusB))
 
     console.log('\n⑥ 凭据落盘与退出')
     const stateFile = join(dataDir, 'clawbot.json')
@@ -161,11 +233,17 @@ async function main() {
         await sleep(120)
       }
     }
-    check('账号状态已落盘', rawState.includes('mock-bot-1'), rawState.slice(0, 120))
-    check('token 不以明文落盘', !!rawState && !rawState.includes('mock-token'))
+    check('账号状态已落盘', rawState.includes('mock-bot-mock-ticket-'), rawState.slice(0, 120))
+    check('token 不以明文落盘', !!rawState && !rawState.includes('mock-token-'))
     const logout = await (await api(backend.url, '/api/clawbot/logout', { method: 'POST', body: { channelId: 'test-clawbot' } })).json()
+    const logoutB = await (await api(backend.url, '/api/clawbot/logout', { method: 'POST', body: { channelId: 'test-clawbot-b' } })).json()
     const afterLogout = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot')).json()
-    check('退出后不再登录', logout.ok === true && afterLogout.loggedIn === false, JSON.stringify(afterLogout))
+    const afterLogoutB = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot-b')).json()
+    check(
+      '退出后两个渠道都不再登录',
+      logout.ok === true && logoutB.ok === true && afterLogout.loggedIn === false && afterLogoutB.loggedIn === false,
+      JSON.stringify({ afterLogout, afterLogoutB }),
+    )
   } finally {
     console.log('\n⑦ 收尾')
     await backend.close().catch(() => {})

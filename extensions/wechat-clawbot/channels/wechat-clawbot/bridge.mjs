@@ -247,6 +247,13 @@ export function apply(ctx) {
       status: saved.account?.token ? 'offline' : 'idle',
       error: '',
       loop: null,
+      loopEpoch: null,
+      // 每次获取二维码 / 重新接入都会递增，旧的长轮询看到 epoch 不一致就退出，
+      // 保证新连接不会和上一次扫码、上一条消息链路串线。
+      epoch: 0,
+      qrEpoch: null,
+      loginId: '',
+      startedNotified: false,
       closed: false,
     }
     sessions.set(key, session)
@@ -280,6 +287,7 @@ export function apply(ctx) {
     channelId: session.channelId,
     status: session.status,
     loggedIn: !!session.account?.token,
+    loginId: session.loginId || '',
     accountId: session.account?.accountId || '',
     userId: session.account?.userId || '',
     nickname: session.account?.nickname || '',
@@ -287,6 +295,7 @@ export function apply(ctx) {
     pending: (session.inbox || []).length,
     qr: session.qr
       ? {
+          id: session.qr.id || '',
           content: session.qr.content || '',
           imageUrl: session.qr.imageUrl || '',
           status: session.qr.status || 'wait_scan',
@@ -331,16 +340,19 @@ export function apply(ctx) {
     }
   }
 
-  async function notifyStart(session) {
+  async function notifyStart(session, epoch) {
     if (!session?.account?.token) return false
     if (session.startedNotified) return true
+    const token = session.account.token
     const response = await requestApi(session, '/ilink/bot/msg/notifystart', {
       method: 'POST',
-      token: session.account.token,
+      token,
       body: { base_info: BASE_INFO },
       timeoutMs: 12000,
     })
-    const ok = !response?._error && !response?._httpStatus
+    if (epoch !== undefined && session.epoch !== epoch) return false
+    // notifystart 成功只认业务成功，不把 HTTP 200 里带错误码的响应当成已接入。
+    const ok = !isApiError(response)
     if (ok) session.startedNotified = true
     return ok
   }
@@ -361,7 +373,8 @@ export function apply(ctx) {
     return true
   }
 
-  async function pollLoop(session) {
+  async function pollLoop(session, epoch) {
+    if (session.epoch !== epoch) return
     if (!session.account?.token) {
       broadcastStatus(session, 'offline')
       return
@@ -369,23 +382,26 @@ export function apply(ctx) {
     // 有 token 只代表登录凭据存在，先标记“连接中”；notifystart 或首次 getupdates
     // 成功后才标记“已接入”，这样刷新状态显示的是真实链路结果而不是乐观值。
     broadcastStatus(session, 'connecting')
-    const notifyOk = await notifyStart(session)
+    const notifyOk = await notifyStart(session, epoch)
+    if (session.epoch !== epoch || closed || session.closed) return
     if (notifyOk) broadcastStatus(session, 'online')
-    while (!closed && !session.closed && session.account?.token) {
+    while (!closed && !session.closed && session.epoch === epoch && session.account?.token) {
+      const token = session.account.token
       try {
         const response = await requestApi(session, '/ilink/bot/getupdates', {
           method: 'POST',
-          token: session.account.token,
+          token,
           body: { get_updates_buf: session.buf || '', base_info: BASE_INFO },
           timeoutMs: 40000,
         })
-        if (closed || session.closed) return
+        if (closed || session.closed || session.epoch !== epoch) return
         if (isSessionExpired(response)) {
           ctx.logger.warn(`[clawbot] ${session.channelId} 登录已过期，需要重新接入`)
           session.account = null
           session.buf = ''
           session.qr = null
           session.startedNotified = false
+          session.epoch += 1
           saveSession(session)
           broadcastStatus(session, 'expired', { error: '微信登录已过期，请重新扫码接入' })
           return
@@ -412,7 +428,7 @@ export function apply(ctx) {
         }
         if (session.status !== 'online') broadcastStatus(session, 'online')
       } catch (err) {
-        if (closed || session.closed) return
+        if (closed || session.closed || session.epoch !== epoch) return
         broadcastStatus(session, 'error', { error: err?.message || String(err) })
         await sleep(3000)
       }
@@ -420,12 +436,19 @@ export function apply(ctx) {
   }
 
   function ensureLoop(session) {
-    if (!session?.account?.token || session.loop || closed || session.closed) return
-    session.loop = pollLoop(session)
+    if (!session?.account?.token || closed || session.closed) return
+    const epoch = session.epoch
+    if (session.loop && session.loopEpoch === epoch) return
+    const promise = pollLoop(session, epoch)
       .catch(err => ctx.logger.warn(`[clawbot] 轮询异常：${err?.message || err}`))
       .finally(() => {
-        session.loop = null
+        if (session.loop === promise) {
+          session.loop = null
+          session.loopEpoch = null
+        }
       })
+    session.loop = promise
+    session.loopEpoch = epoch
   }
 
   /**
@@ -435,15 +458,23 @@ export function apply(ctx) {
    * 这里在后台维护一条长轮询，前端 /login/status 只读取后台最新状态。
    */
   function ensureQrPoll(session) {
-    if (!session?.qr?.ticket || session.qrPolling || closed || session.closed) return
-    session.qrPolling = qrPollLoop(session)
+    if (!session?.qr?.ticket || session.qr.done || closed || session.closed) return
+    const epoch = session.qrEpoch
+    if (session.qrPolling && session.qrPollingEpoch === epoch) return
+    const promise = qrPollLoop(session, epoch)
       .catch(err => ctx.logger.warn(`[clawbot] 二维码轮询异常：${err?.message || err}`))
       .finally(() => {
-        session.qrPolling = null
+        if (session.qrPolling === promise) {
+          session.qrPolling = null
+          session.qrPollingEpoch = null
+        }
       })
+    session.qrPolling = promise
+    session.qrPollingEpoch = epoch
   }
 
-  function handleQrConfirmed(session, response) {
+  function handleQrConfirmed(session, response, epoch) {
+    if (session.qrEpoch !== epoch) return false
     const token = String(response.bot_token || response.token || response.access_token || response.ilink_bot_token || '')
     const accountId = String(response.ilink_bot_id || response.bot_id || response.account_id || '')
     if (!token) {
@@ -452,6 +483,8 @@ export function apply(ctx) {
       broadcastStatus(session, 'error', { error: session.qr.error })
       return false
     }
+    // 新的扫码确认结果属于一次全新连接：先让上一条消息长轮询退出，再切换到新 token。
+    session.epoch += 1
     session.account = {
       token,
       accountId,
@@ -463,10 +496,16 @@ export function apply(ctx) {
     session.buf = ''
     session.inbox = []
     session.seen = []
+    session.contextTokens = {}
+    session.typingTickets?.clear?.()
     session.startedNotified = false
     session.qr = null
     session.error = ''
+    // 让当前二维码长轮询立即失效，避免旧 ticket 再次确认。
+    session.qrEpoch += 1
     saveSession(session)
+    // 新 token 是重新连接的关键凭据，立即强制落盘，降低关闭 exe 时丢登录态的概率。
+    persist({ force: true }).catch(() => {})
     ensureLoop(session)
     // 扫码确认拿到 token 是真实登录结果，但“已接入”等 notifystart / 首次 getupdates 成功再亮；
     // ensureLoop 会先广播 connecting，成功后再广播 online。
@@ -474,10 +513,11 @@ export function apply(ctx) {
     return true
   }
 
-  async function qrPollLoop(session) {
-    while (!closed && !session.closed && session.qr?.ticket) {
+  async function qrPollLoop(session, epoch) {
+    while (!closed && !session.closed && session.qrEpoch === epoch && session.qr?.ticket && !session.qr.done) {
       if (session.qr.expiresAt && Date.now() > session.qr.expiresAt) {
         session.qr.status = 'expired'
+        session.qr.done = true
         broadcastStatus(session, 'expired', { error: '二维码已过期，请重新获取' })
         return
       }
@@ -490,7 +530,7 @@ export function apply(ctx) {
       } catch (_) {
         response = { _error: '请求超时' }
       }
-      if (closed || session.closed || !session.qr?.ticket) return
+      if (closed || session.closed || session.qrEpoch !== epoch || !session.qr?.ticket || session.qr.done) return
       if (isApiError(response)) {
         session.qr.status = 'wait_scan'
         session.qr.error = apiErrorText(response)
@@ -501,12 +541,13 @@ export function apply(ctx) {
       session.qr.error = ''
       const code = String(response.status || response.state || '').toLowerCase()
       if (code === 'confirmed') {
-        if (handleQrConfirmed(session, response)) return
+        if (handleQrConfirmed(session, response, epoch)) return
         await sleep(3000)
         continue
       }
       if (code === 'expired' || code === 'verify_code_blocked') {
         session.qr.status = code
+        session.qr.done = true
         const expired = code === 'expired'
         broadcastStatus(session, expired ? 'expired' : 'error', {
           error: expired ? '二维码已过期，请重新获取' : '验证失败次数过多，请稍后再试',
@@ -570,25 +611,41 @@ export function apply(ctx) {
     name: 'clawbot',
     ready: () => ready,
 
-    /** 二维码登录：获取 ticket 与二维码内容 */
+    /** 二维码登录：每次调用都获取全新 ticket / 新连接，不复用旧 token。 */
     async startLogin({ channelId } = {}) {
       await ready
       const session = getSession(channelId)
       if (!session) throw Object.assign(new Error('缺少 channelId'), { status: 400 })
-      if (session.account?.token) {
-        ensureLoop(session)
-        return { ...publicStatus(session), status: 'logged_in' }
-      }
-      session.qr = { status: 'getting_qr', startedAt: Date.now() }
+
+      // 重新接入时先作废旧消息轮询与旧二维码轮询：
+      // 1) 不把已保存的 token 传给 get_bot_qrcode，避免微信把新扫码当成“复用旧连接”；
+      // 2) 每次生成新的 loginId，二维码确认后直接替换为该渠道独立的新连接，多微信号可同时在线。
+      session.epoch += 1
+      session.loop = null
+      session.loopEpoch = null
+      session.qrEpoch = (session.qrEpoch || 0) + 1
+      session.qrPolling = null
+      session.qrPollingEpoch = null
+      session.account = null
+      session.buf = ''
+      session.inbox = []
+      session.seen = []
+      session.contextTokens = {}
+      session.typingTickets?.clear?.()
+      session.startedNotified = false
       session.error = ''
+      session.loginId = randomBytes(8).toString('hex')
+      delete state.accounts[session.channelId]
+      await persist({ force: true })
+
+      session.qr = { id: session.loginId, status: 'getting_qr', startedAt: Date.now() }
       broadcastStatus(session, 'connecting')
-      const localTokens = Object.values(state.accounts || {})
-        .map(account => decrypt(account?.account?.token || ''))
-        .filter(Boolean)
       const response = await requestApi(session, '/ilink/bot/get_bot_qrcode?bot_type=3', {
         method: 'POST',
         token: '',
-        body: { local_token_list: localTokens },
+        // 每次扫码都必须是微信侧的全新连接：这里始终传空列表，不再带本机
+        // 已保存 token；旧连接由用户在手机上按微信提示解除，而不是被程序默认复用。
+        body: { local_token_list: [] },
         timeoutMs: 15000,
       })
       if (isApiError(response)) {
@@ -604,6 +661,7 @@ export function apply(ctx) {
         throw Object.assign(new Error('微信未返回二维码内容'), { status: 502 })
       }
       session.qr = {
+        id: session.loginId,
         ticket,
         content,
         imageUrl: /^https?:\/\//i.test(content) && /\.(png|jpe?g|gif|webp|bmp|avif)(\?|#|$)/i.test(content) ? content : '',
@@ -618,16 +676,13 @@ export function apply(ctx) {
       return publicStatus(session)
     },
 
-    /** 查询扫码状态；真实状态由后台 qrPollLoop 长轮询更新 */
+    /** 查询扫码状态；返回真实链路状态（connecting / online / error），不再统一覆盖成 logged_in。 */
     async loginStatus({ channelId } = {}) {
       await ready
       const session = getSession(channelId)
       if (!session) return { channelId, status: 'idle', loggedIn: false }
-      if (session.account?.token) {
-        ensureLoop(session)
-        return { ...publicStatus(session), status: 'logged_in' }
-      }
-      if (session.qr?.ticket) ensureQrPoll(session)
+      if (session.account?.token) ensureLoop(session)
+      if (session.qr?.ticket && !session.qr.done) ensureQrPoll(session)
       return publicStatus(session)
     },
 
@@ -646,16 +701,21 @@ export function apply(ctx) {
       await ready
       const session = getSession(channelId)
       if (!session) return { ok: true }
-      session.closed = true
+      session.epoch += 1
+      session.loop = null
+      session.loopEpoch = null
+      session.qrEpoch = (session.qrEpoch || 0) + 1
+      session.qrPolling = null
+      session.qrPollingEpoch = null
       session.account = null
       session.buf = ''
       session.inbox = []
       session.seen = []
       session.qr = null
       session.startedNotified = false
-      session.closed = false
+      session.loginId = ''
       delete state.accounts[session.channelId]
-      schedulePersist()
+      await persist({ force: true })
       broadcastStatus(session, 'offline')
       return { ok: true }
     },

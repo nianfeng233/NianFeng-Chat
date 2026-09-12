@@ -156,7 +156,7 @@ export function apply(ctx) {
             row('平台', '来自浏览器 User-Agent', `<span class="mono">${escapeHtml(truncate(navigator.userAgent, 60))}</span>`) +
             row('后端', health ? `cordis v4 · ${escapeHtml(health.version)}` : '未连接', health ? '<span class="text-good">● 已连接</span>' : '<span class="text-bad">● 未连接</span>') +
             row('数据规模', '当前设备上的会话 / 消息', `<span class="mono">${sessions.count()} / ${sessions.stats?.().messages ?? 0}</span>`) +
-            row('客户端版本', '念风chat', `<span class="mono">v${escapeHtml(health?.version || '0.40.0')}</span>`),
+            row('客户端版本', '念风chat', `<span class="mono">v${escapeHtml(health?.version || '0.42.0')}</span>`),
           ))}`,
         )
 

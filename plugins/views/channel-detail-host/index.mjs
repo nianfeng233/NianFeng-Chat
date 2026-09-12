@@ -157,6 +157,7 @@ export function apply(ctx) {
       ctx.on('channel:status', render),
       ctx.on('channel:removed', render),
       ctx.on('channel:updated', render),
+      ctx.on('channel:sync', render),
       ctx.on('conversation:update', render),
       ctx.on('i18n:changed', render),
     ]

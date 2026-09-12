@@ -55,6 +55,11 @@ export function apply(ctx) {
 
   const shouldNotify = conversationId => {
     if (config.get('notify.messages', true) === false) return false
+    const conv = sessions.get(conversationId)
+    // 外部渠道（如微信clawbot）的会话记录特意不进入普通会话列表，
+    // 因此它在列表里永远“不是当前会话”；继续按普通消息提醒会在每次
+    // 渠道回复后弹通知，既无法点击回到被隐藏的会话，也和界面不一致。
+    if (conv?.meta?.hiddenFromSessionList || conv?.meta?.channelConversation === true) return false
     const hidden = typeof document !== 'undefined' && !!document.hidden
     if (hidden) return true
     return sessions.activeId() !== conversationId

@@ -273,9 +273,9 @@ export function createCompat(app, ctx, { id, meta = {} } = {}) {
 
     /* -------------------- 生命周期 -------------------- */
     /**
-     * 念风语义：ctx.effect(fn) 表示"把 fn 注册为卸载时的清理函数"。
+     * 念风的语义：ctx.effect(fn) 表示"把 fn 注册为卸载时的清理函数"。
      * cordis 原生语义是 effect(execute)：立即执行 execute 并注册其返回值。
-     * 这里统一成念风语义，并包一层错误兜底。
+     * 这里统一成念风的语义，并包一层错误兜底。
      */
     effect(fn) {
       if (typeof fn !== 'function') return () => {}

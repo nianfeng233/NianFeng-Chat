@@ -109,6 +109,17 @@ export function apply(ctx) {
   const findTab = channelId => channels.tabs().find(tab => channels.findChannel(tab, channelId)) || 'private'
   const channelKey = channelId => `wechat-clawbot:${channelId}`
   const permissionsOf = channel => ({ ...DEFAULT_PERMISSIONS, ...(channel?.meta?.permissions || {}) })
+  /** 渠道详情「打开聊天记录」：进入 设置 → 聊天记录 并定位到该渠道，而不是普通会话。 */
+  const openChannelRecords = channel => {
+    if (!isClawbotChannel(channel)) return
+    ensureConversation(channel)
+    const channelId = channelKey(channel.id)
+    const settingsView = ctx.registry.get('settings-view')
+    const settingsContainer = ctx.registry.get('settings-container')
+    if (settingsView?.open) settingsView.open('chat-records')
+    else settingsContainer?.open?.('chat-records')
+    setTimeout(() => events.emit('chat-records:select', { channelId }), 0)
+  }
   /**
    * 微信侧用户标识。
    * Clawbot 通常是个人号，微信协议只给出内部 user id；允许用户在渠道设置里
@@ -163,8 +174,11 @@ export function apply(ctx) {
       identityUserId: channelIdentity(channel).userId,
       identityUserName: channelIdentity(channel).userName,
       participatesWorkingMemory: permissionsOf(channel).context !== false,
+      // chat-permissions 会直接读取这两个来源侧策略，渠道设置里的跨渠道开关
+      // 不再需要用户另建 grants；sensitiveConfirm 控制跨渠道操作要不要二次确认。
       crossReadable: permissionsOf(channel).crossRead === true,
       crossSendable: permissionsOf(channel).crossSend === true,
+      sensitiveConfirm: permissionsOf(channel).confirm !== false,
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
@@ -207,14 +221,22 @@ export function apply(ctx) {
         : data.status === 'expired' || data.status === 'error'
           ? 'error'
           : 'connecting'
+    const clearingAccount =
+      data.loggedIn === false || data.status === 'offline' || data.status === 'idle' || data.status === 'expired'
     const nextMeta = {
       ...(channel.meta || {}),
       clawbotStatus: data.status || mapped,
-      accountId: data.accountId || channel.meta?.accountId || '',
-      nickname: data.nickname || channel.meta?.nickname || '',
+      accountId: data.accountId || (clearingAccount ? '' : channel.meta?.accountId || ''),
+      nickname: data.nickname || (clearingAccount ? '' : channel.meta?.nickname || ''),
       lastError: data.error || '',
     }
-    if (channel.status === mapped && channel.meta?.clawbotStatus === nextMeta.clawbotStatus) return
+    const unchanged =
+      channel.status === mapped &&
+      channel.meta?.clawbotStatus === nextMeta.clawbotStatus &&
+      (channel.meta?.accountId || '') === nextMeta.accountId &&
+      (channel.meta?.nickname || '') === nextMeta.nickname &&
+      (channel.meta?.lastError || '') === nextMeta.lastError
+    if (unchanged) return
     channels.updateChannel(findTab(channel.id), channel.id, { status: mapped, meta: nextMeta })
   }
 
@@ -468,46 +490,67 @@ export function apply(ctx) {
       statusEl.innerHTML = `<span class="dot" style="background:${color}"></span><span>${escapeHtml(text)}</span>`
     }
 
-    const succeed = () => {
-      stopTimers()
-      // 登录成功只代表拿到 token；真实“已接入”状态等后端 notifystart / getupdates 成功事件。
-      updateChannelFromStatus({ channelId: channel.id, status: 'connecting' })
-      setStatus('已登录，正在建立微信消息链路…', '#70a15a')
-      toast.success('微信clawbot 登录成功，正在连接')
-      closeTimer = setTimeout(close, 900)
+    const applyStatus = data => {
+      if (!data) return
+      updateChannelFromStatus({ ...data, channelId: channel.id })
     }
 
+    const succeed = () => {
+      stopTimers()
+      setStatus('已接入，微信消息链路正常。', '#70a15a')
+      toast.success('微信clawbot 已接入')
+      closeTimer = setTimeout(close, 1200)
+    }
+
+    /**
+     * 返回 true 表示还要继续轮询。
+     * 拿到 token 不等于链路已接入：后端会先返回 connecting，notifystart / getupdates
+     * 成功后才返回 online。这里持续读取真实状态，不再手动把渠道状态改回“连接中”。
+     */
     const paint = data => {
       const qr = data?.qr || null
       qrEl.innerHTML = qrMarkup(qr)
+      if (data) applyStatus(data)
       const qrState = qr?.status || ''
-      const status =
-        data?.loggedIn || data?.status === 'logged_in'
-          ? 'logged_in'
-          : ['scanned', 'expired', 'error', 'verify_code_blocked'].includes(qrState)
-            ? qrState
-            : data?.status || qrState || 'wait_scan'
-      if (data?.loggedIn || status === 'logged_in') {
-        succeed()
-        return
+      const actual = String(data?.status || '')
+      const loggedIn = data?.loggedIn === true || actual === 'logged_in'
+      if (loggedIn) {
+        if (actual === 'online') {
+          succeed()
+          return false
+        }
+        if (actual === 'error' || actual === 'expired') {
+          const message = data?.error || '登录失败，请重试。'
+          setStatus(message, '#c65b5b')
+          setError(message)
+          return false
+        }
+        setError('')
+        setStatus('已登录，正在建立微信消息链路…', '#70a15a')
+        return true
       }
+
+      const status = ['scanned', 'expired', 'error', 'verify_code_blocked'].includes(qrState)
+        ? qrState
+        : actual === 'error' || actual === 'expired'
+          ? actual
+          : qrState || actual || 'wait_scan'
       const qrError = data?.error || qr?.error || ''
       if (status === 'scanned') setStatus('已扫码，请在手机上确认授权…', '#c9a227')
       else if (status === 'expired') setStatus('二维码已过期，请重新获取。', '#c65b5b')
       else if (status === 'error' || (qrError && status === 'wait_scan')) setStatus(qrError || '登录失败，请重试。', '#c65b5b')
+      else if (status === 'offline' || status === 'idle') setStatus('当前未连接，请点击「重新获取二维码」。', '#b3b9c2')
       else setStatus('请使用手机微信扫码，并在手机上确认授权。', '#c9a227')
       if (qrError) setError(qrError)
+      return !['expired', 'error', 'verify_code_blocked', 'offline', 'idle'].includes(status)
     }
 
     const poll = async () => {
       if (closed) return
       try {
         const data = await api.get(`/clawbot/login/status?channelId=${encodeURIComponent(channel.id)}`)
-        paint(data)
-        const state = data?.loggedIn ? 'logged_in' : data?.qr?.status || data?.status || 'wait_scan'
-        if (!['logged_in', 'expired', 'error', 'verify_code_blocked'].includes(state)) {
-          pollTimer = setTimeout(poll, 2000)
-        }
+        const shouldContinue = paint(data)
+        if (shouldContinue) pollTimer = setTimeout(poll, data?.loggedIn ? 1200 : 2000)
       } catch (err) {
         setError(`查询扫码状态失败：${err.message}`)
         pollTimer = setTimeout(poll, 2600)
@@ -522,8 +565,8 @@ export function apply(ctx) {
       qrEl.innerHTML = '<div class="wc-qr-fallback">正在获取二维码…</div>'
       try {
         const data = await api.post('/clawbot/login/start', { channelId: channel.id })
-        paint(data)
-        if (!data?.loggedIn && data?.status !== 'logged_in') pollTimer = setTimeout(poll, 1600)
+        const shouldContinue = paint(data)
+        if (shouldContinue) pollTimer = setTimeout(poll, data?.loggedIn ? 1200 : 1600)
       } catch (err) {
         setStatus('二维码获取失败', '#c65b5b')
         setError(err.message || String(err))
@@ -619,11 +662,7 @@ export function apply(ctx) {
       } else if (action === 'edit') {
         openSettings({ mode: 'edit', channel: current, onSaved: render })
       } else if (action === 'open') {
-        const conv = ensureConversation(current)
-        if (conv) {
-          ctx.registry.get('view-router')?.switch('chat')
-          sessions.activate(conv.id)
-        }
+        openChannelRecords(current)
       } else if (action === 'refresh') {
         if (!api) return toast.error('后端未连接，无法刷新 Clawbot 状态')
         try {
@@ -661,9 +700,33 @@ export function apply(ctx) {
       events.on('clawbot:status', payload => {
         if (payload?.channelId === channel.id) render()
       }),
+      events.on('channel:sync', () => render()),
     ]
+
+    // SSE 可能在页面打开前就广播过 online；挂载详情时主动对齐一次真实状态，
+    // 避免界面一直停在本地缓存的“连接中”。
+    const refresh = async () => {
+      if (!api) return
+      try {
+        const data = await api.get(`/clawbot/status?channelId=${encodeURIComponent(channel.id)}`)
+        if (data) {
+          updateChannelFromStatus(data)
+          render()
+        }
+      } catch (_) {
+        /* 后端未就绪时保持本地状态 */
+      }
+    }
+    const bootTimer = setTimeout(refresh, 0)
+    const statusTimer = setInterval(() => {
+      const current = findChannel(channel.id) || channel
+      if (current.status === 'connecting') refresh()
+    }, 4000)
+
     render()
     const cleanup = () => {
+      clearTimeout(bootTimer)
+      clearInterval(statusTimer)
       offs.forEach(off => off?.())
       container.removeEventListener('click', onClick)
     }
@@ -798,6 +861,16 @@ export function apply(ctx) {
 
     const conv = ensureConversation(channel)
     if (!conv) return
+
+    // 跨渠道敏感操作的“确认 / 拒绝”回复直接交给 chat-permissions 消费，
+    // 不再作为普通聊天内容触发新一轮模型调用（与输入框确认的语义保持一致）。
+    const chatPermissions = ctx.registry.get('chat-permissions')
+    const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text)
+    if (pendingConfirm?.handled) {
+      await ackInbox(channel.id, [message.id])
+      return
+    }
+
     const permissions = permissionsOf(channel)
     const identity = channelIdentity(channel)
     if (store?.append) {
@@ -909,13 +982,7 @@ export function apply(ctx) {
           closePanel()
           if (edit) openSettings({ mode: 'edit', channel: target, onSaved: paint })
           else if (connect) openLogin(target)
-          else if (open) {
-            const conv = ensureConversation(target)
-            if (conv) {
-              ctx.registry.get('view-router')?.switch('chat')
-              sessions.activate(conv.id)
-            }
-          }
+          else if (open) openChannelRecords(target)
         }
         container.addEventListener('click', onClick)
         const offs = [
@@ -923,6 +990,7 @@ export function apply(ctx) {
           events.on('channel:removed', paint),
           events.on('channel:updated', paint),
           events.on('channel:status', paint),
+          events.on('channel:sync', paint),
         ]
         paint()
         return () => {
@@ -945,6 +1013,53 @@ export function apply(ctx) {
     else if (payload?.event === 'clawbot:status') updateChannelFromStatus(payload.data)
   })
   ctx.effect(offBackend)
+
+  /** 跨渠道敏感确认：微信侧看不到网页输入框提示，主动把确认请求发到微信。 */
+  const offConfirmBridge = events.on('chat:confirm-request', payload => {
+    const conv = sessions.get(payload?.conversationId)
+    if (!conv || conv.meta?.channelType !== TYPE_ID) return
+    const channel = findChannel(conv.meta?.clawbotChannelId)
+    if (!channel || !api) return
+    const lastInbound = [...(sessions.messages(conv.id) || [])]
+      .reverse()
+      .find(item => item.meta?.direction === 'inbound' && item.meta?.fromUserId)
+    if (!lastInbound) return
+    const actionText = payload.action === 'read' ? '读取另一个渠道的聊天记录' : '向另一个渠道发送消息'
+    const targetName = payload.targetName || payload.targetChannel || '其它渠道'
+    api
+      .post('/clawbot/send', {
+        channelId: channel.id,
+        toUserId: lastInbound.meta.fromUserId,
+        contextToken: lastInbound.meta.contextToken || '',
+        text: `检测到敏感跨渠道操作（${actionText}：${targetName}）。如果同意，请直接回复“确认”；回复其它内容将视为拒绝。`,
+      })
+      .catch(() => {
+        /* 提示发送失败不影响原确认流程（网页端仍可输入确认） */
+      })
+  })
+  ctx.effect(offConfirmBridge)
+
+  /**
+   * 渠道被真正移除时，同步清理后端保存的 Clawbot 登录凭据并停止长轮询，
+   * 避免删除后旧 token 仍在后台连接、或污染之后新建渠道的扫码流程。
+   * 注意：编辑渠道切换分类时会先 remove 再 add 同一个 id，因此延迟一拍再确认。
+   */
+  const channelExists = channelId => {
+    for (const tab of channels.tabs()) if (channels.findChannel(tab, channelId)) return true
+    return false
+  }
+  const offRemoved = events.on('channel:removed', payload => {
+    const removed = payload?.channel
+    if (!isClawbotChannel(removed)) return
+    setTimeout(() => {
+      if (channelExists(removed.id)) return
+      if (!api) return
+      api.post('/clawbot/logout', { channelId: removed.id }).catch(() => {
+        /* 后端未连接时忽略，下次后端启动可通过旧凭据自然过期 */
+      })
+    }, 0)
+  })
+  ctx.effect(offRemoved)
 
   ctx.effect(() => () => {
     for (const cleanup of closing.splice(0)) {

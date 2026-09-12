@@ -349,6 +349,7 @@ export function apply(ctx) {
       events.on('channel:activated', render),
       events.on('channel:status', render),
       events.on('channel:type-registered', render),
+      events.on('channel:sync', render),
       events.on('i18n:changed', () => {
         searchInput.placeholder = i18n.t('chat.searchChannel', '搜索渠道')
         addBtn.querySelector('.btn-text').textContent = i18n.t('channel.add', '添加渠道')

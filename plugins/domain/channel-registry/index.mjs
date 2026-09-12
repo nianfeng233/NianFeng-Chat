@@ -17,7 +17,7 @@ export const author = '念风内核'
 export const icon = '📡'
 export const core = true
 export const depends = { storage: '^1.0.0' }
-export const inject = ['storage', 'event-bus']
+export const inject = ['storage', 'event-bus', 'config']
 export const provides = [{ name: 'channel-registry', type: 'singleton' }]
 
 const NS = 'channels'
@@ -37,24 +37,104 @@ const PLANNED = [
 export function apply(ctx) {
   const storage = ctx.inject('storage')
   const events = ctx.inject('event-bus')
+  const config = ctx.inject('config')
 
-  let data = storage.get(NS, KEY, null)
-  if (!data || !data.groups) {
-    data = {
-      groups: {
-        private: [{ id: 'g-default-private', name: '我的渠道', expanded: true, channels: [] }],
-        group: [{ id: 'g-default-group', name: '我的渠道', expanded: true, channels: [] }],
-        privacy: [{ id: 'g-default-privacy', name: '我的渠道', expanded: true, channels: [] }],
-      },
-      activeKey: null,
-    }
-    storage.set(NS, KEY, data)
+  const defaults = () => ({
+    groups: {
+      private: [{ id: 'g-default-private', name: '我的渠道', expanded: true, channels: [] }],
+      group: [{ id: 'g-default-group', name: '我的渠道', expanded: true, channels: [] }],
+      privacy: [{ id: 'g-default-privacy', name: '我的渠道', expanded: true, channels: [] }],
+    },
+    activeKey: null,
+    updatedAt: 0,
+  })
+  const isValid = value =>
+    !!(value && typeof value === 'object' && value.groups && typeof value.groups === 'object' && !Array.isArray(value.groups))
+  const clone = value => structuredClone(value)
+  const bestLocalData = () => {
+    const candidates = [config.get('app.channels'), storage.get(NS, KEY, null)].filter(isValid)
+    if (!candidates.length) return defaults()
+    candidates.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+    return clone(candidates[0])
   }
+  const hasUserChannels = value =>
+    isValid(value) && Object.values(value.groups).some(group => Array.isArray(group?.channels) && group.channels.length > 0)
+
+  // 渠道数据既写入当前浏览器 localStorage，也通过 config 持久化到共享数据目录
+  // 的 config.json preferences.app.channels，这样 exe 和 web 切换后渠道列表一致。
+  let data = bestLocalData()
   data.activeKey = null
+  storage.set(NS, KEY, data)
+
+  let syncingFromConfig = false
+  const publishToConfig = () => {
+    if (!data?.updatedAt) return
+    syncingFromConfig = true
+    try {
+      config.set('app.channels', clone(data))
+    } finally {
+      syncingFromConfig = false
+    }
+  }
+  const persist = () => {
+    data.updatedAt = Date.now()
+    storage.set(NS, KEY, data)
+    publishToConfig()
+  }
+  const publishLocal = () => {
+    data.updatedAt = Date.now()
+    storage.set(NS, KEY, data)
+    publishToConfig()
+  }
+  const activeStillExists = (candidate, activeKey) => {
+    const [tab, channelId] = String(activeKey || '').split(':')
+    return !!channelId && !!candidate?.groups?.[tab]?.some(group => group.channels?.some(channel => channel.id === channelId))
+  }
+  const applyRemote = remote => {
+    if (!isValid(remote)) return false
+    const remoteAt = Number(remote.updatedAt) || 0
+    const localAt = Number(data.updatedAt) || 0
+    if (remoteAt < localAt) {
+      // 本机修改更新：继续把本机数据发布到共享目录，别被旧的后端数据覆盖。
+      publishLocal()
+      return false
+    }
+    if (remoteAt === localAt) return false
+    const previousActiveKey = data.activeKey
+    data = clone(remote)
+    data.activeKey = activeStillExists(data, previousActiveKey) ? previousActiveKey : null
+    storage.set(NS, KEY, data)
+    events.emit('channel:sync', { data })
+    return true
+  }
+
+  const offConfig = config.watch('app.channels', value => {
+    if (syncingFromConfig || !isValid(value)) return
+    const remoteAt = Number(value.updatedAt) || 0
+    const localAt = Number(data.updatedAt) || 0
+    if (remoteAt < localAt) {
+      publishLocal()
+      return
+    }
+    if (remoteAt > localAt) applyRemote(value)
+  })
+  const offRemoteSynced = ctx.on('config:remote-synced', ({ remote } = {}) => {
+    const remoteChannels = remote?.app?.channels
+    if (isValid(remoteChannels)) {
+      applyRemote(remoteChannels)
+      return
+    }
+    // 后端从未保存过渠道：把本机已有的用户渠道迁移发布一次，
+    // 默认空渠道不发布，避免新浏览器首次启动用空数据覆盖共享渠道。
+    if (data.updatedAt || hasUserChannels(data)) publishLocal()
+  })
+  ctx.effect(() => {
+    offConfig()
+    offRemoteSynced()
+  })
 
   const types = new Map()
   const planned = new Map(PLANNED.map(item => [item.type, item]))
-  const persist = () => storage.set(NS, KEY, data)
   const nextGroupId = () => `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
   const nextChannelId = () => `ch${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
 
@@ -122,6 +202,9 @@ export function apply(ctx) {
       const [group] = list.splice(index, 1)
       persist()
       events.emit('channel:group-removed', { tab, group })
+      // 分组里的渠道会一并移除：逐个广播，渠道插件才能注销后端连接、
+      // 清理二维码长轮询等资源，避免留下孤儿连接。
+      for (const channel of group.channels || []) events.emit('channel:removed', { tab, channel, groupId: group.id })
       return true
     },
     toggleGroup(tab, groupId) {

@@ -35,7 +35,7 @@ export function apply(ctx) {
     render(container) {
       const render = () => {
         const stats = manager.stats()
-        const appVersion = ctx.registry.get('app')?.version || '0.41.0'
+        const appVersion = ctx.registry.get('app')?.version || '0.42.0'
         const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
         container.innerHTML = page('关于', '念风：本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）。', `
           ${section('', `<div class="settings-card" style="padding:22px">

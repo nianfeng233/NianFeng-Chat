@@ -593,6 +593,17 @@ fn health_ok(port: u16) -> bool {
 
 fn stop_child(child: &mut Option<Child>) {
     if let Some(mut child) = child.take() {
+        // Windows 下 Node 可能还会拉起子进程；先按进程树结束，避免关闭 exe 后
+        // 后台仍有 node/模型进程占用端口，导致下次启动或迁移数据异常。
+        #[cfg(target_os = "windows")]
+        {
+            let pid = child.id().to_string();
+            let _ = Command::new("taskkill")
+                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = child.kill();
         let _ = child.wait();
     }

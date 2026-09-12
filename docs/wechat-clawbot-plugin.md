@@ -6,7 +6,7 @@
 # 微信clawbot 渠道插件 · 更新说明
 
 > 更新分支：`update/wechat-clawbot`（预览分支，确认稳定后再合并 `main`）
-> 基线版本：念风Chat v0.41.0（原“风语”仓库重命名前）
+> 基线版本：念风Chat v0.42.0
 
 ## 1. 插件位置与分发
 
@@ -49,13 +49,13 @@
 | `server/index.mjs` | 新增通用渠道后端桥加载器：自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录 |
 | `server/plugins/http.mjs` | 新增通用 `httpApi` 路由 / 能力扩展点；Clawbot 专用路由已移回自己的 `bridge.mjs` |
 | `plugins/channels/wechat-clawbot/bridge.mjs` | 通过 `httpApi.route()` 自行注册 `/api/clawbot/*`，不再依赖本体路由 |
-| `server/data-dir.mjs` / `start.mjs` / `server/index.mjs` | 兼容旧 `FENGYU_*` 环境变量与旧 AppData 指针 |
+| `server/data-dir.mjs` / `start.mjs` / `server/index.mjs` | 兼容旧版本环境变量与旧 AppData 指针 |
 
 ## 4. 项目重命名
 
 - 中文名：**念风Chat**；英文名：**NianFeng-Chat**；仓库：`https://github.com/nianfeng233/NianFeng-Chat`
 - 包名：`nianfeng-chat`；桌面端产物：`念风Chat.exe`
-- 旧品牌 “风语 / Fengyu / fengyu / FENGYU_” 已统一替换；所有文本源文件补充了“念风chat”文件头标记
+- 旧品牌环境变量与旧安装目录指针已统一替换为念风相关名称；所有文本源文件补充了“念风chat”文件头标记
 - 应用数据目录新增 `nianfeng` / `NianFengChat`，并保留旧目录一次性回退读取，避免升级丢数据
 
 ## 5. 头像统一修复
@@ -70,6 +70,19 @@
 - token 使用 `.secret-key` AES-GCM 加密写入 `<数据目录>/clawbot.json`；后端重启后加载状态并自动重连，`test:clawbot` 增加了“重启后自动登录并恢复在线”断言。
 - “已接入”状态现在等 `notifystart` 或首次 `getupdates` 成功后才亮，不再是拿到 token 就显示在线；网络/会话过期会更新为错误或已过期。
 
+## 5.2 重新连接 / 多账号 / 权限与持久化修复
+
+- **每次扫码都是新连接**：`get_bot_qrcode` 不再把本机保存的 token 作为 `local_token_list` 传给微信，每次获取二维码都会生成新的 `loginId`、新 ticket，各自对应独立连接；删除渠道重新添加、同一微信号重新扫码时会由微信正常提示解除旧连接，不再静默复用。
+- **多微信号可同时在线**：后端桥按渠道 ID 隔离 token、同步游标与消息长轮询；每个渠道有独立的 epoch，重新获取二维码会使旧的扫码 / 消息长轮询立即失效。
+- **移除渠道会注销连接**：删除渠道（含删除分组）会触发 `channel:removed`，插件调用 `/api/clawbot/logout` 清理后端凭据与长轮询；编辑渠道切换分类时同 id 的 remove + add 不会被误判为删除。
+- **状态显示以真实链路为准**：`/login/status` 返回 `online / connecting / error` 等真实状态，前端会继续轮询到消息链路真正 online，不再在登录弹窗里手动把状态改回“连接中”；渠道详情挂载时也会主动同步一次后端状态。
+- **渠道设置中的跨渠道权限直接生效**：渠道设置里的“跨渠道读取 / 跨渠道发送”会随会话 meta 持久化，`chat-permissions` 直接读取来源侧策略，无需再手工维护 grants；`sensitiveConfirm` 跟随渠道权限设置决定是否二次确认，`read_messages` / `chat_send` 不再把所有拒绝都吞成“目标渠道不可用”。微信侧也会收到确认提示，直接回复“确认”即可放行。
+- **渠道记录不再误弹通知**：`hiddenFromSessionList` / `channelConversation` 的渠道会话不再触发角色消息系统通知。
+- **输入框高度等界面偏好**：`chat.composerHeight` 在后端偏好同步到账后补应用；`config` 远端偏好合并支持运行时动态键，避免重启 / 换 origin 后界面状态回落。
+- **桌面退出更彻底**：Windows 桌面壳关闭窗口 / 重启时用 `taskkill /T` 结束 Node 进程树，避免后台残留进程占端口或打断落盘。
+- **会话落盘冲突合并**：前端会话服务启动时按 `updatedAt` + 消息数合并本地与后端，并记录删除墓碑；关闭 exe 时没来得及写回的最后修改不会被后端旧数据覆盖。
+- **渠道列表跨 web/exe 共享**：渠道分组、渠道实例与设置除写入浏览器 localStorage 外，还会通过 `config` 的 `preferences.app.channels` 同步到共享数据目录的 `config.json`；按 `updatedAt` 取新并自动发布本机已有渠道。exe 里创建的渠道切到 web 版（同一数据目录）后可以直接看到，新增 / 删除 / 状态变化也会双向同步。
+
 ## 6. 验证与构建
 
 ```bash
@@ -79,5 +92,5 @@ npm run build:release     # 同时生成 Web 与桌面版；exe 内含 wechat-cl
 npm run build:clawbot-plugin
 ```
 
-当前测试结果：`npm test` 全部通过；`test:clawbot` 18/18，`smoke` 212/212，
-`test-backend` 63/63，其余测试均通过。
+当前测试结果：`npm test` 全部通过；`test:clawbot` 26/26（含重新扫码新连接、双渠道并行与重启恢复），
+`smoke` 212/212，`test-backend` 63/63，`test:chat-tools` 104/104，其余测试均通过。
