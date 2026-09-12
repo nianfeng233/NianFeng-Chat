@@ -81,18 +81,60 @@ export function apply(ctx) {
     providers: () => [...providers.values()],
     provider: id => providers.get(id) || null,
 
-    /** 后端刷新模型列表后同步进来（保持 provider 对象不变） */
+    /** 后端刷新模型列表后同步进来（保持 provider 对象不变）。 */
     replaceModels(id, nextModels = []) {
       const record = providers.get(id)
       if (!record) return false
-      for (const modelId of [...record.models.keys()]) {
+      const list = (Array.isArray(nextModels) ? nextModels : []).filter(model => model && typeof model === 'object' && model.id)
+      const nextById = new Map(list.map(model => [String(model.id), model]))
+      const currentIds = [...record.models.keys()]
+      const nextIds = [...nextById.keys()]
+      const signature = model => {
+        if (!model || typeof model !== 'object') return ''
+        try {
+          return JSON.stringify(
+            Object.keys(model)
+              .sort()
+              .reduce((acc, key) => {
+                acc[key] = model[key]
+                return acc
+              }, {}),
+          )
+        } catch (_) {
+          return String(model)
+        }
+      }
+      const sameIdSet = currentIds.length === nextIds.length && currentIds.every(modelId => nextById.has(modelId))
+      if (sameIdSet) {
+        let unchanged = true
+        for (const modelId of nextIds) {
+          if (signature(record.models.get(modelId)) !== signature(nextById.get(modelId))) {
+            unchanged = false
+            break
+          }
+        }
+        // 列表没有任何变化时不要动 selectable：否则每次 settings/updated 都会重注册模型，
+        // 触发 activeId 反复写 config，最终把模型设置页刷成死循环。
+        if (unchanged) return false
+      }
+
+      // 只移除「被删除 / 内容有变」的模型，未变模型保留 activeId 与注册实例。
+      for (const modelId of currentIds) {
+        const next = nextById.get(modelId)
+        if (next && signature(record.models.get(modelId)) === signature(next)) continue
         record.models.delete(modelId)
         models.unregister(`${id}/${modelId}`)
       }
-      for (const model of nextModels) {
-        record.models.set(model.id, model)
+      for (const model of list) {
+        const modelId = String(model.id)
+        const key = `${id}/${modelId}`
+        const previous = record.models.get(modelId)
+        const alreadyRegistered = typeof models.has === 'function' ? models.has(key) : !!previous
+        if (previous && signature(previous) === signature(model) && alreadyRegistered) continue
+        if (alreadyRegistered) models.unregister(key)
+        record.models.set(modelId, model)
         models.register(
-          `${id}/${model.id}`,
+          key,
           { provider: id, model, ...record.raw, models: undefined },
           {
             label: model.name || model.id,

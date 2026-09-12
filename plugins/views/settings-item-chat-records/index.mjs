@@ -552,6 +552,17 @@ export function apply(ctx) {
         else renderList()
       })
       // 渠道详情点「打开聊天记录」时，定位到对应渠道而不是另开普通会话。
+      const offDeleted = events.on('conversation:delete', () => {
+        listInitialized = false
+        if (activeChannel && !store.channelRecord(activeChannel)) {
+          activeChannel = null
+          draft = []
+          pathEl.textContent = '未选择渠道'
+          updateJsonSource()
+          renderCards()
+        }
+        renderList()
+      })
       const offSelect = events.on('chat-records:select', payload => {
         const channelId = String(payload?.channelId || '')
         const record = channelId ? store.channelRecord(channelId) : null
@@ -563,6 +574,7 @@ export function apply(ctx) {
 
       return () => {
         offReplaced()
+        offDeleted()
         offSelect()
         container.innerHTML = ''
       }

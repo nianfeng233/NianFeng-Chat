@@ -16,12 +16,13 @@ export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
 export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
-export const inject = ['slots', 'session-service', 'message-service', 'event-bus', 'toast', 'i18n', 'config']
+export const inject = ['slots', 'session-service', 'message-service', 'event-bus', 'toast', 'i18n', 'config', 'image-service?']
 export const provides = [{ name: 'composer', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { COMPOSER_CSS } from './style.mjs'
 import { icons } from '../../../src/util/icons.mjs'
+import { compressImageFile } from '../../domain/image-service/compress.mjs'
 
 const MIN_HEIGHT = 58
 
@@ -32,6 +33,7 @@ export function apply(ctx) {
   const toast = ctx.inject('toast')
   const i18n = ctx.inject('i18n')
   const config = ctx.inject('config')
+  const imageService = ctx.inject('image-service?')
 
   useStyle(ctx, COMPOSER_CSS)
 
@@ -46,12 +48,14 @@ export function apply(ctx) {
           <button class="tool-btn" title="附件（插件扩展位）" data-tool="file">${icons.attach}</button>
           <button class="tool-btn" title="语音输入" data-tool="voice">${icons.voice}</button>
         </div>
+        <div class="composer-attachments" id="composerAttachments" hidden></div>
         <div class="composer-body">
           <textarea class="composer-input" id="composerInput"
             placeholder="${i18n.t('chat.placeholder', '输入消息，Enter 发送，Shift + Enter 换行')}"></textarea>
           <button class="stop-btn" id="stopBtn" title="停止生成">停止</button>
           <button class="send-btn" id="sendBtn"><span id="sendBtnText">${i18n.t('chat.send', '发送')}</span></button>
         </div>
+        <input type="file" id="composerImageInput" accept="image/*" multiple hidden />
       </div>`
 
     const composer = container.querySelector('#composer')
@@ -65,6 +69,62 @@ export function apply(ctx) {
       if (typingHint) typingHint.hidden = !on
     }
 
+    /* -------- 图片附件：本地压缩成 data URL，随 message:send 一起交给模型 -------- */
+    const attachmentsEl = container.querySelector('#composerAttachments')
+    const imageInput = container.querySelector('#composerImageInput')
+    /** @type {Array<{id?:string,dataUrl?:string,mime:string,name:string,width?:number,height?:number,size?:number,_preview?:string}>} */
+    let pendingImages = []
+    const previewOf = image => image?._preview || imageService?.dataUrlOf?.(image) || image?.dataUrl || ''
+    const renderAttachments = () => {
+      if (!attachmentsEl) return
+      attachmentsEl.hidden = pendingImages.length === 0
+      attachmentsEl.innerHTML = pendingImages
+        .map(
+          (image, index) => `
+          <figure class="composer-attachment">
+            <img src="${previewOf(image)}" alt="${(image.name || '图片').replace(/"/g, '')}" />
+            <button type="button" title="移除图片" data-remove-image="${index}">×</button>
+          </figure>`,
+        )
+        .join('')
+    }
+    const addImageFiles = async files => {
+      const list = [...(files || [])].filter(file => file && /^image\//i.test(file.type || '')).slice(0, Math.max(0, 4 - pendingImages.length))
+      if (!list.length) {
+        if (files?.length) toast.warn('只支持图片文件，单次最多 4 张')
+        return
+      }
+      for (const file of list) {
+        try {
+          const compressed = await compressImageFile(file)
+          let record = {
+            id: '',
+            mime: compressed.mime,
+            name: compressed.name,
+            width: compressed.width || 0,
+            height: compressed.height || 0,
+            size: compressed.size || 0,
+          }
+          if (imageService?.saveDataUrl) {
+            try {
+              const saved = await imageService.saveDataUrl(compressed.dataUrl, compressed)
+              if (saved?.id) record = { ...record, ...saved }
+            } catch (_) {
+              /* 后端不可用时保留 dataUrl 作为降级存储 */
+            }
+          }
+          pendingImages.push({ ...record, _preview: compressed.dataUrl })
+        } catch (err) {
+          toast.warn(`图片处理失败：${err.message}`)
+        }
+      }
+      renderAttachments()
+    }
+    const clearImages = () => {
+      pendingImages = []
+      renderAttachments()
+      if (imageInput) imageInput.value = ''
+    }
     const availableHeight = () => {
       const rect = pane.getBoundingClientRect()
       const header = pane.querySelector('.chat-header')
@@ -80,14 +140,24 @@ export function apply(ctx) {
     /* -------- 发送 -------- */
     const send = () => {
       const text = input.value.replace(/\s+$/, '').replace(/^\s+/, '')
-      if (!text) return
+      if (!text && !pendingImages.length) return
       const convId = sessions.activeId()
       if (!convId) {
         toast.warn('请先选择一个会话')
         return
       }
+      const images = pendingImages.slice(0, 4).map(image => ({
+        id: image.id || '',
+        mime: image.mime || '',
+        name: image.name || '',
+        width: image.width || 0,
+        height: image.height || 0,
+        size: image.size || 0,
+        ...(image.id ? {} : { dataUrl: image._preview || image.dataUrl || '' }),
+      }))
       input.value = ''
-      messages.requestSend(convId, text) // 广播 message:send（拦截型事件）
+      clearImages()
+      messages.requestSend(convId, text, images.length ? { images } : undefined) // 广播 message:send（拦截型事件）
     }
 
     const onKeydown = e => {
@@ -113,7 +183,12 @@ export function apply(ctx) {
         const result = toggleVoice()
         if (result === true) return
       }
-      // 表情 / 图片 / 附件是插件扩展位：没有插件接管时明确说明，避免看起来像能点却没反应。
+      if (tool === 'image') {
+        btn.dataset.handled = '1'
+        imageInput?.click()
+        return
+      }
+      // 表情 / 附件是插件扩展位：没有插件接管时明确说明，避免看起来像能点却没反应。
       if (!ctx.registry.get('composer-tool-host') && !btn.dataset.handled) {
         const tips = { emoji: '表情面板', image: '图片上传', file: '附件上传', voice: SpeechRecognitionCtor ? '语音输入' : '语音输入（当前浏览器不支持 Web Speech API）' }
         toast.info(`${tips[tool] || tool}是插件扩展位，当前还没有安装对应插件，可在「设置 → 插件」中查看。`)
@@ -186,6 +261,43 @@ export function apply(ctx) {
     sendBtn.addEventListener('click', onClickSend)
     stopBtn?.addEventListener('click', onStopClick)
     composer.addEventListener('click', onComposerClick)
+
+    /* -------- 图片：选择 / 粘贴 / 拖拽 / 移除 -------- */
+    const onImagePicked = () => {
+      addImageFiles(imageInput?.files).catch(() => {})
+      if (imageInput) imageInput.value = ''
+    }
+    const onAttachmentClick = event => {
+      const button = event.target.closest?.('[data-remove-image]')
+      if (!button) return
+      const index = Number(button.dataset.removeImage)
+      if (Number.isFinite(index)) {
+        pendingImages.splice(index, 1)
+        renderAttachments()
+      }
+    }
+    const onPaste = event => {
+      const files = [...(event.clipboardData?.files || [])]
+      if (files.some(file => /^image\//i.test(file.type || ''))) {
+        event.preventDefault()
+        addImageFiles(files).catch(() => {})
+      }
+    }
+    const onDragOver = event => {
+      if ([...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault()
+    }
+    const onDrop = event => {
+      const files = [...(event.dataTransfer?.files || [])]
+      if (files.some(file => /^image\//i.test(file.type || ''))) {
+        event.preventDefault()
+        addImageFiles(files).catch(() => {})
+      }
+    }
+    imageInput?.addEventListener('change', onImagePicked)
+    attachmentsEl?.addEventListener('click', onAttachmentClick)
+    input.addEventListener('paste', onPaste)
+    composer.addEventListener('dragover', onDragOver)
+    composer.addEventListener('drop', onDrop)
 
     /* -------- 高度拖拽 -------- */
     let dragging = false
@@ -287,6 +399,7 @@ export function apply(ctx) {
 
     const onConversationSwitch = () => {
       input.disabled = false
+      clearImages()
       showTyping(false)
       syncStop()
       setTimeout(() => input.focus(), 10)
@@ -322,6 +435,11 @@ export function apply(ctx) {
       sendBtn.removeEventListener('click', onClickSend)
       stopBtn?.removeEventListener('click', onStopClick)
       composer.removeEventListener('click', onComposerClick)
+      imageInput?.removeEventListener('change', onImagePicked)
+      attachmentsEl?.removeEventListener('click', onAttachmentClick)
+      input.removeEventListener('paste', onPaste)
+      composer.removeEventListener('dragover', onDragOver)
+      composer.removeEventListener('drop', onDrop)
       hResizer.removeEventListener('mousedown', onResizeDown)
       window.removeEventListener('mousemove', onResizeMove)
       window.removeEventListener('mouseup', onResizeUp)

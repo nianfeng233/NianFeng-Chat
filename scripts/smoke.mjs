@@ -391,10 +391,120 @@ async function main() {
   const plannedTypes = channelRegistry.plannedList().map(p => p.type)
   const registeredTypes = channelRegistry.typeList().map(t => t.id)
   check('未实现渠道路径被明确标注 discord/email', plannedTypes.includes('discord') && plannedTypes.includes('email') && !plannedTypes.includes('wechat'), plannedTypes.join(','))
-  check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot') && registeredTypes.every(id => id === 'wechat-clawbot'), registeredTypes.join(','))
+  check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot'), registeredTypes.join(','))
+  check(
+    'QQ官方机器人 渠道类型已由插件注册',
+    registeredTypes.includes('qqbot') && registeredTypes.every(id => id === 'wechat-clawbot' || id === 'qqbot'),
+    registeredTypes.join(','),
+  )
   const clawbotType = channelRegistry.type('wechat-clawbot')
   check('微信clawbot 提供自定义添加窗口', typeof clawbotType?.create === 'function')
   check('微信clawbot 提供自定义渠道详情', typeof clawbotType?.detail === 'function')
+  const qqbotType = channelRegistry.type('qqbot')
+  check('QQ官方机器人 提供自定义添加窗口', typeof qqbotType?.create === 'function')
+  check('QQ官方机器人 提供自定义渠道详情', typeof qqbotType?.detail === 'function')
+
+  // 角色下拉框回归：chat-store 会把普通会话登记为 nova 网页渠道，它们仍是角色；
+  // 其它渠道（wechat-clawbot / qqbot）的聊天记录容器不能被当成角色列出来。
+  const roleConv = smokeSessions.create({ id: 'smoke-role-conv', name: '冒烟角色' })
+  smokeSessions.create({
+    id: 'smoke-nova-role',
+    name: 'Nova角色冒烟',
+    meta: { channelType: 'nova', channelId: 'nova:web:smoke-nova-role' },
+  })
+  smokeSessions.create({
+    id: 'smoke-other-channel',
+    name: '其它渠道记录',
+    meta: { hiddenFromSessionList: true, channelConversation: true, channelType: 'wechat-clawbot', channelId: 'wechat-clawbot:other' },
+  })
+  await sleep(40)
+
+  const readRoleOptions = async type => {
+    type.create({ tab: 'private' })
+    await sleep(40)
+    const masks = Array.from(document.body.querySelectorAll('.wc-mask'))
+    const dialog = masks[masks.length - 1]
+    const select = dialog?.querySelector('[data-wc-role]')
+    const text = Array.from(select?.querySelectorAll('option') || [])
+      .map(option => option.textContent || '')
+      .join('|')
+    dialog?.querySelector('[data-wc-cancel]')?.click()
+    await sleep(20)
+    return { dialog, select, text }
+  }
+
+  const qqRoleOptions = await readRoleOptions(qqbotType)
+  check(
+    'QQ 添加渠道的角色下拉只列真正的角色',
+    qqRoleOptions.text.includes('冒烟角色') &&
+      qqRoleOptions.text.includes('Nova角色冒烟') &&
+      !qqRoleOptions.text.includes('其它渠道记录'),
+    qqRoleOptions.text,
+  )
+  const wxRoleOptions = await readRoleOptions(clawbotType)
+  check(
+    '微信clawbot 角色下拉同样不会把渠道记录当成角色',
+    wxRoleOptions.text.includes('冒烟角色') &&
+      wxRoleOptions.text.includes('Nova角色冒烟') &&
+      !wxRoleOptions.text.includes('其它渠道记录'),
+    wxRoleOptions.text,
+  )
+
+  // 保存渠道只负责创建并提示去详情「接入」，不应自动弹出二维码窗口。
+  qqbotType.create({ tab: 'private' })
+  await sleep(40)
+  let maskList = Array.from(document.body.querySelectorAll('.wc-mask'))
+  let qqCreateDialog = maskList[maskList.length - 1]
+  qqCreateDialog.querySelector('[data-wc-role]').value = roleConv.id
+  qqCreateDialog.querySelector('[data-wc-name]').value = 'QQ保存流程冒烟'
+  qqCreateDialog.querySelector('[data-wc-save]')?.click()
+  await sleep(80)
+  const createdQQ = channelRegistry.channels('private').find(item => item.type === 'qqbot')
+  const loginDialogVisible = Array.from(document.body.querySelectorAll('.wc-mask .wc-dialog h3'))
+    .some(node => String(node.textContent || '').includes('接入 QQ 官方机器人'))
+  check('保存 QQ 渠道后不会自动弹出二维码登录窗口', !!createdQQ && !loginDialogVisible)
+  if (createdQQ) {
+    const createdKey = `private:${createdQQ.id}`
+    if (channelRegistry.activeKey() !== createdKey) channelRegistry.activate('private', createdQQ.id)
+    await sleep(120)
+    const connectButton = document.querySelector('.wc-detail [data-wc-action="connect"]')
+    // 极简 DOM 垫片不实现事件冒泡，这里手动把 click 冒泡到祖先，触发详情容器的委托监听。
+    for (let node = connectButton; node; node = node.parentNode) {
+      node._fire?.('click', { target: connectButton })
+    }
+    await sleep(180)
+    const loginDialog = Array.from(document.body.querySelectorAll('.wc-mask .wc-dialog h3'))
+      .find(node => String(node.textContent || '').includes('接入 QQ 官方机器人'))
+    const loginDialogBox = loginDialog?.parentNode || loginDialog?.closest?.('.wc-dialog')
+    const loginText = loginDialogBox?.textContent || ''
+    check(
+      'QQ 接入弹窗可正常打开并提示本地 WebSocket / 沙箱免白名单方案',
+      !!loginDialog && String(loginText).includes('本地 WebSocket') && String(loginText).includes('沙箱 OpenAPI'),
+      String(loginText).slice(0, 120),
+    )
+    loginDialogBox?.querySelector?.('[data-wc-login-close]')?.click()
+    await sleep(40)
+    // 删除渠道时应同步清掉它的聊天记录容器（历史上删除后仍残留在聊天记录页）。
+    smokeSessions.create({
+      id: 'smoke-orphan-qqbot',
+      name: 'QQ孤立记录',
+      avatar: 'Q',
+      meta: {
+        channelType: 'qqbot',
+        channelConversation: true,
+        hiddenFromSessionList: true,
+        qqbotChannelId: 'smoke-deleted-qqbot',
+        channelId: 'qqbot:smoke-deleted-qqbot',
+      },
+    })
+    await sleep(20)
+    channelRegistry.removeChannel('private', createdQQ.id)
+    await sleep(120)
+    check('删除 QQ 渠道会同步清理对应聊天记录容器', !smokeSessions.get('smoke-orphan-qqbot'))
+  }
+  for (const id of ['smoke-role-conv', 'smoke-nova-role', 'smoke-other-channel']) smokeSessions.remove(id)
+  await sleep(40)
+
   const group = channelRegistry.groups('private')[0]
   const channel = channelRegistry.addChannel('private', group.id, { type: 'custom', name: '测试渠道' })
   channelRegistry.activate('private', channel.id)
@@ -633,6 +743,27 @@ async function main() {
   document.querySelector('.settings-content [data-action="toggle-provider-enabled"]')?.click()
   const providerEnabledViaUi = await waitFor(() => backend.ctx.settings.get().providers.smoke?.enabled !== false, { timeout: 3000 })
   check('提供商启用开关可写回后端（恢复）', !!providerEnabledViaUi)
+
+  // 模型设置页反复刷新回归：select 同一个模型不应该反复写 selectable 配置。
+  const modelRegistry = ctx.inject('model-registry')
+  const eventBusForModel = ctx.inject('event-bus')
+  const activeModelKey = modelRegistry?.activeKey?.()
+  if (activeModelKey) {
+    let modelPrefWrites = 0
+    const offConfigWatch = eventBusForModel.on('config:changed', payload => {
+      if (String(payload?.key || '').startsWith('selectable.model.')) modelPrefWrites += 1
+    })
+    modelRegistry.select(activeModelKey)
+    await sleep(40)
+    offConfigWatch?.()
+    check(
+      '重复选择当前模型不会反复写配置（模型设置页不再自刷新）',
+      modelPrefWrites === 0,
+      `selectable.model 配置写入 ${modelPrefWrites} 次`,
+    )
+  } else {
+    check('重复选择当前模型不会反复写配置（模型设置页不再自刷新）', false, '当前没有可用模型')
+  }
 
   // 自定义提供商 / 模型 CRUD（真实后端写盘 + 真实 DOM 事件）
   const setField = (selector, value) => {

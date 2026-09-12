@@ -16,7 +16,7 @@ export const author = '念风内核'
 export const icon = '💠'
 export const core = true
 export const depends = { 'message-list': '^1.0.0' }
-export const inject = ['bubble-styles', 'event-bus', 'i18n', 'config']
+export const inject = ['bubble-styles', 'event-bus', 'i18n', 'config', 'image-service?']
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { BUBBLE_DEFAULT_CSS } from './style.mjs'
@@ -27,6 +27,7 @@ import { characterAvatarHtml, userAvatarHtml } from '../../../src/util/identity.
 
 export function apply(ctx) {
   const bubbles = ctx.inject('bubble-styles')
+  const imageService = ctx.inject('image-service?')
   const config = ctx.inject('config')
   useStyle(ctx, BUBBLE_DEFAULT_CSS)
 
@@ -53,6 +54,20 @@ export function apply(ctx) {
         ${summary ? `<div class="bubble-doc-summary">${summary}</div>` : ''}
         ${docId ? `<div class="bubble-doc-id">${docId}</div>` : ''}
       </div>`
+    }
+    // 图片消息：dataUrl / 远程 URL 都可直接展示；超出 4 张只展示前 4 张并提示。
+    const imageList = (Array.isArray(message.meta?.images) ? message.meta.images : []).filter(image => image?.dataUrl || image?.url)
+    if (imageList.length) {
+      const shown = imageList.slice(0, 4)
+      const grid = shown
+        .map(image => {
+          const url = escapeHtml(String(imageService?.urlOf?.(image) || image.dataUrl || image.url))
+          const name = escapeHtml(String(image.name || '图片').slice(0, 60))
+          return `<figure class="bubble-image"><img src="${url}" alt="${name}" loading="lazy" /></figure>`
+        })
+        .join('')
+      const more = imageList.length > shown.length ? `<div class="bubble-image-more">还有 ${imageList.length - shown.length} 张图片未显示</div>` : ''
+      body = `${grid}${more}${String(message.content || '').trim() ? body : ''}`
     }
     if (message.streaming) {
       // 等待首个 token：三点思考动画；已有内容：末尾细光标

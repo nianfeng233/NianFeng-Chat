@@ -141,10 +141,20 @@ export function apply(ctx) {
   const isClawbotChannel = channel => channel?.type === TYPE_ID
   const statusClickColor = status => STATUS_COLOR[status] || STATUS_COLOR.offline
 
+  /** 只把真正的角色会话列进角色选择框；渠道聊天记录容器不参与角色选择。 */
+  const isRoleConversation = conv => {
+    const meta = conv?.meta || {}
+    if (meta.channelConversation === true || meta.hiddenFromSessionList === true) return false
+    const channelType = String(meta.channelType || '')
+    const channelId = String(meta.channelId || '')
+    if (!channelType && !channelId) return true
+    if (channelType && channelType !== 'nova') return false
+    if (channelId && !channelId.startsWith('nova:web:')) return false
+    return true
+  }
+
   function roleOptions(selectedId = '') {
-    const list = sessions
-      .list()
-      .filter(conv => conv.meta?.channelType !== TYPE_ID && !String(conv.meta?.channelId || '').startsWith('wechat-clawbot:'))
+    const list = sessions.list().filter(isRoleConversation)
     if (selectedId && !list.some(conv => conv.id === selectedId)) {
       const selected = sessions.get(selectedId)
       if (selected) list.unshift(selected)
@@ -813,19 +823,40 @@ export function apply(ctx) {
       }
     })
 
-    const fresh = (sessions.messages(conv.id) || []).filter(item =>
-      !beforeIds.has(item.id) && item.role === 'assistant' && !item.streaming && !item.error && String(item.content || '').trim(),
+    const fresh = (sessions.messages(conv.id) || []).filter(
+      item =>
+        !beforeIds.has(item.id) &&
+        item.role === 'assistant' &&
+        !item.streaming &&
+        !item.error &&
+        (String(item.content || '').trim() || (Array.isArray(item.meta?.images) && item.meta.images.length > 0)),
     )
     for (const item of fresh) {
       const text = buildOutboundText(item)
-      if (!text) continue
       try {
         for (const segment of splitForWechat(text)) {
           await api.post('/clawbot/send', { channelId: channel.id, toUserId, text: segment, contextToken })
         }
+        const images = Array.isArray(item.meta?.images) ? item.meta.images.slice(0, 4) : []
+        for (const image of images) {
+          if (!image?.id && !image?.dataUrl && !image?.url) continue
+          await api.post('/clawbot/send-media', {
+            channelId: channel.id,
+            toUserId,
+            contextToken,
+            image: { id: image.id || '', dataUrl: image.dataUrl || '', url: image.url || '', mime: image.mime || '' },
+          })
+        }
         messages?.update?.(conv.id, item.id, {
           source: 'wechat-clawbot',
-          meta: { ...(item.meta || {}), via: 'wechat-clawbot', direction: 'outbound', toUserId, contextToken },
+          meta: {
+            ...(item.meta || {}),
+            via: 'wechat-clawbot',
+            direction: 'outbound',
+            toUserId,
+            contextToken,
+            ...(images.length ? { imagesSent: true } : {}),
+          },
         })
       } catch (err) {
         toast.warn(`微信回复发送失败：${err.message}`)
@@ -844,7 +875,8 @@ export function apply(ctx) {
   async function handleInbound(payload) {
     const channelId = payload?.channelId
     const message = payload?.message
-    if (!channelId || !message?.id || !message?.text) return
+    const hasImages = Array.isArray(message?.images) && message.images.length > 0
+    if (!channelId || !message?.id || (!message?.text && !hasImages)) return
     const channel = findChannel(channelId)
     if (!isClawbotChannel(channel)) return
     let seen = handledInbound.get(channelId)
@@ -865,7 +897,9 @@ export function apply(ctx) {
     // 跨渠道敏感操作的“确认 / 拒绝”回复直接交给 chat-permissions 消费，
     // 不再作为普通聊天内容触发新一轮模型调用（与输入框确认的语义保持一致）。
     const chatPermissions = ctx.registry.get('chat-permissions')
-    const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text)
+    const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text, {
+      senderId: channelIdentity(channel).userId,
+    })
     if (pendingConfirm?.handled) {
       await ackInbox(channel.id, [message.id])
       return
@@ -889,6 +923,7 @@ export function apply(ctx) {
           wxSenderName: message.nickname || '',
           contextToken: message.contextToken || '',
           wxMessageId: message.id,
+          images: Array.isArray(message.images) ? message.images : [],
         },
       })
     } else {
@@ -1008,6 +1043,27 @@ export function apply(ctx) {
   })
   ctx.effect(offDone)
 
+  /** 渠道删除 / 启动后清理已经没有对应渠道的微信聊天记录容器。 */
+  function pruneOrphanConversations() {
+    const tabs = typeof channels.tabs === 'function' ? channels.tabs() : []
+    const known = new Set()
+    for (const tab of tabs) {
+      for (const channel of channels.channels(tab)) {
+        if (isClawbotChannel(channel)) known.add(String(channel.id || ''))
+      }
+    }
+    for (const conv of sessions.list()) {
+      if (conv?.meta?.channelType !== TYPE_ID) continue
+      const owner = String(conv.meta.clawbotChannelId || '')
+      const rawKey = String(conv.meta.channelId || '')
+      const keyed = rawKey.startsWith(`${TYPE_ID}:`) ? rawKey.slice(TYPE_ID.length + 1) : ''
+      if (owner && known.has(owner)) continue
+      if (!owner && keyed && known.has(keyed)) continue
+      if (!owner && !keyed) continue
+      sessions.remove(conv.id)
+    }
+  }
+
   const offBackend = ctx.on('backend:event', payload => {
     if (payload?.event === 'clawbot:message') handleInbound(payload.data).catch(() => {})
     else if (payload?.event === 'clawbot:status') updateChannelFromStatus(payload.data)
@@ -1053,6 +1109,7 @@ export function apply(ctx) {
     if (!isClawbotChannel(removed)) return
     setTimeout(() => {
       if (channelExists(removed.id)) return
+      pruneOrphanConversations()
       if (!api) return
       api.post('/clawbot/logout', { channelId: removed.id }).catch(() => {
         /* 后端未连接时忽略，下次后端启动可通过旧凭据自然过期 */
@@ -1060,6 +1117,27 @@ export function apply(ctx) {
     }, 0)
   })
   ctx.effect(offRemoved)
+
+  // 启动后 / 渠道同步完成后清理历史残留：
+  // 修复删除渠道后聊天记录页仍显示 wechat-clawbot 空渠道的问题。
+  let orphanPruneTimer = null
+  const scheduleOrphanPrune = (delay = 1200) => {
+    if (orphanPruneTimer) clearTimeout(orphanPruneTimer)
+    orphanPruneTimer = setTimeout(() => {
+      orphanPruneTimer = null
+      try {
+        pruneOrphanConversations()
+      } catch (err) {
+        ctx.logger?.warn?.(`[clawbot] 清理孤立聊天记录失败：${err?.message || err}`)
+      }
+    }, delay)
+  }
+  const offChannelSync = events.on('channel:sync', () => scheduleOrphanPrune(300))
+  ctx.effect(offChannelSync)
+  scheduleOrphanPrune(1500)
+  ctx.effect(() => {
+    if (orphanPruneTimer) clearTimeout(orphanPruneTimer)
+  })
 
   ctx.effect(() => () => {
     for (const cleanup of closing.splice(0)) {

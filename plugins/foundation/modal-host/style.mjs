@@ -7,7 +7,9 @@
 export const MODAL_CSS = `
   .modal-mask{
     position:fixed;inset:0;background:rgba(30,50,20,.24);
-    display:none;align-items:center;justify-content:center;z-index:300;
+    /* 必须高于各渠道插件自己的遮罩（当前最高的渠道遮罩为 1200），
+       否则「重新扫码绑定」这类二次确认会被压在接入弹窗下层。 */
+    display:none;align-items:center;justify-content:center;z-index:1300;
     -webkit-backdrop-filter: blur(4px);backdrop-filter: blur(4px);
   }
   .modal-mask.show{display:flex;}

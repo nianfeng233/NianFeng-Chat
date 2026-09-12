@@ -27,11 +27,11 @@ import * as httpPlugin from './plugins/http.mjs'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 /**
- * 通用渠道后端桥加载器：
- *   - 内置渠道：扫描 plugins/channels/<name>/bridge.mjs
- *   - 外部渠道：扫描数据目录 / 环境变量插件目录里的 bridge.mjs
- * 渠道 bridge 是普通 Node cordis 插件，可以 inject httpApi / settings / hub 等，
- * 自行注册自己的 /api/<channel>/... 路由，因此后续新增渠道插件无需改 server/index.mjs。
+ * 通用插件后端桥加载器：
+ *   - 内置：扫描 plugins 目录下所有 bridge.mjs（渠道桥、图片服务等后端能力统一走这里）
+ *   - 外部：扫描数据目录 / 环境变量插件目录里的 bridge.mjs
+ * 后端桥是普通 Node cordis 插件，可以 inject httpApi / settings / hub 等，
+ * 自行注册自己的 /api/... 路由，因此新增渠道 / 服务无需改 server/index.mjs 本体逻辑。
  *
  * 安全提示：外部插件的 bridge.mjs 是后端 Node 代码，权限大于前端插件；只加载可信插件。
  */
@@ -133,7 +133,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     process.env.FENGYU_PLUGINS_DIR ||
     configuredPluginDir ||
     join(paths.dataDir || dataDir || join(ROOT, 'user_data'), 'plugins')
-  await loadChannelBridges([join(ROOT, 'plugins', 'channels'), externalPluginDir], ctx)
+  await loadChannelBridges([join(ROOT, 'plugins'), externalPluginDir], ctx)
   await new Promise(resolve => setTimeout(resolve, 0))
 
   return {

@@ -1,0 +1,20 @@
+{
+  "id": "qqbot",
+  "name": "QQ官方机器人",
+  "displayName": "QQ官方机器人",
+  "version": "1.2.1",
+  "author": "念风插件",
+  "description": "QQ 官方机器人渠道插件：q.qq.com 扫码/凭据接入、私聊绑定、图片收发与被动回复（暂不支持群聊）。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "🐧",
+  "color": "#12b7f5",
+  "type": "channel",
+  "core": false,
+  "permissions": ["network"],
+  "distribution": {
+    "directory": "plugins/channels/qqbot",
+    "zip": "qqbot-plugin-v1.2.1.zip",
+    "placement": "完整版内置目录：plugins/channels/qqbot；外部目录：<插件目录>/channels/qqbot"
+  }
+}

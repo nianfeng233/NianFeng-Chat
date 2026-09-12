@@ -421,7 +421,7 @@ export function apply(ctx) {
   // 通知统一由 chat-notify 插件基于 message:added / message:done 逐条发送，这里不再重复处理。
 
   /** 工具循环主路径 */
-  async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false } = {}) {
+  async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
     if (!conv) return
     const entry = createEntry(conversationId, roleId)
@@ -446,6 +446,17 @@ export function apply(ctx) {
     try {
       let userMessage = null
       if (!skipUserAppend) {
+        const normalizedImages = (Array.isArray(images) ? images : [])
+          .slice(0, 4)
+          .map(image => (typeof image === 'string' ? { url: image } : image || {}))
+          .filter(image => image.id || image.url || image.dataUrl)
+          .map(image => ({
+            id: String(image.id || ''),
+            url: image.url || '',
+            dataUrl: image.dataUrl || '',
+            mime: image.mime || '',
+            name: String(image.name || '').slice(0, 80),
+          }))
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
@@ -453,7 +464,7 @@ export function apply(ctx) {
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',
-          meta: { via: 'composer' },
+          meta: { via: 'composer', ...(normalizedImages.length ? { images: normalizedImages } : {}) },
         })
         scheduleStatus(conversationId, userMessage?.id)
         const userWire = builder.toModelMessage(userMessage)
@@ -468,6 +479,16 @@ export function apply(ctx) {
       entry.draftId = thinking?.id || null
 
       const persona = String(conv.meta?.persona || '').trim()
+      const imageService = ctx.registry.get('image-service')
+      // 只有会话里真的存在“未预加载的 imageId”时才异步取图，避免给普通聊天增加额外 await
+      // （否则停止生成等交互可能抢在 stream 创建之前，影响原有即时取消语义）。
+      if (imageService?.needsHydration?.(conversationId) && imageService?.hydrateConversation) {
+        await Promise.race([
+          imageService.hydrateConversation(conversationId),
+          new Promise(resolve => setTimeout(resolve, 8000)),
+        ]).catch(() => {})
+        if (entry.cancelled) throw abortError()
+      }
       const base = builder.build({ conversationId, roleId, persona, channelId })
       const options = toolOptions(conv)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
@@ -623,12 +644,25 @@ export function apply(ctx) {
           ])
           if (entry.cancelled) throw abortError()
           attachCallInfo(conversationId, output?.message_ids, entry.lastRound)
-          const toolOutput = JSON.stringify(output ?? { ok: true })
+          // 工具结果本身只发文本：把 output.images 从 JSON 里剥离，避免 base64
+          // 混进 role=tool 的 content；图片随后作为一条 user 多模态消息单独注入。
+          const { images: toolImages, ...toolPayload } = output || {}
+          const toolOutput = JSON.stringify({ ...toolPayload, ok: output?.ok ?? true })
           roundMessages.push(
             roundTextual
               ? { role: 'user', content: `[工具结果] ${call.function.name} => ${toolOutput}` }
               : { role: 'tool', tool_call_id: call.id, name: call.function.name, content: toolOutput },
           )
+          // read_messages 的 include_images / image_message_ids 会把图片放在 output.images。
+          // 工具结果本身只能是文本，这里补一条 user 多模态消息把原图带进下一轮。
+          if (Array.isArray(toolImages) && toolImages.length) {
+            const parts = [{ type: 'text', text: `[${call.function.name} 按需返回的图片]` }]
+            for (const image of toolImages.slice(0, 4)) {
+              const url = image?.image_url?.url || image?.url || ''
+              if (url) parts.push({ type: 'image_url', image_url: { url: String(url) } })
+            }
+            if (parts.length > 1) roundMessages.push({ role: 'user', content: parts })
+          }
           if ((call.function.name === 'chat_send' || call.function.name === 'send_document') && output?.ok && output.end === true) {
             sendEnded = true
             break
@@ -675,7 +709,7 @@ export function apply(ctx) {
   }
 
   /** 兼容路径：工具链路被禁用或服务缺失时，保持旧版“直接流式回复”行为 */
-  async function runLegacy(conversationId, text, roleId, { skipUserAppend = false } = {}) {
+  async function runLegacy(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
     if (!conv) return
     const entry = createEntry(conversationId, roleId)
@@ -698,6 +732,7 @@ export function apply(ctx) {
       }
       let userMessage = null
       if (!skipUserAppend && store) {
+        const legacyImages = (Array.isArray(images) ? images : []).slice(0, 4).filter(Boolean)
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
@@ -705,13 +740,13 @@ export function apply(ctx) {
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',
-          meta: { via: 'composer' },
+          meta: { via: 'composer', ...(legacyImages.length ? { images: legacyImages } : {}) },
         })
         scheduleStatus(conversationId, userMessage?.id)
         const userWire = builder?.toModelMessage?.(userMessage) || { role: 'user', content: text }
         entry.protocol.push(userWire)
       } else if (!skipUserAppend) {
-        userMessage = messages.send(conversationId, text)
+        userMessage = messages.send(conversationId, text, { meta: images.length ? { images } : undefined })
         entry.protocol.push({ role: 'user', content: text })
       } else {
         userMessage = [...sessions.messages(conversationId)].reverse().find(message => message.role === 'user') || null
@@ -760,7 +795,8 @@ export function apply(ctx) {
 
   const onSend = payload => {
     const { conversationId, text } = payload || {}
-    if (!conversationId || !text) return
+    const images = Array.isArray(payload?.images) ? payload.images : []
+    if (!conversationId || (!text && !images.length)) return
     if (payload.confirmHandled) return // 敏感确认已消费这次输入，不进入正常聊天
     const conv = sessions.get(conversationId)
     if (!conv) return
@@ -769,7 +805,7 @@ export function apply(ctx) {
     const agent = toolsEnabled()
     // 渠道插件可以先把入站消息写入自己的渠道记录，再以 skipUserAppend=true
     // 触发模型轮次，避免 message:send 重复插入同一条用户消息。
-    const turnOptions = { skipUserAppend: payload.skipUserAppend === true }
+    const turnOptions = { skipUserAppend: payload.skipUserAppend === true, images }
     if (agent) store.channelForConversation(conversationId)
     const task = () => (agent ? runAgentTurn(conversationId, text, roleId, turnOptions) : runLegacy(conversationId, text, roleId, turnOptions))
 

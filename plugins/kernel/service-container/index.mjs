@@ -34,9 +34,15 @@ export function apply(ctx) {
     // 用户真正想用的实现。实现被卸载时 activeId 会临时落到别的实现上，
     // 但 preferredId 保留；同一个实现重新注册时自动切回来。
     let preferredId = config.get(preferredKey, null)
+    /** 只在配置真的变化时写回，避免 select/register/unregister 触发 settings/updated 回环。 */
+    const setConfigIfChanged = (key, value) => {
+      if (config.get(key, undefined) === value) return false
+      config.set(key, value)
+      return true
+    }
     if (!preferredId && activeId) {
       preferredId = activeId
-      config.set(preferredKey, preferredId)
+      setConfigIfChanged(preferredKey, preferredId)
     }
 
     // 允许 config 的远程 / 本地变化直接驱动可选中服务。
@@ -66,18 +72,18 @@ export function apply(ctx) {
         if (!hadActiveImpl) {
           const next = items.has(activeId) ? activeId : (fallback && items.has(fallback) ? fallback : id)
           activeId = next
-          config.set(persistKey, next)
+          setConfigIfChanged(persistKey, next)
           changed = true
         }
         // 用户偏好的实现回来了：立即切回来，而不是让它挂在后台注册着。
         if (preferredId && preferredId !== activeId && items.has(preferredId)) {
           activeId = preferredId
-          config.set(persistKey, activeId)
+          setConfigIfChanged(persistKey, activeId)
           changed = true
         }
         if (!preferredId && activeId) {
           preferredId = activeId
-          config.set(preferredKey, preferredId)
+          setConfigIfChanged(preferredKey, preferredId)
         }
         if (changed) events.emit(`${serviceName}:changed`, activeId, { owner: 'service-container' })
 
@@ -91,18 +97,20 @@ export function apply(ctx) {
         events.emit(`${serviceName}:unregistered`, { id })
         if (activeId === id) {
           activeId = items.has(fallback) ? fallback : [...items.keys()][0] || null
-          config.set(persistKey, activeId)
+          setConfigIfChanged(persistKey, activeId)
           events.emit(`${serviceName}:changed`, activeId, { owner: 'service-container' })
         }
       },
 
       select(id) {
         if (!items.has(id)) throw new Error(`未安装的实现：${id}（服务 ${serviceName}）`)
-        preferredId = id
-        config.set(preferredKey, id)
+        if (preferredId !== id) {
+          preferredId = id
+          setConfigIfChanged(preferredKey, id)
+        }
         if (activeId === id) return
         activeId = id
-        config.set(persistKey, id)
+        setConfigIfChanged(persistKey, id)
         events.emit(`${serviceName}:changed`, id, { owner: 'service-container' })
       },
 

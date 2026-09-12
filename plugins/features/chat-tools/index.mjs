@@ -78,6 +78,48 @@ export function apply(ctx) {
   /** 保留权限层给出的真实原因（无权限 / 需要确认 / 用户拒绝），不要一律吞成“目标渠道不可用”。 */
   const denied = decision => ({ ok: false, code: decision.code, error: decision.error || '目标渠道不可用' })
 
+  /**
+   * chat_send 的 images 统一处理：
+   *   - model 给 data URL：优先存 image-service，消息里只留 imageId；
+   *   - http(s) 外链：保留 URL，由渠道桥下载/转存；
+   *   - 已经是 imageId 对象：透传。
+   */
+  async function normalizeOutboundImages(input) {
+    const imageService = ctx.registry.get('image-service')
+    const list = (Array.isArray(input) ? input : []).slice(0, 4)
+    const out = []
+    for (const raw of list) {
+      const image =
+        typeof raw === 'string'
+          ? /^data:image\//i.test(raw)
+            ? { dataUrl: raw }
+            : { url: raw }
+          : raw || {}
+      if (image.id) {
+        out.push({ id: String(image.id), mime: image.mime || '', name: String(image.name || '').slice(0, 80) })
+        continue
+      }
+      const source = image.dataUrl || image.url || ''
+      if (!source) continue
+      if (/^data:image\//i.test(source) && imageService?.saveDataUrl) {
+        try {
+          out.push({ ...(await imageService.saveDataUrl(source, image)) })
+          continue
+        } catch (_) {
+          /* 后端不可用时降级为 dataUrl 存在消息里 */
+        }
+      }
+      out.push({
+        id: '',
+        url: image.url || '',
+        dataUrl: image.dataUrl || '',
+        mime: image.mime || '',
+        name: String(image.name || '').slice(0, 80),
+      })
+    }
+    return out
+  }
+
   const readMessages = async (args, context) => {
     const decision = await authorize(args, context, 'read')
     if (!decision.ok) return denied(decision)
@@ -108,6 +150,31 @@ export function apply(ctx) {
       used += tokens
     }
 
+    // 按需查看图片：默认只给 [图片] 占位；include_images=true / image_message_ids
+    // 才把图片作为额外 content parts 返回（chat-flow 会把它们作为下一条 user 消息注入）。
+    const includeImages = args.include_images === true || String(args.include_images) === 'true'
+    const wantedIds = Array.isArray(args.image_message_ids)
+      ? args.image_message_ids.map(item => String(item || '')).filter(Boolean)
+      : []
+    const imageLimit = Math.min(4, Math.max(1, Number(args.image_limit) || 2))
+    const images = []
+    if (includeImages || wantedIds.length) {
+      const candidates = wantedIds.length
+        ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
+        : result.messages
+      for (const message of candidates) {
+        if (images.length >= imageLimit) break
+        const messageId = String(message.message_id || message.id || '')
+        const list = Array.isArray(message.meta?.images) ? message.meta.images : []
+        for (const image of list) {
+          if (images.length >= imageLimit) break
+          const url = image?.dataUrl || image?.url
+          if (!url) continue
+          images.push({ type: 'image_url', image_url: { url: String(url) }, message_id: messageId })
+        }
+      }
+    }
+
     const payload = {
       ok: true,
       channel: decision.channelId,
@@ -116,6 +183,12 @@ export function apply(ctx) {
       next_cursor: truncated ? result.offset + items.length : result.next_cursor,
       truncated,
       messages: items,
+    }
+    if (images.length) {
+      payload.images = images
+      payload.image_note = '图片已追加在本次工具结果之后；一般情况下不需要查看图片，只有确实必要时才使用 include_images。'
+    } else if (includeImages || wantedIds.length) {
+      payload.image_note = '没有找到可用的图片（可能图片已过期、只存在 URL 或 message_id 不正确）。'
     }
     if (truncated) payload.hint = '结果超过单次读取 token 上限，已返回部分消息；请缩小时间 / 关键词范围或使用 cursor 继续。'
     if (args.semantic) {
@@ -151,23 +224,24 @@ export function apply(ctx) {
         if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         const item = typeof raw === 'string' ? { content: raw } : raw || {}
         const content = String(item.content ?? item.text ?? '').trim()
-        if (!content) continue
-        const existing = context.sentContents?.get(content)
-        if (existing) {
+        const normalizedImages = await normalizeOutboundImages(item.images)
+        if (!content && !normalizedImages.length) continue
+        const existing = content ? context.sentContents?.get(content) : null
+        if (existing && !normalizedImages.length) {
           duplicates.push({ content, message_id: existing })
           continue
         }
         // 首条消息不延迟；从第二条开始，按字数计算 0.5s ~ 5s 的动态延迟
         if (simulate && delivery.count > 0) {
           emitTyping(true)
-          await sleep(typingDelayMs(content), context.entry)
+          await sleep(typingDelayMs(content || '[图片]'), context.entry)
           emitTyping(false)
           if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         }
         const message = store.append(conversationId, {
           role: 'assistant',
           content,
-          content_type: item.content_type || 'text',
+          content_type: item.content_type || (normalizedImages.length && !content ? 'image' : 'text'),
           sender_id: `role_${targetConv.id}`,
           sender_name: targetConv.name,
           is_bot: true,
@@ -178,10 +252,11 @@ export function apply(ctx) {
             round: context.round,
             channel: channelId,
             ...(context.reasoningContent && !reasoningAttached ? { reasoningContent: context.reasoningContent } : {}),
+            ...(normalizedImages.length ? { images: normalizedImages } : {}),
           },
         })
         if (!message) continue
-        context.sentContents?.set(content, message.message_id)
+        if (content) context.sentContents?.set(content, message.message_id)
         reasoningAttached = true
         delivery.count += 1
         sent.push(message.message_id)
@@ -296,7 +371,7 @@ export function apply(ctx) {
       'read_messages',
       {
         description:
-          '读取聊天记录。默认当前渠道；可用 query 关键词、seq 精确序号、relative 相对序号范围、time_start / time_end 时间段、semantic 语义检索、cursor 分页。',
+          '读取聊天记录。默认当前渠道；可用 query 关键词、seq 精确序号、relative 相对序号范围、time_start / time_end 时间段、semantic 语义检索、cursor 分页。图片默认以“[图片]”占位；一般不需要查看原图，确需时用 include_images 或 image_message_ids，并受 image_limit 约束。',
         parameters: {
           type: 'object',
           properties: {
@@ -313,6 +388,16 @@ export function apply(ctx) {
             time_end: { type: 'string', description: 'ISO 8601 结束时间。' },
             semantic: { type: 'string', description: '语义检索内容（第三阶段启用，当前回退为关键词）。' },
             cursor: { type: 'number', description: '上一页返回的 next_cursor。' },
+            include_images: {
+              type: 'boolean',
+              description: '是否把本次结果里的图片作为原图返回。默认 false；一般没有必要开启，开启会占用大量上下文。',
+            },
+            image_message_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '只查看这些 message_id 的图片；比 include_images 更精确。',
+            },
+            image_limit: { type: 'number', description: '本次最多返回的图片数量，默认 2，最大 4。' },
           },
         },
       },
@@ -331,6 +416,11 @@ export function apply(ctx) {
               type: 'array',
               items: { type: 'string' },
               description: '要发送的消息文本列表。',
+            },
+            images: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选图片列表：可以是 https 图片 URL 或 data:image/...;base64,... 数据。一般只在确实需要发图时使用，单次最多 4 张。',
             },
             end: { type: 'boolean', description: 'true=发送后结束本轮；false=发送后继续下一步。' },
           },
