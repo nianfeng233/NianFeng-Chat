@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 设置项 · 代码运行器
  *
@@ -12,7 +17,7 @@ export const name = 'settings-item-code-runner'
 export const version = '1.0.0'
 export const displayName = '设置项 · 代码运行器'
 export const description = '设置页 · 在无 DOM / 无网络的 Web Worker 沙箱里运行 JavaScript 片段。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⚡'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0' }

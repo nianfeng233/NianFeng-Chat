@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D9 · export-service
  * 会话导出：Markdown / JSON / TXT / HTML / CSV / PDF（浏览器打印）。
@@ -7,7 +12,7 @@ export const name = 'export-service'
 export const version = '2.0.0'
 export const displayName = '导出服务'
 export const description = '业务服务 · 会话导出（Markdown / JSON / TXT / HTML / CSV / PDF）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📤'
 export const core = false
 export const inject = ['session-service', 'event-bus', 'toast']
@@ -85,7 +90,7 @@ export function apply(ctx) {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${esc(title)} · 风语导出</title>
+<title>${esc(title)} · 念风导出</title>
 <style>
   :root{color-scheme:light}
   *{box-sizing:border-box}
@@ -112,21 +117,21 @@ export function apply(ctx) {
     <h1>${esc(title)}</h1>
     <div class="sub">${esc(subtitle)}</div>
     ${body}
-    <div class="foot">由风语 · AI Chat 导出</div>
+    <div class="foot">由念风chat 导出</div>
   </div>
 </body>
 </html>`
   }
 
   function toHtml(conv) {
-    return htmlDocument(conv.name, `风语会话导出 · ${new Date().toLocaleString()} · 共 ${conv.messages.length} 条`, renderMessageSections(conv))
+    return htmlDocument(conv.name, `念风会话导出 · ${new Date().toLocaleString()} · 共 ${conv.messages.length} 条`, renderMessageSections(conv))
   }
 
   function toAllHtml(conversations) {
     const sections = conversations
       .map(conv => `<section class="conv-block"><h2>${esc(conv.name)}</h2><div class="conv-sub">${conv.messages.length} 条消息</div>${renderMessageSections(conv)}</section>`)
       .join("\n")
-    return htmlDocument("风语 · 全部会话", `导出时间：${new Date().toLocaleString()} · 共 ${conversations.length} 个会话`, sections)
+    return htmlDocument("念风 · 全部会话", `导出时间：${new Date().toLocaleString()} · 共 ${conversations.length} 个会话`, sections)
   }
   const exportPdf = conv => {
     if (typeof window === 'undefined' || typeof window.open !== 'function') {
@@ -175,23 +180,23 @@ export function apply(ctx) {
       const conversations = sessions.list()
       const stamp = Date.now()
       if (format === 'html') {
-        download(`风语-全部会话-${stamp}.html`, toAllHtml(conversations), 'text/html;charset=utf-8')
+        download(`念风-全部会话-${stamp}.html`, toAllHtml(conversations), 'text/html;charset=utf-8')
         toast.success('已导出全部会话（HTML）')
         return true
       }
       const payload = {
         version: ctx.inject('app').version,
-        app: '风语 · AI Chat',
+        app: '念风chat',
         exportedAt: new Date().toISOString(),
         conversations,
       }
       if (format === 'txt') {
         const text = conversations.map(c => `${'='.repeat(20)}\n${c.name}\n${'='.repeat(20)}\n\n${toText(c)}`).join('\n\n')
-        download(`风语-全部会话-${stamp}.txt`, text, 'text/plain;charset=utf-8')
+        download(`念风-全部会话-${stamp}.txt`, text, 'text/plain;charset=utf-8')
         toast.success('已导出全部会话（TXT）')
         return true
       }
-      download(`风语-全部会话-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json')
+      download(`念风-全部会话-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json')
       toast.success('已导出全部会话（JSON）')
       return true
     },

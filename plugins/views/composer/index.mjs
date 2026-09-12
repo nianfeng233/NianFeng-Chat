@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V11 · composer
  * 输入区：Enter 发送 / Shift+Enter 换行、工具条、可拖拽高度、紧凑模式。
@@ -7,7 +12,7 @@ export const name = 'composer'
 export const version = '1.0.0'
 export const displayName = '输入区'
 export const description = '视觉内容 · 消息输入、工具条与高度拖拽。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
 export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
@@ -202,24 +207,76 @@ export function apply(ctx) {
       document.body.classList.remove('resizing-h')
       config.set('chat.composerHeight', Math.round(composer.offsetHeight))
     }
-    const onWindowResize = () => setHeight(composer.offsetHeight)
+    let heightApplied = false
+    const savedHeight = () => {
+      const value = Number(config.get('chat.composerHeight', 0))
+      return Number.isFinite(value) && value > 0 ? value : 0
+    }
+    const applySavedLayout = () => {
+      if (dragging) return
+      const avail = availableHeight()
+      const saved = savedHeight()
+      // 刚挂载时 pane 可能还没完成布局，高度为 0；等有真实高度再应用，
+      // 否则保存的高度会被 maxH 夹到最小高度，看起来像“重启后恢复默认”。
+      if (!Number.isFinite(avail) || avail < MIN_HEIGHT * 2) {
+        // 已经明确保存过高度时，先按像素原样放回（不做 maxH 夹取），
+        // 等拿到真实可用高度后的定时器再做范围校正。
+        if (saved) {
+          composer.style.height = `${Math.max(MIN_HEIGHT, Math.round(saved))}px`
+          heightApplied = true
+        }
+        return
+      }
+      if (saved) {
+        setHeight(saved)
+        heightApplied = true
+        return
+      }
+      if (heightApplied) return
+      heightApplied = true
+      setHeight(Math.max(MIN_HEIGHT, avail * 0.36))
+    }
+    // 后端偏好同步可能晚于插件挂载（换端口 / 换 origin / 重装后首次启动）：
+    // 保存的高度到账时立即补应用，否则会一直停留在插件挂载时的默认高度。
+    const offComposerConfig = config.watch('chat.composerHeight', () => {
+      if (dragging) return
+      const saved = savedHeight()
+      if (!saved) {
+        if (!heightApplied) applySavedLayout()
+        return
+      }
+      const avail = availableHeight()
+      // 插件挂载瞬间 pane 可能还没有实际高度，此时 setHeight 会把保存值
+      // 夹到最小高度并误标记“已应用”；先按像素原样放回，等布局完成再校正。
+      if (!Number.isFinite(avail) || avail < MIN_HEIGHT * 2) {
+        composer.style.height = `${Math.max(MIN_HEIGHT, Math.round(saved))}px`
+        heightApplied = true
+        return
+      }
+      setHeight(saved)
+      heightApplied = true
+    })
+    const onWindowResize = () => {
+      const saved = savedHeight()
+      if (saved) {
+        setHeight(saved)
+        heightApplied = true
+        return
+      }
+      if (heightApplied) setHeight(composer.offsetHeight)
+      else applySavedLayout()
+    }
 
     hResizer.addEventListener('mousedown', onResizeDown)
     window.addEventListener('mousemove', onResizeMove)
     window.addEventListener('mouseup', onResizeUp)
     window.addEventListener('resize', onWindowResize)
 
-    const initHeight = () => {
-      const saved = Number(config.get('chat.composerHeight', 0))
-      if (Number.isFinite(saved) && saved > 0) {
-        setHeight(saved)
-        return
-      }
-      const avail = availableHeight()
-      setHeight(Math.max(MIN_HEIGHT, avail * 0.36))
-    }
-    initHeight()
-    const initTimer = setTimeout(initHeight, 50)
+    applySavedLayout()
+    const initTimer = setTimeout(applySavedLayout, 50)
+    const initTimer2 = setTimeout(applySavedLayout, 300)
+    let rafTimer = null
+    if (typeof requestAnimationFrame === 'function') rafTimer = requestAnimationFrame(applySavedLayout)
 
     const offI18n = ctx.on('i18n:changed', () => {
       const t = ctx.registry.get('i18n')
@@ -257,6 +314,9 @@ export function apply(ctx) {
 
     return () => {
       clearTimeout(initTimer)
+      clearTimeout(initTimer2)
+      if (rafTimer !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafTimer)
+      offComposerConfig()
       stopVoice()
       input.removeEventListener('keydown', onKeydown)
       sendBtn.removeEventListener('click', onClickSend)

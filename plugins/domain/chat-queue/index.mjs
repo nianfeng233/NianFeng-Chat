@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · chat-queue
  * 角色级 FIFO 串行队列（文档 §8）：
@@ -9,7 +14,7 @@ export const name = 'chat-queue'
 export const version = '1.0.0'
 export const displayName = '聊天串行队列'
 export const description = '业务服务 · 每个角色一条 FIFO 队列，保证同一角色同一时刻只跑一轮。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🚦'
 export const core = true
 export const depends = { 'event-bus': '^1.0.0' }

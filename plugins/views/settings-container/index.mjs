@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V16 · settings-container
  * 设置容器：维护"设置页注册表"，渲染左侧导航与右侧内容。
@@ -7,7 +12,7 @@ export const name = 'settings-container'
 export const version = '1.0.0'
 export const displayName = '设置容器'
 export const description = '视觉内容 · 设置页注册表、导航渲染与页面调度。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧱'
 export const core = true
 export const depends = { 'settings-view': '^1.0.0' }

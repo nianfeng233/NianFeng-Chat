@@ -1,4 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+// 项目全称：念风 Chat（NianFeng-Chat）
+// 仓库：https://github.com/nianfeng233/NianFeng-Chat
 
 mod app_assets;
 
@@ -22,7 +25,7 @@ use tao::{
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use wry::{http::Request, WebViewBuilder};
 
-const APP_TITLE: &str = "风语 · AI Chat";
+const APP_TITLE: &str = "念风chat";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const WINDOW_ICON_RGBA: &[u8] = include_bytes!("../app.rgba");
 const WINDOW_ICON_SIZE: u32 = 64;
@@ -37,7 +40,7 @@ enum UserEvent {
     Notify {
         title: String,
         body: String,
-        /// 64×64 PNG 的 base64（角色头像 / 风语 logo），由前端 canvas 生成
+        /// 64×64 PNG 的 base64（角色头像 / 念风 logo），由前端 canvas 生成
         icon: String,
     },
     /// 「关闭窗口时最小化」开关
@@ -54,8 +57,12 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = prepare_base_dir()?;
-    let runtime_dir = base_dir.join("runtime");
+    // 按 BUILD_ID 使用独立运行时目录：升级 exe 时旧版本 node.exe 可能仍在运行，
+    // 覆盖 runtime/node.exe 会触发“文件被占用(os error 32)”导致双击无反应。
+    // 每个构建号一个目录，互不冲突；旧目录会尽力清理，清理失败不影响本次启动。
+    let runtime_dir = base_dir.join(format!("runtime-{BUILD_ID}"));
     extract_app(&runtime_dir)?;
+    cleanup_old_runtimes(&base_dir, &runtime_dir);
 
     let app_dir = runtime_dir.join("app");
     let node_path = runtime_dir.join("node.exe");
@@ -70,8 +77,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.trim().parse::<u16>().ok())
         .filter(|value| *value > 0);
     let initial_port = preferred_port.unwrap_or(free_port()?);
-    // FENGYU_HOME_DIR 让后端把“本部署的数据目录指针”写到 base_dir/user_data；
-    // 首次启动后端会按既有逻辑读取 %APPDATA%\fengyu\instance.json 的历史目录，
+    // NIANFENG_HOME_DIR 让后端把“本部署的数据目录指针”写到 base_dir/user_data；
+    // 首次启动后端会按既有逻辑读取 %APPDATA%\nianfeng\instance.json 的历史目录，
     // 之后只认自己的指针，避免每次启动都覆盖数据目录。
     let mut child = spawn_node(&node_path, &app_dir, &base_dir, initial_port)?;
     let port = wait_runtime_port(&base_dir, initial_port, Duration::from_secs(6));
@@ -135,7 +142,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             try {
               var p = payload || {};
               var clean = function (value) { return String(value == null ? '' : value).replace(/[\u0001\r\n]/g, ' '); };
-              post('notify:' + clean(p.kind || 'system') + '\u0001' + clean(p.title || '风语') + '\u0001' + clean(p.body || '') + '\u0001' + String(p.icon || '').replace(/[^A-Za-z0-9+/=]/g, ''));
+              post('notify:' + clean(p.kind || 'system') + '\u0001' + clean(p.title || '念风') + '\u0001' + clean(p.body || '') + '\u0001' + String(p.icon || '').replace(/[^A-Za-z0-9+/=]/g, ''));
             } catch (_) {}
           },
         };
@@ -169,7 +176,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // 前端约定：kind\u0001title\u0001body；kind 由前端决定标题内容，宿主只负责弹系统通知。
                 let mut parts = payload.split('\u{1}');
                 let _kind = parts.next().unwrap_or("system");
-                let title = parts.next().unwrap_or("风语").to_string();
+                let title = parts.next().unwrap_or("念风").to_string();
                 let body = parts.next().unwrap_or("").to_string();
                 let icon = parts.next().unwrap_or("").to_string();
                 let _ = proxy_for_ipc.send_event(UserEvent::Notify { title, body, icon });
@@ -266,14 +273,20 @@ fn encode_token(value: &str) -> String {
 fn prepare_base_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("FengyuChat"));
+        let new_dir = PathBuf::from(&local).join("NianFengChat");
+        let old_dir = PathBuf::from(&local).join("FengyuChat");
+        // 兼容旧品牌目录：旧数据存在且新目录还没建立时，先继续用旧目录，避免升级后丢历史。
+        if old_dir.join("user_data").exists() && !new_dir.exists() {
+            candidates.push(old_dir);
+        }
+        candidates.push(new_dir);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(".fengyu"));
+            candidates.push(dir.join(".nianfeng"));
         }
     }
-    candidates.push(std::env::temp_dir().join("FengyuChat"));
+    candidates.push(std::env::temp_dir().join("NianFengChat"));
 
     for candidate in candidates {
         if fs::create_dir_all(&candidate).is_ok() {
@@ -286,9 +299,9 @@ fn prepare_base_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn fail(message: &str) -> ! {
     let line = format!("[{}] {message}\n", now_string());
     for dir in [
-        std::env::var("LOCALAPPDATA").ok().map(|local| PathBuf::from(local).join("FengyuChat")),
-        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(".fengyu"))),
-        Some(std::env::temp_dir().join("FengyuChat")),
+        std::env::var("LOCALAPPDATA").ok().map(|local| PathBuf::from(local).join("NianFengChat")),
+        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(".nianfeng"))),
+        Some(std::env::temp_dir().join("NianFengChat")),
     ]
     .into_iter()
     .flatten()
@@ -297,9 +310,31 @@ fn fail(message: &str) -> ! {
             break;
         }
     }
+    show_fatal_message(&line);
     eprintln!("{line}");
     std::process::exit(1);
 }
+
+#[cfg(target_os = "windows")]
+fn show_fatal_message(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND};
+    let title: Vec<u16> = "念风chat 启动失败\0".encode_utf16().collect();
+    let body: Vec<u16> = format!("{message}\n\n日志目录：%LOCALAPPDATA%\\NianFengChat\\error.log\0")
+        .encode_utf16()
+        .collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_message(_message: &str) {}
+
 
 fn now_string() -> String {
     // 避免引入时间库：使用 systemtime 转 unix 秒；日志只用于排查。
@@ -330,6 +365,25 @@ fn extract_app(base_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 尽力清理旧构建的运行时目录；删除失败（旧 node.exe 还在运行）就保留，不影响新版本启动。
+fn cleanup_old_runtimes(base_dir: &Path, current: &Path) {
+    if let Ok(entries) = fs::read_dir(base_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == current || !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+            if name.starts_with("runtime-") {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+    // 旧版本使用固定 runtime/；被占用时忽略，新版本使用 runtime-<BUILD_ID>。
+    let _ = fs::remove_dir_all(base_dir.join("runtime"));
+}
+
+
 fn free_port() -> Result<u16, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
@@ -348,8 +402,8 @@ fn spawn_node(
         .arg("server/index.mjs")
         .current_dir(app_dir)
         .env("PORT", port.to_string())
-        .env("FENGYU_STATIC_DIR", ".")
-        .env("FENGYU_HOME_DIR", home_dir)
+        .env("NIANFENG_STATIC_DIR", ".")
+        .env("NIANFENG_HOME_DIR", home_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -369,8 +423,8 @@ fn spawn_node(
         .arg("server/index.mjs")
         .current_dir(app_dir)
         .env("PORT", port.to_string())
-        .env("FENGYU_STATIC_DIR", ".")
-        .env("FENGYU_HOME_DIR", home_dir)
+        .env("NIANFENG_STATIC_DIR", ".")
+        .env("NIANFENG_HOME_DIR", home_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -446,7 +500,7 @@ fn show_windows_notification(hwnd: isize, title: &str, body: &str, icon_base64: 
     data.uCallbackMessage = WM_APP + 1;
     data.hIcon = app_icon;
     data.hBalloonIcon = avatar_icon;
-    data.szTip = fixed::<TEXT_LIMIT_TIP>("风语 · AI Chat");
+    data.szTip = fixed::<TEXT_LIMIT_TIP>("念风chat");
     data.szInfoTitle = fixed::<TEXT_LIMIT_TITLE>(title);
     data.szInfo = fixed::<TEXT_LIMIT_BODY>(body);
     // 提示音由前端的「声音提示」开关统一控制，系统气泡本身静音，避免双重响声。
@@ -539,6 +593,17 @@ fn health_ok(port: u16) -> bool {
 
 fn stop_child(child: &mut Option<Child>) {
     if let Some(mut child) = child.take() {
+        // Windows 下 Node 可能还会拉起子进程；先按进程树结束，避免关闭 exe 后
+        // 后台仍有 node/模型进程占用端口，导致下次启动或迁移数据异常。
+        #[cfg(target_os = "windows")]
+        {
+            let pid = child.id().to_string();
+            let _ = Command::new("taskkill")
+                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = child.kill();
         let _ = child.wait();
     }

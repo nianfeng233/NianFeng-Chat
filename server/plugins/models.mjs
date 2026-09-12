@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端 · models
  * 真实的模型接入层：OpenAI 兼容接口 / Ollama / Anthropic。
@@ -996,11 +1001,11 @@ export function apply(ctx) {
     builtin() {
       return {
         available: false,
-        provider: 'fengyu-official',
+        provider: 'nianfeng-official',
         loginRequired: true,
         fetchedAt: Date.now(),
         reason:
-          '「风语内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未发布，所以这里还没有可用的内置模型。可以关闭上方开关，在本页配置自定义提供商。',
+          '「念风内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未发布，所以这里还没有可用的内置模型。可以关闭上方开关，在本页配置自定义提供商。',
         models: [],
       }
     },

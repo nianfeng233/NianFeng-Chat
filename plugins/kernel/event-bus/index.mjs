@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * K1 · event-bus
  * 提供 emit / on / off / once 的全局事件总线（内核 Context 的事件系统本体），
@@ -7,7 +12,7 @@ export const name = 'event-bus'
 export const version = '1.0.0'
 export const displayName = '事件总线'
 export const description = '内核层 · 插件间通信的基础设施，提供 emit / on / provide / inject。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⚡'
 export const core = true
 export const provides = [{ name: 'event-bus', type: 'singleton' }]

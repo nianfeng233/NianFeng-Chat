@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D3 · model-registry
  * 注册所有可用模型。模型适配器插件（B7~B9）把 provider 注册进来，
@@ -7,7 +12,7 @@ export const name = 'model-registry'
 export const version = '1.0.0'
 export const displayName = '模型注册表'
 export const description = '业务服务 · 注册所有可用模型与提供商。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📚'
 export const core = true
 export const depends = { 'service-container': '^1.0.0' }

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · tool-registry
  * 通用工具注册表（文档 §6）：
@@ -9,7 +14,7 @@ export const name = 'tool-registry'
 export const version = '1.0.0'
 export const displayName = '工具注册表'
 export const description = '业务服务 · OpenAI function-calling 工具的注册、编目与执行调度。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = { 'event-bus': '^1.0.0' }

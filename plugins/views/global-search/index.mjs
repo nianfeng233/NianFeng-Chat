@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V24 · global-search
  * 全局搜索浮层：侧栏搜索按钮或 Ctrl+Shift+F 打开，
@@ -10,7 +15,7 @@ export const name = 'global-search'
 export const version = '1.0.0'
 export const displayName = '全局搜索'
 export const description = '视觉内容 · 跨会话 / 消息 / 渠道 / 插件 / 设置的搜索浮层。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔍'
 export const core = false
 export const depends = { 'search-service': '^1.0.0', rail: '^1.0.0' }

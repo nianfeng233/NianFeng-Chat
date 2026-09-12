@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 一键发布：提交发布工作树 → 打 tag → 推送 → 创建 GitHub Release。
  *
@@ -64,7 +69,7 @@ const dirty = capture('git', ['status', '--porcelain'])
 if (dirty) {
   console.log('提交发布工作树变更…')
   run('git', ['add', '-A'])
-  run('git', ['commit', '-m', `release: 风语 ${tag}`])
+  run('git', ['commit', '-m', `release: 念风 ${tag}`])
 } else {
   console.log('发布工作树没有新变更，跳过提交')
 }
@@ -75,7 +80,7 @@ if (existingTag === tag) {
   console.error(`tag ${tag} 已存在；如需重新发布请升版本号`)
   process.exit(1)
 }
-run('git', ['tag', '-a', tag, '-m', `风语 ${tag}`])
+run('git', ['tag', '-a', tag, '-m', `念风 ${tag}`])
 
 // 3) 推送
 if (!skipPush) {
@@ -93,7 +98,7 @@ if (createRelease) {
     .filter(Boolean)
   if (!assets.length) {
     for (const file of readdirSync(RELEASE_DIR)) {
-      if (/^fengyu-(desktop|web-deploy|web-source).*\.(exe|zip)$/i.test(file)) assets.push(join(RELEASE_DIR, file))
+      if (/^nianfeng-(desktop|web-deploy|web-source).*\.(exe|zip)$/i.test(file)) assets.push(join(RELEASE_DIR, file))
     }
   }
   const missing = assets.filter(file => !existsSync(file))
@@ -103,7 +108,7 @@ if (createRelease) {
   }
   const releaseArgs = ['release', 'create', tag, ...assets]
   if (repo) releaseArgs.push('-R', repo)
-  releaseArgs.push('--title', `风语 ${tag}`)
+  releaseArgs.push('--title', `念风 ${tag}`)
   if (notesFile && existsSync(notesFile)) releaseArgs.push('--notes-file', notesFile)
   else releaseArgs.push('--generate-notes')
   const prerelease = /-(alpha|beta|rc)/i.test(tag)

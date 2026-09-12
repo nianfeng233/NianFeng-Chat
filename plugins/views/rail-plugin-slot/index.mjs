@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V5 · rail-plugin-slot
  * 用户插件图标挂载点（文档 §3 V5）。
@@ -7,7 +12,7 @@ export const name = 'rail-plugin-slot'
 export const version = '1.0.0'
 export const displayName = '插件挂载点'
 export const description = '侧边栏内容 · 用户插件图标挂载点（rail:middle）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🪝'
 export const core = true
 export const depends = { rail: '^1.0.0' }

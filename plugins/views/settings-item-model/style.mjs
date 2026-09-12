@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * settings-item-model 样式：内置模型面板 + AstrBot 风格的自定义提供商双栏布局。
  * 只使用 .model-* 前缀，避免污染其他设置页。

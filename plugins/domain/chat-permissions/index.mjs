@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · chat-permissions
  * 聊天链路权限与敏感确认（文档 §7）：
@@ -10,11 +15,11 @@ export const name = 'chat-permissions'
 export const version = '1.0.0'
 export const displayName = '聊天权限'
 export const description = '业务服务 · 渠道读写权限表、跨渠道校验、敏感确认与审计。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
 export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0', 'event-bus': '^1.0.0' }
-export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?']
+export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?', 'user-identity?']
 export const provides = [{ name: 'chat-permissions', type: 'singleton' }]
 
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
@@ -57,15 +62,26 @@ export function apply(ctx) {
     const conv = sessions.get(conversationId)
     const channel = store.channelForConversation(conversationId)
     if (!conv || !channel) return null
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
+    // userId 继续作为“权限主体”稳定标识（沿用历史 chat.userId，保证已有授权不失效）；
+    // identityUserId 才是展示 / 模型上下文里的用户标识，暂时等于用户名，未来由联网插件提供真实账号 ID。
     const userId = String(config.get('chat.userId', 'web-user') || 'web-user')
-    const userName = resolveUserNickname(config)
+    const identityUserId = String(identity.userId || userId)
+    const userName = String(identity.userName || resolveUserNickname(config))
     return {
       conversationId,
       roleId: conv.meta?.roleId || conv.id,
       channelId: channel.channelId,
       userId,
+      identityUserId,
       userName,
+      identitySource: identity.source || 'local',
       channel,
+      // 渠道插件在会话 meta 上声明的策略（clawbot 的“跨渠道读取 / 发送”开关）。
+      // 这些是真正随会话持久化的来源侧授权，不再依赖另外手工写入 grants 表。
+      crossReadable: conv.meta?.crossReadable === true,
+      crossSendable: conv.meta?.crossSendable === true,
+      sensitiveConfirm: conv.meta?.sensitiveConfirm !== false,
     }
   }
 
@@ -77,6 +93,17 @@ export function apply(ctx) {
         (grant.sourceChannel === '*' || grant.sourceChannel === sourceChannel) &&
         (grant.targetChannel === '*' || grant.targetChannel === targetChannel),
     ) || null
+
+  /** 给确认弹窗 / 微信提示用的渠道描述：区分网页渠道和微信clawbot，而不是只抛角色名。 */
+  const describeChannel = target => {
+    const channelId = String(target?.channelId || '')
+    const kind = channelId.split(':')[0]
+    const kindLabel =
+      kind === 'wechat-clawbot' ? '微信clawbot' : kind === 'nova' || target?.source === 'nova' ? '网页' : target?.source || '其它'
+    const conv = target?.conversationId ? sessions.get(target.conversationId) : null
+    const name = conv?.name || target?.conversationId || channelId || '未命名渠道'
+    return `${kindLabel}渠道「${name}」（${channelId || 'unknown'}）`
+  }
 
   const requestConfirm = ({ action, confirmTarget }) =>
     new Promise(resolve => {
@@ -108,7 +135,7 @@ export function apply(ctx) {
       const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT)
       pending.set(id, { id, timer, finish, conversationId: confirmTarget.conversationId })
       toast?.warn?.(
-        `敏感操作需要确认：向「${payload.targetName}」${action === 'read' ? '读取记录' : '发送消息'}。` +
+        `敏感操作需要确认：${action === 'read' ? '读取' : '向'} ${payload.targetName} ${action === 'read' ? '的聊天记录' : '发送消息'}。` +
           `请在输入框输入“确认”同意，输入其它内容视为拒绝。`,
       )
       events.emit('chat:confirm-request', payload)
@@ -137,25 +164,31 @@ export function apply(ctx) {
       sourceChannel: current.channelId,
       targetChannel: target.channelId,
     })
-    const policyAllowed = action === 'read' ? target.crossReadable === true : target.crossSendable === true
-    if (!grant || grant[crossFlag] !== true || !policyAllowed) {
+    // 来源侧策略（渠道设置里勾选“跨渠道读取 / 发送”）和授权表二选一即可；
+    // 授权表仍需目标渠道声明可被跨渠道访问，避免旧 grants 绕过目标侧开关。
+    const sourceAllowed = action === 'read' ? current.crossReadable : current.crossSendable
+    const targetAllowed = action === 'read' ? target.crossReadable : target.crossSendable
+    const grantAllowed = !!grant && grant[crossFlag] === true
+    const permissionAllowed = sourceAllowed || (grantAllowed && targetAllowed)
+    if (!permissionAllowed) {
       return deny({
         action,
         userId: current.userId,
         sourceChannel: current.channelId,
         targetChannel: target.channelId,
-        reason: !grant ? 'no-grant' : !policyAllowed ? 'channel-policy' : `${crossFlag}=false`,
+        reason: !sourceAllowed && !grantAllowed ? 'no-grant' : !targetAllowed ? 'channel-policy' : `${crossFlag}=false`,
       })
     }
 
-    if (!confirmed && config.get('chat.confirmSensitive', true)) {
+    const mustConfirm = config.get('chat.confirmSensitive', true) && current.sensitiveConfirm !== false
+    if (!confirmed && mustConfirm) {
       const approved = await requestConfirm({
         action,
         confirmTarget: {
           ...current,
           userId: current.userId,
           targetChannelId: target.channelId,
-          targetName: target.conversationId ? sessions.get(target.conversationId)?.name || target.channelId : target.channelId,
+          targetName: describeChannel(target),
         },
       })
       if (!approved) return { ok: false, code: 'CONFIRM_REJECTED', error: '用户拒绝了该敏感操作' }

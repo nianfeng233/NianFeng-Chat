@@ -1,7 +1,12 @@
-# 风语插件目录 · 开发定位手册
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# 念风插件目录 · 开发定位手册
 
 > 用途：新会话/新工作区里直接按插件定位到具体文件与职责。
-> 当前共 **84 个前端插件 + 8 个后端插件**。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
+> 当前共 **87 个前端内置插件 + 9 个后端插件**（另有微信clawbot 渠道前端 + 后端桥的独立分发目录）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
 
 ---
 
@@ -16,6 +21,7 @@
 | `scripts/sync-plugins.mjs` | 扫描 `plugins/**/index.mjs` 生成 `plugins/registry.mjs` | 增删插件后必须跑 `npm run sync-plugins` |
 | `scripts/smoke.mjs` | 前端端到端测试（189 项，会启动真实后端） | 加插件后补测试 |
 | `scripts/test-backend.mjs` | 后端 API 测试（63 项） | 改后端接口后补测试 |
+| `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，15 项） | 改 Clawbot 协议后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
 | `scripts/test-chat-tools.mjs` | Nova 工具链路测试（101 项，真实 Mock function calling + DeepSeek reasoning 回传） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
 | `scripts/test-vendors.mjs` | 厂商协议测试（30 项：DeepSeek / Anthropic / Gemini / OpenAI 参数降级） | 改厂商适配后补测试 |
@@ -83,6 +89,7 @@ export function apply(ctx) { /* ... */ }
 | `document-service` | `domain/document-service/index.mjs` | 资料原文存储与按 token 分段读取 | `document-service` | 资料库存储位置 / 分段策略 |
 | `chat-permissions` | `domain/chat-permissions/index.mjs` | 渠道权限表、跨渠道校验、敏感确认、审计 | `chat-permissions` | 权限模型 / 确认交互 |
 | `chat-queue` | `domain/chat-queue/index.mjs` | 角色级 FIFO 串行队列 | `chat-queue` | 并发与排队策略 |
+| `user-identity` | `domain/user-identity/index.mjs` | 统一用户标识：本机配置默认值 + 联网账号插件 `registerProvider()` | `user-identity` | 身份来源与隐私 |
 | `tool-registry` | `domain/tool-registry/index.mjs` | OpenAI function-calling 工具注册 / 编目 / 执行 | `tool-registry` | 新增领域工具 |
 
 ---
@@ -143,7 +150,7 @@ export function apply(ctx) { /* ... */ }
 | `settings-container` (V16) | `views/settings-container/` | 设置页注册表、分组导航、页面调度 | 新增设置页先看这里 |
 | `official-service`（独立插件，暂不可用） | `features/official-service/` | 账号页 + 官方内置模型 / 计费入口的独立归属；官方服务端未制作时标记暂不可用，禁用后相关入口全部隐藏 | 官方服务接入后在此实现登录 / 内置模型 |
 | `settings-item-general` (V17) | `views/settings-item-general/` | 通用设置、语言、调试日志 | 常规开关 |
-| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理；「使用风语内置模型」区域依赖 `official-service` 服务，插件禁用即隐藏 | 模型页 |
+| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理；「使用念风内置模型」区域依赖 `official-service` 服务，插件禁用即隐藏 | 模型页 |
 | `settings-item-theme` (V19) | `views/settings-item-theme/` | 主题/背景/强调色/界面细节 + `appearance-page.addSection()` | 外观页 |
 | `settings-item-bubble` (V20) | `views/settings-item-bubble/` | 气泡切换（插入外观页） | 气泡选择 UI |
 | `settings-item-plugins` (V21) | `views/settings-item-plugins/` | **插件自检、错误/冲突标红、详情、启停** | 插件管理页 |
@@ -164,6 +171,7 @@ export function apply(ctx) { /* ... */ }
 |---|---|---|---|
 | `chat-flow` | `features/chat-flow/index.mjs` | 队列 → 存 → 上下文 → 工具循环 → 收尾；人设、推理等级、temperature、原生工具 / 文本工具协议兼容 | 聊天主链路 |
 | `chat-notify` | `features/chat-notify/index.mjs` | 监听 `message:added / message:done`；后台或非当前会话时逐条生成角色消息通知 | 消息提醒策略 |
+| `plugin-health-guard` | `features/plugin-health-guard/index.mjs` | 启动插件自检，发现红色错误时弹窗并引导到插件设置 | 错误门限与提示文案 |
 | `channel-base` | `features/channel-base/index.mjs` | 渠道基座：连接钩子 + 入站消息落库为会话 | 新渠道插件继承它 |
 | `model-adapter-backend` | `features/model-adapter-backend/index.mjs` | 把后端提供商注册为前端模型，经 `/api/chat` 流式对话 / 透传 tools | 模型来源与参数传递 |
 | `character-editor` | `features/character-editor/` | 新建 / 编辑会话角色：人格、模型、头像（捏人窗口） | 角色系统 |
@@ -182,7 +190,18 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## 后端插件（`server/plugins/`，8 个）
+## 渠道插件（`plugins/channels/`，1 个）
+
+| 插件 | 路径 | 职责 | 修改指引 |
+|---|---|---|---|
+| `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
+
+微信入站消息由插件写入角色对应的 `wechat-clawbot:<channelId>` 渠道记录，再以
+`skipUserAppend` 触发 `chat-flow`；等 `chat:request-done`（整轮工具调用彻底结束）后，
+才把模型消息发回微信并关闭 typing 状态。
+
+---
+## 后端插件（`server/plugins/`，8 个 + 渠道桥 1 个）
 
 | 插件 | 路径 | 职责 | 对外服务 / 接口 |
 |---|---|---|---|
@@ -192,8 +211,13 @@ export function apply(ctx) { /* ... */ }
 | `sessions` | `server/plugins/sessions.mjs` | `user_data/sessions.json` 持久化、防抖落盘、渠道会话复用 | `sessions`；`/api/sessions*` |
 | `models` | `server/plugins/models.mjs` | OpenAI 兼容 / DeepSeek 官方 / Anthropic Claude / Google Gemini / Ollama 真实接入；各厂商原生工具调用与 reasoning 转换；`registerProvider()` 预留托管扩展点 | `models`；`/api/providers*`、`/api/chat` |
 | `hub` | `server/plugins/hub.mjs` | SSE 客户端管理与广播 | `hub`；`/api/events` |
-| `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管 | `http` |
+| `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管；提供 `httpApi` 路由 / 能力扩展点 | `http`、`httpApi` |
+| `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
 | （已移除）`telegram` | — | 随 `channel-telegram` 一起移除 | — |
+
+> 后端会在 HTTP 服务就绪后自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录里的
+> `bridge.mjs` 并加载；渠道插件通过 `httpApi.route()` 注册自己的接口，不需要修改
+> `server/index.mjs` 或 `server/plugins/http.mjs`。外部 bridge 是 Node 代码，只应安装可信插件。
 
 保留但暂无前端调用：`GET /api/rss`、`POST /api/translate`（供未来的扩展插件使用，均为真实实现）。
 
@@ -223,7 +247,7 @@ export function apply(ctx) { /* ... */ }
 
 ### 目标形态
 
-顶层一个开关 **「使用风语内置模型」**（默认开启）：
+顶层一个开关 **「使用念风内置模型」**（默认开启）：
 
 * **开启时**：下方展示内置模型列表 + 请求参数（自定义请求体）+ 超时时间。
   * 内置模型来自官方服务端。**官方服务端是独立官网项目，尚未发布**：未接入时列表显示空状态并给出说明（不要做假模型、假登录）。
@@ -262,13 +286,13 @@ export function apply(ctx) { /* ... */ }
 ### 第二轮补充（已实现）
 
 * 生成参数拆成两个互不相关的紧凑滑块：推理等级 `off / low / high / max`（对应 DeepSeek `thinking` + `reasoning_effort`），以及连续 `temperature` 0-2；样式分别为白→浅绿/蓝/粉（max 带闪点）与浅绿→深绿。
-* 自定义提供商左栏拉伸到底，列表项自带删除按钮；检测到旧版后端进程时页面顶部给出「请重启风语」的可操作提示。
+* 自定义提供商左栏拉伸到底，列表项自带删除按钮；检测到旧版后端进程时页面顶部给出「请重启念风」的可操作提示。
 * 新增后端 `instance` 插件与 `GET/PUT /api/data-dir`：默认数据目录 `<root>/user_data`，首次启动自动迁移旧 `data/`，设置 → 数据 可切换 / 迁移 / 恢复默认。
 * 新增 `bg-image` 插件与外观页背景图上传（压缩后本机保存）；composer 接入 Web Speech API 语音输入。
 * 网络 / 隐私 / 数据页移除不生效的假开关，改为真实配置或如实说明；顶栏昵称、后台通知、插件通知开关全部接通。
 * API Key 与敏感请求头改为 AES-256-GCM 密文落盘（`user_data/.secret-key`），数据目录迁移会连密钥一起复制。
 * 导出服务扩展为 Markdown / JSON / TXT / HTML / CSV / PDF（浏览器打印另存）；设置页新增 JavaScript Web Worker 代码运行器。
-* `scripts/stop.mjs`（`npm run stop` / `stop.cmd` / `stop.ps1`）用于关闭无头终端里残留的旧实例；`start.mjs` 启动前会自动检测并关闭端口上的旧风语实例。
+* `scripts/stop.mjs`（`npm run stop` / `stop.cmd` / `stop.ps1`）用于关闭无头终端里残留的旧实例；`start.mjs` 启动前会自动检测并关闭端口上的旧念风实例。
 * `scripts/test-chat.mjs` + `scripts/mock-openai.mjs` 提供无网络 / 无 Key 的对话链路验证（含推理等级 wire 字段）。
 * 聊天链路一期：新增 `chat-store / document-service / chat-permissions / chat-queue / tool-registry / chat-tools / context-builder`；`chat-flow` 升级为工具循环（tools / tool_calls / role=tool），配置项 `chat.*`；`scripts/test-chat-tools.mjs` 用 Mock function calling 走通 Nova 渠道 101 项断言，`scripts/test-vendors.mjs` 用 30 项断言覆盖 DeepSeek / Anthropic / Gemini / 通用 OpenAI 参数降级。
 * 新增 `character-editor`：新建会话先弹捏人窗口（人格 / 模型 / 头像），会话头部「更多 → 编辑角色」可再次修改；人设由 chat-flow 注入 system 段落。
@@ -283,7 +307,7 @@ export function apply(ctx) { /* ... */ }
 | 偶发 Windows 弹窗 | 已加 `user_data/logs/error.log` 崩溃日志与端口占用友好提示；若复现，先看该日志 |
 | 设置页 `settings:page` | 曾因 null 解构报错，现已兼容 `{page}` 与 null |
 | API Key / 系统凭据库 | 已改为 AES-256-GCM + `.secret-key` 同目录存储；尚未接入系统 Keychain / DPAPI |
-| `channel-registry` 渠道类型为空 | 微信/Discord/邮箱仅在 `plannedList` 中标注原因；新渠道插件通过 `channel-base.defineChannel()` 注册 |
+| `channel-registry` 渠道类型 | `wechat-clawbot` 通过 `channel-base.defineChannel()` 注册真实类型；Discord/邮箱仍在 `plannedList` 标注原因 |
 | 后端 `/api/rss`、`/api/translate` | 无前端调用，保留给扩展插件 |
 | 插件列表排序 | 默认按状态；`installTime` 字段目前恒为 0，未实现真实安装时间 |
 | 双配置存储 | 前端偏好走 localStorage（config 服务），后端配置走 `user_data/config.json`；跨端同步未实现 |

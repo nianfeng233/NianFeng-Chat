@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V22 · settings-item-shortcuts
  * 快捷键设置：系统快捷键 + 插件注册的快捷键（来自 F11 服务）。
@@ -6,7 +11,7 @@ export const name = 'settings-item-shortcuts'
 export const version = '1.0.0'
 export const displayName = '设置项 · 快捷键'
 export const description = '设置页 · 快捷键列表与冲突提示。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'keyboard-shortcuts': '^1.0.0' }

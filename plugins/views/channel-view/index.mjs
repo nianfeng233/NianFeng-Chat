@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V12 · channel-view
  * 渠道视图入口：注册 'channel' 视图，提供列表与详情两个插槽。
@@ -6,7 +11,7 @@ export const name = 'channel-view'
 export const version = '1.0.0'
 export const displayName = '渠道视图'
 export const description = '视觉内容 · 渠道视图入口。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📡'
 export const core = true
 export const depends = { 'right-main-panel': '^1.0.0', 'left-list-panel': '^1.0.0', 'view-router': '^1.0.0' }

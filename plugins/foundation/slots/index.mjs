@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F6 · slots
  * 插槽注册中心：UI 上的命名锚点，任何插件都可以往里挂内容（文档附录 B）。
@@ -13,7 +18,7 @@ export const name = 'slots'
 export const version = '1.0.0'
 export const displayName = '插槽注册中心'
 export const description = '基础服务 · UI 插槽注册与管理，插件内容挂载点。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧩'
 export const core = true
 export const inject = ['event-bus']

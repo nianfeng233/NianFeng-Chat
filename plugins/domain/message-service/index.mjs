@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D2 · message-service
  * 消息增删改、流式追加、状态管理（文档 §6.1）。
@@ -7,10 +12,10 @@ export const name = 'message-service'
 export const version = '1.0.0'
 export const displayName = '消息服务'
 export const description = '业务服务 · 消息增删改与流式状态管理。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '✉️'
 export const core = true
-export const depends = { 'session-service': '^1.0.0', config: '^1.0.0' }
+export const depends = { 'session-service': '^2.0.0', config: '^1.0.0' }
 export const inject = ['session-service', 'event-bus', 'config']
 export const provides = [{ name: 'message-service', type: 'singleton' }]
 

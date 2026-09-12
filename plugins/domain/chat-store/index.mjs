@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D? · chat-store
  * 聊天记录库（文档 §3.1 / §5）。
@@ -20,11 +25,11 @@ export const name = 'chat-store'
 export const version = '1.0.0'
 export const displayName = '聊天记录库'
 export const description = '业务服务 · 渠道消息元数据、序号、工作记忆与 Nova 渠道识别。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'session-service': '^1.0.0', 'message-service': '^1.0.0' }
-export const inject = ['session-service', 'message-service', 'storage', 'event-bus', 'config']
+export const depends = { 'session-service': '^2.0.0', 'message-service': '^1.0.0' }
+export const inject = ['session-service', 'message-service', 'storage', 'event-bus', 'config', 'user-identity?']
 export const provides = [{ name: 'chat-store', type: 'singleton' }]
 
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
@@ -88,6 +93,16 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   const config = ctx.inject('config')
 
+  /** 当前用户标识：优先 user-identity 服务，未来联网账号插件注册后自动生效。 */
+  const currentUser = () => {
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
+    return {
+      userId: String(identity.userId || config.get('chat.userId', 'web-user') || 'web-user'),
+      userName: String(identity.userName || resolveUserNickname(config)),
+      source: identity.source || 'local',
+    }
+  }
+
   let data = storage.get(NS, KEY, null)
   if (!data || typeof data !== 'object' || typeof data.channels !== 'object') data = { channels: {} }
   const persist = () => storage.set(NS, KEY, data)
@@ -113,8 +128,8 @@ export function apply(ctx) {
       seq,
       channel_id: channelId,
       timestamp,
-      sender_id: message.sender_id || (role === 'user' ? config.get('chat.userId', 'web-user') : `role_${conv.id}`),
-      sender_name: message.sender_name || (role === 'user' ? resolveUserNickname(config) : conv.name),
+      sender_id: message.sender_id || (role === 'user' ? currentUser().userId : `role_${conv.id}`),
+      sender_name: message.sender_name || (role === 'user' ? currentUser().userName : conv.name),
       role,
       content_type: message.content_type || (message.kind === 'document' ? 'document' : 'text'),
       visibility: message.visibility || 'shareable',
@@ -253,7 +268,17 @@ export function apply(ctx) {
       const byConv = sessions.get(raw)
       if (byConv) return ensureConversation(byConv, { persistMeta: true })
       // 允许只写下半段，如 "web:xxx"
-      if (!raw.includes(':')) return channelRecord(novaChannelId(raw))
+      if (!raw.includes(':')) {
+        const byNova = channelRecord(novaChannelId(raw))
+        if (byNova) return byNova
+        // 模型通常只知道渠道显示名，不知道内部 channelId；支持按会话名精确 /
+        // 唯一模糊匹配，避免把“读取某渠道记录”误判成未知渠道。
+        const wanted = raw.toLowerCase()
+        const exact = sessions.list().find(conv => String(conv.name || '').trim().toLowerCase() === wanted)
+        if (exact) return ensureConversation(exact, { persistMeta: true })
+        const partial = sessions.list().filter(conv => String(conv.name || '').toLowerCase().includes(wanted))
+        if (partial.length === 1) return ensureConversation(partial[0], { persistMeta: true })
+      }
       return null
     },
 
@@ -273,8 +298,9 @@ export function apply(ctx) {
       const id = input.id || `m_${conv.id}_${seq}`
       const role = input.role === 'assistant' ? 'assistant' : input.role === 'system' ? 'system' : 'user'
       const channelId = record.channelId
-      const userId = config.get('chat.userId', 'web-user')
-      const userName = resolveUserNickname(config)
+      const identity = currentUser()
+      const userId = identity.userId
+      const userName = identity.userName
       const extra = {
         id,
         message_id: id,
@@ -409,8 +435,9 @@ export function apply(ctx) {
       const conv = sessions.get(record.conversationId)
       if (!conv) throw new Error('渠道对应的会话不存在')
       if (!Array.isArray(list)) throw new Error('聊天记录必须是 JSON 数组')
-      const userId = config.get('chat.userId', 'web-user')
-      const userName = resolveUserNickname(config)
+      const identity = currentUser()
+      const userId = identity.userId
+      const userName = identity.userName
       const usedSeqs = new Set()
       const usedIds = new Set()
       let nextSeq = 0
@@ -466,6 +493,26 @@ export function apply(ctx) {
       const all = groupRounds(service.messagesOf(channelId))
       const take = Number.isFinite(Number(limit)) ? Math.max(0, Number(limit)) : 5
       return take > 0 ? all.slice(-take) : []
+    },
+
+    /** 渠道清单：供 context-builder 把可读 / 可写渠道名告诉模型，工具调用不再只认内部 ID。 */
+    channels() {
+      return Object.values(data.channels).map(record => {
+        const conv = sessions.get(record.conversationId)
+        return {
+          channelId: record.channelId,
+          conversationId: record.conversationId,
+          name: conv?.name || record.channelId,
+          roleId: record.roleId,
+          group: record.group,
+          source: record.source,
+          crossReadable: record.crossReadable === true,
+          crossSendable: record.crossSendable === true,
+          messages: record.seq || 0,
+          hiddenFromSessionList: conv?.meta?.hiddenFromSessionList === true,
+          lastAt: record.lastAt || null,
+        }
+      })
     },
 
     /** 角色级工作记忆：只聚合普通私聊渠道，按 timestamp 合并去重，取最近 limit 轮 */

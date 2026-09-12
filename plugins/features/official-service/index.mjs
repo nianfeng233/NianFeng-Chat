@@ -1,10 +1,15 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 风语官方服务（独立插件）
+ * 念风官方服务（独立插件）
  *
  * 账号 / 登录 / 官方内置模型 / 计费都属于官方服务端能力。官方服务端
  * （独立官网项目）尚未制作，所以本插件当前标记为「暂不可用」：
  *   - 设置 → 账号 页面由本插件注册，禁用后页面与导航入口一起消失；
- *   - 设置 → 模型 里的「使用风语内置模型」开关与内置模型面板由
+ *   - 设置 → 模型 里的「使用念风内置模型」开关与内置模型面板由
  *     official-service 服务是否存在来决定是否展示；
  *   - 「未实现清单」里与官方服务相关的条目也由本插件提供。
  *
@@ -13,9 +18,9 @@
  */
 export const name = 'official-service'
 export const version = '1.0.0'
-export const displayName = '风语官方服务'
+export const displayName = '念风官方服务'
 export const description = '功能插件 · 账号 / 登录 / 官方内置模型（官方服务端尚未制作，暂不可用）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '☁️'
 export const core = false
 export const enabled = true
@@ -31,7 +36,7 @@ import { icons } from '../../../src/util/icons.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 
 const BUILTIN_REASON =
-  '「风语内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未制作，所以这里没有可用的内置模型；关闭开关后可改用本机自定义提供商。'
+  '「念风内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未制作，所以这里没有可用的内置模型；关闭开关后可改用本机自定义提供商。'
 
 export function apply(ctx) {
   const pages = ctx.inject('settings-container')
@@ -44,7 +49,7 @@ export function apply(ctx) {
 
   const fallbackBuiltin = () => ({
     available: false,
-    provider: 'fengyu-official',
+    provider: 'nianfeng-official',
     loginRequired: true,
     fetchedAt: Date.now(),
     reason: BUILTIN_REASON,
@@ -86,7 +91,7 @@ export function apply(ctx) {
           '官方账号体系、设备码登录由独立官网项目提供；官方服务端尚未制作，本客户端不内置也不模拟登录。使用自带模型时不需要登录。',
         ],
         [
-          '风语内置模型 / 官方计费',
+          '念风内置模型 / 官方计费',
           '暂不可用',
           '内置模型与计费由官方服务端提供；官方服务端尚未制作。可在「设置 → 模型」关闭内置模型开关，改配本机 Ollama / OpenAI 兼容提供商。',
         ],
@@ -125,7 +130,7 @@ export function apply(ctx) {
 
         container.innerHTML = page(
           '账号',
-          '风语是纯客户端单机应用：数据保存在本机，模型可以完全自备；官方账号服务暂不可用。',
+          '念风是纯客户端单机应用：数据保存在本机，模型可以完全自备；官方账号服务暂不可用。',
           `
           ${section('运行模式', card(
             row('当前模式', '不需要登录也能使用全部本地功能', '<span class="text-good">● 本地单机</span>') +
@@ -143,7 +148,7 @@ export function apply(ctx) {
           ))}
           <div class="settings-note">
             为什么现在没有登录框？因为官方服务端还没有制作，做一个连不上的登录界面只会误导使用者。
-            本页面与「使用风语内置模型」由插件「风语官方服务」提供；在 设置 → 插件 中禁用它，
+            本页面与「使用念风内置模型」由插件「念风官方服务」提供；在 设置 → 插件 中禁用它，
             这些入口会一起隐藏，重新启用后恢复。使用自己的模型（Ollama 或任意 OpenAI 兼容接口）时，登录永远是可选的。
           </div>
 
@@ -151,7 +156,7 @@ export function apply(ctx) {
             row('平台', '来自浏览器 User-Agent', `<span class="mono">${escapeHtml(truncate(navigator.userAgent, 60))}</span>`) +
             row('后端', health ? `cordis v4 · ${escapeHtml(health.version)}` : '未连接', health ? '<span class="text-good">● 已连接</span>' : '<span class="text-bad">● 未连接</span>') +
             row('数据规模', '当前设备上的会话 / 消息', `<span class="mono">${sessions.count()} / ${sessions.stats?.().messages ?? 0}</span>`) +
-            row('客户端版本', '风语 AI Chat', `<span class="mono">v${escapeHtml(health?.version || '0.40.0')}</span>`),
+            row('客户端版本', '念风chat', `<span class="mono">v${escapeHtml(health?.version || '0.42.0')}</span>`),
           ))}`,
         )
 
@@ -171,7 +176,7 @@ export function apply(ctx) {
   })
 
   ctx.provide('official-service', service, { type: 'singleton' })
-  ctx.logger.debug('风语官方服务入口已注册（官方服务端尚未制作，标记为暂不可用）')
+  ctx.logger.debug('念风官方服务入口已注册（官方服务端尚未制作，标记为暂不可用）')
 }
 
 function truncate(text, max) {

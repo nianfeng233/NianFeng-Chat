@@ -1,10 +1,21 @@
 <!DOCTYPE html>
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>风语 · AI Chat</title>
-  <link rel="icon" href="./public/assets/logo.png" />
+  <title>念风chat</title>
+  <link rel="icon" id="appFavicon" href="./public/assets/logo.png" />
+  <script type="module">
+    // 全项目统一头像 / 品牌 logo 入口：换资源只改 src/util/identity.mjs 的 BRAND_LOGO。
+    import { BRAND_LOGO } from './src/util/identity.mjs'
+    const favicon = document.getElementById('appFavicon')
+    if (favicon) favicon.href = BRAND_LOGO
+  </script>
   <!-- 真实的 cordis 内核：浏览器端通过 import map 解析裸模块名 -->
   <script type="importmap">
     {
@@ -51,7 +62,7 @@
   <div id="app"></div>
 
   <div id="boot">
-    <div class="mark">风</div>
+    <div class="mark">念</div>
     <div class="tip">正在加载插件…</div>
     <div class="bar"><i></i></div>
   </div>
@@ -65,7 +76,7 @@
   <script type="module">
     import { boot } from './src/main.mjs'
     boot().catch(err => {
-      console.error('[fengyu] boot failed', err)
+      console.error('[nianfeng] boot failed', err)
       document.getElementById('boot')?.classList.add('fade')
       document.getElementById('fatalTip').textContent = String(err?.message || err)
       document.getElementById('fatalStack').textContent = String(err?.stack || '')

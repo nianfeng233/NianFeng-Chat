@@ -1,14 +1,17 @@
-风语 (Fengyu)
+# 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+# 项目全称：念风 Chat（NianFeng-Chat）
+# 仓库：https://github.com/nianfeng233/NianFeng-Chat
+念风 (NianFeng)
 Copyright 2026 nianfeng233
 
-This product includes software developed as part of the Fengyu project
-(https://github.com/nianfeng233/fengyu-chat).
+This product includes software developed as part of the NianFeng project
+(https://github.com/nianfeng233/NianFeng-Chat).
 
 Third-party components bundled with or required by this product are listed in
 THIRD-PARTY-NOTICES.md and docs/DEPENDENCIES.md, and are provided under their
 respective licenses. Those licenses apply only to the corresponding components;
 they do not alter the Apache License, Version 2.0 that applies to the original
-Fengyu source code, documentation, UI and assets.
+NianFeng source code, documentation, UI and assets.
 
-"风语" is the project name; all third-party trademarks remain the property of
+"念风" is the project name; all third-party trademarks remain the property of
 their respective owners.

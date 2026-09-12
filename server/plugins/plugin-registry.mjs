@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端 · plugin-registry
  * 内置插件 + 用户外部插件目录的统一扫描、清单合并与资源读取。
@@ -6,7 +11,7 @@
  *   - exe / Web 部署版的 runtime/app/plugins 是「随版本发布的内置插件」，
  *     升级时会被整体替换；用户自己的插件放在外部目录，升级不会丢。
  *   - 外部目录默认是 <数据目录>/plugins（因此数据目录外置后它也跟着外置），
- *     也可以在「设置 → 插件」里选择任意目录，或用环境变量 FENGYU_PLUGINS_DIR 指定。
+ *     也可以在「设置 → 插件」里选择任意目录，或用环境变量 NIANFENG_PLUGINS_DIR 指定。
  *   - 后端扫描目录并生成插件清单；前端 boot 时从 /api/plugins 取清单并动态加载。
  *     这样 exe 不需要内置 scripts/sync-plugins.mjs，用户丢完插件重启/重新扫描即可。
  */
@@ -35,7 +40,7 @@ export function apply(ctx, config = {}) {
   let builtinEntries = null
   let snapshot = null
 
-  const envDir = () => String(process.env.FENGYU_PLUGINS_DIR || '').trim()
+  const envDir = () => String(process.env.NIANFENG_PLUGINS_DIR || '').trim()
   const configuredDir = () => String(settings.get()?.plugins?.dir || '').trim()
   const defaultExternalDir = () => join(instance.info().dataDir, 'plugins')
 

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 端到端冒烟测试（Node + 极简 DOM 垫片）
  * 用法：npm run test:smoke
@@ -96,7 +101,7 @@ async function main() {
 
   section('① 启动真实后端 + 前端')
   const backend = await startTestBackend()
-  localStorage.setItem('fengyu:config', JSON.stringify({ data: { backend: { url: `${backend.url}/api` } } }))
+  localStorage.setItem('nianfeng:config', JSON.stringify({ data: { backend: { url: `${backend.url}/api` } } }))
 
   const { boot } = await import('../src/main.mjs')
   const { app, ctx, loader } = await boot()
@@ -151,6 +156,23 @@ async function main() {
     ctx.inject('settings-container').list().map(pageItem => pageItem.id).join(','),
   )
 
+  const smokeManager = ctx.inject('plugin-manager')
+  check(
+    '插件设置面板扩展点已注册（微信clawbot 有设置面板）',
+    typeof smokeManager.registerSettings === 'function' && typeof smokeManager.openSettings === 'function' && smokeManager.hasSettings('wechat-clawbot'),
+    typeof smokeManager.registerSettings,
+  )
+
+  const smokeSessions = ctx.inject('session-service')
+  const hiddenConversation = smokeSessions.create({ name: '隐藏渠道会话冒烟', meta: { hiddenFromSessionList: true } })
+  await sleep(80)
+  check(
+    '渠道隐藏会话不出现在普通会话列表',
+    !document.getElementById('convList')?.textContent?.includes('隐藏渠道会话冒烟'),
+  )
+  smokeSessions.remove(hiddenConversation.id)
+  await sleep(40)
+
   const diagnostics = document.getElementById('wind-diag')
   check('诊断元素存在', !!diagnostics)
   check('诊断 error 为空', diagnostics?.dataset.errors === '[]', diagnostics?.dataset.errors)
@@ -196,6 +218,54 @@ async function main() {
   )
   const removeRes = await fetch(`${backend.url}/api/plugins/external/smoke-external`, { method: 'DELETE' })
   check('外部插件删除接口生效', removeRes.ok, `HTTP ${removeRes.status}`)
+
+  // depends 版本不匹配：加载前标记未激活并进入 selfCheck 警告，而不是悄悄按旧版本启动。
+  const providerDir = join(externalRoot, 'views', 'smoke-dep-provider')
+  const versionDir = join(externalRoot, 'views', 'smoke-version')
+  await mkdir(providerDir, { recursive: true })
+  await mkdir(versionDir, { recursive: true })
+  const providerFile = join(providerDir, 'index.mjs')
+  const versionFile = join(versionDir, 'index.mjs')
+  await writeFile(
+    providerFile,
+    [
+      "export const name = 'smoke-dep-provider'",
+      "export const version = '1.0.0'",
+      "export const displayName = '版本依赖提供者'",
+      "export const provides = [{ name: 'bubble-default', type: 'singleton' }]",
+      'export function apply(ctx) { ctx.provide("bubble-default", { name: "smoke-dep-provider" }) }',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  await writeFile(
+    versionFile,
+    [
+      "export const name = 'smoke-version'",
+      "export const version = '1.0.0'",
+      "export const displayName = '版本不匹配插件'",
+      "export const depends = { 'smoke-dep-provider': '^99.0.0' }",
+      'export function apply() {}',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  const versionApp = new App({ baseUrl: new URL('../', import.meta.url) })
+  await versionApp.loadAll(
+    [
+      { id: 'smoke-dep-provider', version: '1.0.0', displayName: '版本依赖提供者', path: pathToFileURL(providerFile).href, external: true },
+      { id: 'smoke-version', version: '1.0.0', displayName: '版本不匹配插件', path: pathToFileURL(versionFile).href, external: true },
+    ],
+    {},
+  )
+  const versionRecord = versionApp.records.get('smoke-version')
+  const versionIssues = versionApp.selfCheck()
+  check(
+    '插件 depends 版本不匹配被标记警告',
+    versionRecord?.status === 'active' &&
+      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
+    `${versionRecord?.status} · ${(versionIssues.find(issue => issue.id === 'smoke-version')?.message || '')}`,
+  )
   await fetch(`${backend.url}/api/plugins/dirs`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -264,13 +334,13 @@ async function main() {
   const config = ctx.inject('config')
   const scrollEl = document.getElementById('msgScroll')
   const scrollHtml = () => String(scrollEl?.innerHTML || '')
-  check('用户消息头像默认使用风语 logo', scrollHtml().includes('public/assets/logo.png'))
+  check('用户消息头像默认使用念风 logo', scrollHtml().includes('public/assets/logo.png'))
   config.set('ui.avatarImage', 'data:image/png;base64,SMOKE')
   await sleep(80)
   check('更换头像后消息头像同步更新', scrollHtml().includes('data:image/png;base64,SMOKE'))
   config.set('ui.avatarImage', '')
   await sleep(80)
-  check('清除头像后恢复风语 logo', scrollHtml().includes('public/assets/logo.png'))
+  check('清除头像后恢复念风 logo', scrollHtml().includes('public/assets/logo.png'))
 
   const i18n = ctx.inject('i18n')
   const localePacks = i18n.locales()
@@ -318,8 +388,13 @@ async function main() {
   check('渠道列表渲染出分组', document.querySelectorAll('#groupsContainer .group').length >= 1)
 
   const channelRegistry = ctx.inject('channel-registry')
-  check('未实现渠道路径被明确标注', channelRegistry.plannedList().length >= 3, channelRegistry.plannedList().map(p => p.type).join(','))
-  check('没有注册任何"假渠道类型"', channelRegistry.typeList().length === 0, channelRegistry.typeList().map(t => t.id).join(','))
+  const plannedTypes = channelRegistry.plannedList().map(p => p.type)
+  const registeredTypes = channelRegistry.typeList().map(t => t.id)
+  check('未实现渠道路径被明确标注 discord/email', plannedTypes.includes('discord') && plannedTypes.includes('email') && !plannedTypes.includes('wechat'), plannedTypes.join(','))
+  check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot') && registeredTypes.every(id => id === 'wechat-clawbot'), registeredTypes.join(','))
+  const clawbotType = channelRegistry.type('wechat-clawbot')
+  check('微信clawbot 提供自定义添加窗口', typeof clawbotType?.create === 'function')
+  check('微信clawbot 提供自定义渠道详情', typeof clawbotType?.detail === 'function')
   const group = channelRegistry.groups('private')[0]
   const channel = channelRegistry.addChannel('private', group.id, { type: 'custom', name: '测试渠道' })
   channelRegistry.activate('private', channel.id)
@@ -477,7 +552,7 @@ async function main() {
   const pageErrors = []
   for (const page of pages) {
     settingsContainer.open(page.id)
-    await sleep(20)
+    await sleep(50)
     const content = document.querySelector('#settingsContent') || document.querySelector('.settings-content')
     const html = content?.innerHTML || ''
     if (html.length < 80) pageErrors.push(`${page.id} 内容为空`)
@@ -507,7 +582,7 @@ async function main() {
   settingsContainer.open('model')
   await sleep(80)
   const modelContent = document.querySelector('.settings-content')
-  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用风语内置模型'))
+  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用念风内置模型'))
   const builtinToggle = document.querySelector('.settings-content [data-action="toggle-builtin"]')
   check('内置模型开关默认开启', !!builtinToggle && builtinToggle.classList.contains('on'))
   check('当前生效有模型选择按钮', !!document.querySelector('.settings-content [data-active-model]'))

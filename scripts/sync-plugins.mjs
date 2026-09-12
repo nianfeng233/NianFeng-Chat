@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 扫描 plugins/ 目录，生成 plugins/registry.mjs
  *
@@ -60,7 +65,11 @@ for (const file of files) {
   })
 }
 
-const body = `/**
+const body = `/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ *
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *

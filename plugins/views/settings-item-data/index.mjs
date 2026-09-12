@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 设置项 · 数据（真实版）
  *   - 数据目录：可在设置里选择（Windows 文件夹对话框）/ 手动填写 / 恢复默认
@@ -8,7 +13,7 @@ export const name = 'settings-item-data'
 export const version = '3.0.0'
 export const displayName = '设置项 · 数据'
 export const description = '设置页 · 数据目录选择与本地数据操作。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💾'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0' }
@@ -90,7 +95,7 @@ export function apply(ctx) {
           ))}
           ${
             online && !supportsDataDir()
-              ? '<div class="settings-note data-warn">检测到正在运行的后端没有「数据目录」能力：这是个旧进程。请完全关闭风语后重新运行 start.cmd 或 npm start。</div>'
+              ? '<div class="settings-note data-warn">检测到正在运行的后端没有「数据目录」能力：这是个旧进程。请完全关闭念风后重新运行 start.cmd 或 npm start。</div>'
               : online
                 ? ''
                 : '<div class="settings-note data-warn">本地后端未连接：数据目录暂时无法读取或切换。</div>'
@@ -196,12 +201,12 @@ export function apply(ctx) {
           exportService.exportAll(format)
           return
         }
-        const data = { version: '0.40.0', exportedAt: new Date().toISOString(), ...storage.exportAll() }
+        const data = { version: '0.42.0', exportedAt: new Date().toISOString(), ...storage.exportAll() }
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `fengyu-export-${Date.now()}.json`
+        a.download = `nianfeng-export-${Date.now()}.json`
         a.click()
         URL.revokeObjectURL(url)
         toast.success('已导出为 JSON')

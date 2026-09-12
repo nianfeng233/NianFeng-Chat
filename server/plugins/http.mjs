@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端 · http
  * 真实的 HTTP API（JSON + SSE 流式）+ 可选的 WebUI 静态托管。
@@ -69,8 +74,8 @@ export function apply(ctx, config = {}) {
   }
   const requestTokens = (req, url) => ({
     query: url.searchParams.get('token') || '',
-    cookie: cookieValue(req, 'fengyu_token') || '',
-    header: String(req.headers['x-fengyu-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
+    cookie: cookieValue(req, 'nianfeng_token') || '',
+    header: String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
   })
   const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version'
   const sendAuthPage = res => {
@@ -133,7 +138,9 @@ export function apply(ctx, config = {}) {
           .replace(/\//g, '\\/') +
         '$',
     )
-    routes.push({ method, regex, keys, handler })
+    const entry = { method, regex, keys, handler }
+    routes.push(entry)
+    return entry
   }
 
   const match = (method, pathname) => {
@@ -156,6 +163,35 @@ export function apply(ctx, config = {}) {
     return null
   }
 
+  /**
+   * 后端插件通用 HTTP 扩展点：
+   * 渠道 bridge.mjs 等后端插件可以注册自己的 /api/... 路由，无需修改本文件。
+   *   const dispose = ctx.httpApi.route('GET', '/api/my-channel/status', handler)
+   * handler(req, res, params, url)，返回值忽略；抛出的错误会按 err.status 返回。
+   */
+  const extraCapabilities = new Set()
+  const register = route
+  const httpApi = {
+    route: (method, pattern, handler) => {
+      const entry = register(method, pattern, handler)
+      return () => {
+        const index = routes.indexOf(entry)
+        if (index >= 0) routes.splice(index, 1)
+      }
+    },
+    readBody,
+    sendJson,
+    sendError,
+    sse,
+    registerCapability(name) {
+      const key = String(name || '').trim()
+      if (!key) return () => {}
+      extraCapabilities.add(key)
+      return () => extraCapabilities.delete(key)
+    },
+    capabilities: () => [...extraCapabilities],
+  }
+
   /* ---------------- 基础 ---------------- */
 
   route('GET', '/api/health', async (req, res) => {
@@ -167,7 +203,11 @@ export function apply(ctx, config = {}) {
       uptime: Date.now() - startedAt,
       time: new Date().toISOString(),
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
-      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart'],
+        capabilities: [
+          'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
+          'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'plugin-http-routes',
+          ...extraCapabilities,
+        ],
       dataDir: settings.dataDir,
       configFile: settings.file,
       providers: providerList.map(p => ({ id: p.id, type: p.type, configured: p.configured, status: p.status, models: p.models.length })),
@@ -184,7 +224,7 @@ export function apply(ctx, config = {}) {
   /** 重启：由宿主/启动脚本接管；桌面版请在设置页走 windHost.restart() */
   route('POST', '/api/system/restart', async (req, res) => {
     if (!onRestart) return sendError(res, 501, '当前运行方式不支持自动重启，请手动关闭后重新启动')
-    sendJson(res, 200, { ok: true, message: '正在重启风语…' })
+    sendJson(res, 200, { ok: true, message: '正在重启念风…' })
     setTimeout(() => {
       try {
         onRestart()
@@ -423,7 +463,7 @@ export function apply(ctx, config = {}) {
     if (!/^https?:\/\//i.test(target)) return sendError(res, 400, '仅支持 http(s) 地址')
     try {
       const response = await fetch(target, {
-        headers: { 'User-Agent': 'fengyu-rss/1.0', Accept: 'application/rss+xml, application/xml, text/xml, */*' },
+        headers: { 'User-Agent': 'nianfeng-rss/1.0', Accept: 'application/rss+xml, application/xml, text/xml, */*' },
         signal: AbortSignal.timeout(15000),
       })
       if (!response.ok) return sendError(res, 502, `拉取失败：HTTP ${response.status}`)
@@ -513,7 +553,7 @@ export function apply(ctx, config = {}) {
         const wantsHtml = String(req.headers.accept || '').includes('text/html')
         if (tokens.query === accessToken && tokens.cookie !== accessToken && req.method === 'GET' && wantsHtml) {
           res.writeHead(302, {
-            'Set-Cookie': `fengyu_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+            'Set-Cookie': `nianfeng_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
             Location: pathname || '/',
           })
           res.end()
@@ -549,7 +589,7 @@ export function apply(ctx, config = {}) {
       if (await serveStatic(req, res, pathname)) return
 
       if (pathname === '/' || pathname === '/index.html') {
-        sendJson(res, 200, { name: '风语后端', hint: 'WebUI 由 start.mjs 启动的 5173 端口提供；或用 npm run serve 单端口部署。', api: '/api/health' })
+        sendJson(res, 200, { name: '念风后端', hint: 'WebUI 由 start.mjs 启动的 5173 端口提供；或用 npm run serve 单端口部署。', api: '/api/health' })
         return
       }
       sendError(res, 404, 'Not Found')
@@ -580,6 +620,9 @@ export function apply(ctx, config = {}) {
     routes: () => routes.map(r => `${r.method} ${r.regex.source}`),
     requests: () => [...requestLog],
   })
+
+  // 通用后端插件 HTTP 扩展点：渠道 bridge.mjs 等插件自行注册 /api/... 路由。
+  ctx.provide('httpApi', httpApi)
 
   ctx.effect(
     () => () =>

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F7 · modal-host
  * 弹窗宿主。所有插件共用同一个遮罩与动效，避免各写各的。
@@ -6,7 +11,7 @@ export const name = 'modal-host'
 export const version = '1.0.0'
 export const displayName = '弹窗宿主'
 export const description = '基础服务 · 统一的模态弹窗（确认 / 输入 / 提示）。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🪟'
 export const core = true
 export const inject = ['event-bus']

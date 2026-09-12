@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * X9 · lang-zh-cn
  * 简体中文语言包（i18n 的实例插件，也是新增语种的复制模板）。
@@ -13,15 +18,15 @@ export const name = 'lang-zh-cn'
 export const version = '1.0.0'
 export const displayName = '语言包 · 简体中文'
 export const description = '语言包 · 内置简体中文；复制本插件目录并修改翻译表即可新增其他语种。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🀄'
 export const core = true
-export const depends = { i18n: '^1.0.0' }
+export const depends = { i18n: '^2.0.0' }
 export const inject = ['i18n']
 export const provides = []
 
 export const MESSAGES = {
-  'app.name': '风语',
+  'app.name': '念风',
   'app.slogan': '本地优先的 AI 聊天客户端',
   'view.chat': '会话',
   'view.channel': '渠道',

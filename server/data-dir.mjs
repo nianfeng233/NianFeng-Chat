@@ -1,10 +1,15 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 实例数据目录解析（库，不是插件）。
  *
  * 三层优先级：
- *   1. 环境变量 FENGYU_DATA_DIR
+ *   1. 环境变量 NIANFENG_DATA_DIR
  *   2. 本部署自己的 user_data/instance.json（首次解析后会写入并固定下来）
- *   3. 本机 AppData 里的 fengyu/instance.json（跨部署共享的“当前数据目录”指针）
+ *   3. 本机 AppData 里的 nianfeng/instance.json（跨部署共享的“当前数据目录”指针）
  *   4. 默认 <root>/user_data（首次会迁移旧 data/ 里的数据）
  *
  * 关键约定：AppData 只在“本部署还没有自己的数据目录记录”时读取一次；
@@ -26,8 +31,17 @@ async function exists(path) {
   }
 }
 
-/** 本机共享的应用配置目录（Windows: %APPDATA%/fengyu） */
+/** 本机共享的应用配置目录（Windows: %APPDATA%/nianfeng） */
 export function appConfigDir() {
+  const appDir = process.env.NIANFENG_APP_DIR || process.env.FENGYU_APP_DIR
+  if (appDir) return resolve(appDir)
+  if (process.platform === 'win32' && process.env.APPDATA) return join(process.env.APPDATA, 'nianfeng')
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'nianfeng')
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'nianfeng')
+}
+
+/** 旧品牌目录（仅用于一次性读取指针 / 迁移，不写入） */
+export function legacyAppConfigDir() {
   if (process.env.FENGYU_APP_DIR) return resolve(process.env.FENGYU_APP_DIR)
   if (process.platform === 'win32' && process.env.APPDATA) return join(process.env.APPDATA, 'fengyu')
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'fengyu')
@@ -65,7 +79,19 @@ export async function writeAppPointer(dataDir) {
 }
 
 export async function readAppPointer() {
-  return readInstanceFile(join(appConfigDir(), 'instance.json'))
+  const current = await readInstanceFile(join(appConfigDir(), 'instance.json'))
+  if (current) return current
+  // 兼容旧版本目录：只读一次并迁移为念风指针，避免升级后丢历史数据目录。
+  try {
+    const legacy = await readInstanceFile(join(legacyAppConfigDir(), 'instance.json'))
+    if (legacy?.dataDir) {
+      await writeAppPointer(legacy.dataDir).catch(() => {})
+      return legacy
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null
 }
 
 async function copyLegacy(legacyDir, homeDir) {
@@ -91,9 +117,10 @@ async function copyLegacy(legacyDir, homeDir) {
  */
 export async function resolveDataDir(root, { legacyDirName = 'data' } = {}) {
   const resolvedRoot = resolve(root)
-  // FENGYU_HOME_DIR 允许宿主（例如桌面 exe）把「本部署的数据目录指针」放到
+  // NIANFENG_HOME_DIR 允许宿主（例如桌面 exe）把「本部署的数据目录指针」放到
   // 独立、持久的目录中，同时仍复用 AppData 首次引导逻辑。
-  const homeRoot = process.env.FENGYU_HOME_DIR ? resolve(process.env.FENGYU_HOME_DIR) : resolvedRoot
+  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
+  const homeRoot = homeEnv ? resolve(homeEnv) : resolvedRoot
   const homeDir = join(homeRoot, DEFAULT_DIR_NAME)
   const instanceFile = join(homeDir, 'instance.json')
   const legacyDir = join(resolvedRoot, legacyDirName)
@@ -101,7 +128,7 @@ export async function resolveDataDir(root, { legacyDirName = 'data' } = {}) {
   const appInstanceFile = join(appDir, 'instance.json')
   await mkdir(homeDir, { recursive: true })
 
-  const envOverride = String(process.env.FENGYU_DATA_DIR || '').trim()
+  const envOverride = String(process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || '').trim()
   const localPointer = await readInstanceFile(instanceFile)
   const appPointer = await readAppPointer()
   const homeHasData = (await exists(join(homeDir, 'config.json'))) || (await exists(join(homeDir, 'sessions.json')))

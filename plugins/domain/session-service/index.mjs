@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D1 · session-service
  * 会话 CRUD、当前激活会话、上下文组装（文档 §6.2）。
@@ -11,7 +16,7 @@ export const name = 'session-service'
 export const version = '2.0.0'
 export const displayName = '会话服务'
 export const description = '业务服务 · 会话管理、上下文组装、后端持久化与离线降级。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💬'
 export const core = true
 export const depends = { storage: '^1.0.0', config: '^1.0.0' }
@@ -32,6 +37,9 @@ export function apply(ctx) {
 
   let data = storage.get(NS, KEY, null)
   if (!data || !Array.isArray(data.conversations)) data = { conversations: [], activeId: null }
+  // 删除墓碑：删除请求没来得及写回后端就退出程序时，下次启动用它
+  // 防止后端的旧会话把本地已删除的会话“复活”。
+  if (!Array.isArray(data.removedIds)) data.removedIds = []
   // 「启动时恢复上次状态」关闭时，启动后不自动选中上次的会话
   if (!config.get('general.restore', true)) data.activeId = null
 
@@ -43,6 +51,44 @@ export function apply(ctx) {
   const persistLocal = () => storage.set(NS, KEY, data)
   const randomId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
   const find = id => data.conversations.find(c => c.id === id) || null
+  const conversationRank = conv => [
+    Number(conv?.updatedAt || conv?.createdAt || 0) || 0,
+    Array.isArray(conv?.messages) ? conv.messages.length : 0,
+  ]
+  /** 判断 a 是否比 b 新（时间相同则消息更多的更新，全部相同则不算更新） */
+  const isNewerConversation = (a, b) => {
+    const [at, am] = conversationRank(a)
+    const [bt, bm] = conversationRank(b)
+    return at > bt || (at === bt && am > bm)
+  }
+
+  /**
+   * 后端会话与本地会话合并：
+   *   - 删除墓碑中的 id 不参与合并（避免已删除会话复活）
+   *   - 同一 id 取 updatedAt 更新 / 消息更多的一份
+   *   - 本地独有的会话保留，等待写回后端
+   */
+  const mergeServerConversations = (serverList = []) => {
+    const all = (serverList || []).filter(conv => conv?.id)
+    const tombstones = new Set(data.removedIds || [])
+    const serverById = new Map(all.map(conv => [conv.id, conv]))
+    const serverKept = all.filter(conv => !tombstones.has(conv.id))
+    const localKept = data.conversations.filter(conv => !tombstones.has(conv.id))
+    const merged = new Map()
+    for (const localConv of localKept) {
+      const remote = serverById.get(localConv.id)
+      merged.set(localConv.id, !remote || isNewerConversation(localConv, remote) ? localConv : remote)
+    }
+    for (const remote of serverKept) if (!merged.has(remote.id)) merged.set(remote.id, remote)
+    const conversations = [...merged.values()].sort(
+      (a, b) => Number(b?.updatedAt || b?.createdAt || 0) - Number(a?.updatedAt || a?.createdAt || 0),
+    )
+    return {
+      conversations,
+      serverById,
+      removedIds: [...tombstones].filter(id => serverById.has(id)),
+    }
+  }
 
   const service = {
     name: 'session-service',
@@ -57,6 +103,7 @@ export function apply(ctx) {
       const index = data.conversations.findIndex(c => c.id === conversation.id)
       if (index >= 0) data.conversations[index] = conversation
       else data.conversations.unshift(conversation)
+      data.removedIds = (data.removedIds || []).filter(removedId => removedId !== conversation.id)
       persistLocal()
       ctx.emit('conversation:update', conversation)
       if (activate) service.activate(conversation.id)
@@ -69,17 +116,27 @@ export function apply(ctx) {
       syncing = true
       try {
         const payload = await api.sessions()
-        const server = payload.conversations || []
-        data = {
-          conversations: server,
-          activeId: server.some(c => c.id === data.activeId) ? data.activeId : server[0]?.id || null,
-        }
+        const server = (payload.conversations || []).filter(conv => conv?.id)
+        const { conversations, serverById, removedIds } = mergeServerConversations(server)
+        const activeId = conversations.some(conv => conv.id === data.activeId) ? data.activeId : conversations[0]?.id || null
+        data = { conversations, activeId, removedIds }
         persistLocal()
+
+        // 手动同步同样只推差异，不丢弃本地独有的新会话 / 未写回修改。
+        const queue = []
+        for (const conv of conversations) {
+          const remote = serverById.get(conv.id)
+          if (!remote) queue.push(api.createSession(conv))
+          else if (isNewerConversation(conv, remote)) queue.push(api.saveSession(conv))
+        }
+        for (const id of removedIds) queue.push(api.deleteSession(id))
+        if (queue.length) await Promise.allSettled(queue)
+
         source = 'server'
         lastSyncError = ''
-        ctx.emit('sessions:synced', { source, count: server.length })
-        ctx.emit('conversation:sync', { conversations: server })
-        return { ok: true, count: server.length }
+        ctx.emit('sessions:synced', { source, count: conversations.length })
+        ctx.emit('conversation:sync', { conversations })
+        return { ok: true, count: conversations.length }
       } catch (err) {
         source = 'local'
         lastSyncError = err.message
@@ -139,6 +196,7 @@ export function apply(ctx) {
         meta: partial.meta || {},
       }
       data.conversations.unshift(conv)
+      data.removedIds = data.removedIds.filter(removedId => removedId !== conv.id)
       persistLocal()
       service.pushCreate(conv)
       ctx.emit('conversation:create', conv)
@@ -153,6 +211,7 @@ export function apply(ctx) {
       const pending = pushTimers.get(id)
       if (pending?.timer) clearTimeout(pending.timer)
       pushTimers.delete(id)
+      data.removedIds = [...new Set([...(data.removedIds || []), id])].slice(-500)
       persistLocal()
       if (source === 'server' && api) api.deleteSession(id).catch(err => ctx.logger.warn(`删除后端会话失败：${err.message}`))
       ctx.emit('conversation:delete', { id, conversation: conv })
@@ -205,8 +264,10 @@ export function apply(ctx) {
       const message = service.message(id, messageId)
       if (!message) return null
       Object.assign(message, patch)
+      const conv = find(id)
+      if (conv) conv.updatedAt = Date.now()
       persistLocal()
-      service.push(find(id))
+      service.push(conv)
       return message
     },
 
@@ -216,6 +277,7 @@ export function apply(ctx) {
       const index = conv.messages.findIndex(msg => msg.id === messageId)
       if (index < 0) return false
       conv.messages.splice(index, 1)
+      conv.updatedAt = Date.now()
       persistLocal()
       service.push(conv)
       return true
@@ -225,6 +287,7 @@ export function apply(ctx) {
       const conv = find(id)
       if (!conv) return
       conv.messages = []
+      conv.updatedAt = Date.now()
       persistLocal()
       service.push(conv)
       ctx.emit('conversation:update', conv)
@@ -260,7 +323,7 @@ export function apply(ctx) {
     },
 
     reset() {
-      data = { conversations: [], activeId: null }
+      data = { conversations: [], activeId: null, removedIds: [] }
       storage.remove(NS, KEY)
       ctx.emit('conversation:reset', null)
       ctx.emit('conversation:sync', { conversations: [] })
@@ -288,27 +351,31 @@ export function apply(ctx) {
     const boot = async () => {
       try {
         const payload = await api.sessions()
-        const server = payload.conversations || []
+        const server = (payload.conversations || []).filter(conv => conv?.id)
+        const { conversations, serverById, removedIds } = mergeServerConversations(server)
         const restoreLast = config.get('general.restore', true)
-        if (server.length === 0 && data.conversations.length) {
-          for (const conv of data.conversations) {
-            await api.createSession(conv).catch(() => {})
-          }
-          if (!restoreLast) data.activeId = null
-          persistLocal()
-          ctx.logger.info(`已把 ${data.conversations.length} 个本地会话迁移到后端`)
-        } else if (server.length) {
-          data = {
-            conversations: server,
-            activeId: restoreLast ? (server.some(c => c.id === data.activeId) ? data.activeId : server[0]?.id || null) : null,
-          }
-          persistLocal()
-          ctx.emit('conversation:sync', { conversations: server })
+        const activeId = restoreLast
+          ? conversations.some(conv => conv.id === data.activeId)
+            ? data.activeId
+            : conversations[0]?.id || null
+          : null
+        data = { conversations, activeId, removedIds }
+        persistLocal()
+        ctx.emit('conversation:sync', { conversations })
+
+        const queue = []
+        for (const conv of conversations) {
+          const remote = serverById.get(conv.id)
+          if (!remote) queue.push(api.createSession(conv))
+          else if (isNewerConversation(conv, remote)) queue.push(api.saveSession(conv))
         }
+        for (const id of removedIds) queue.push(api.deleteSession(id))
+        if (queue.length) await Promise.allSettled(queue)
+
         source = 'server'
         lastSyncError = ''
         ctx.emit('sessions:source', service.status())
-        ctx.logger.info(`会话已与后端同步（${server.length} 个）`)
+        ctx.logger.info(`会话已与后端同步（${server.length} 个，合并后 ${conversations.length} 个）`)
       } catch (err) {
         source = 'local'
         lastSyncError = err.message

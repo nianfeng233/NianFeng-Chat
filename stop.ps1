@@ -1,4 +1,7 @@
-﻿# 关闭占用风语端口（默认 5173 / 8788）的进程。
+# 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+# 项目全称：念风 Chat（NianFeng-Chat）
+# 仓库：https://github.com/nianfeng233/NianFeng-Chat
+# 关闭占用念风端口（默认 5173 / 8788）的进程。
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File stop.ps1
 #   powershell -ExecutionPolicy Bypass -File stop.ps1 -Ports 5173,8788,18099

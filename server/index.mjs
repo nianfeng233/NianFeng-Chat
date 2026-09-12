@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 后端启动器：用真实 cordis 组装后端插件。
  *
@@ -5,7 +10,7 @@
  *   startBackend({ staticDir: 'dist' })   # 后端同时托管 WebUI（单端口部署）
  */
 import { Context } from 'cordis'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 
@@ -21,12 +26,55 @@ import * as httpPlugin from './plugins/http.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
+/**
+ * 通用渠道后端桥加载器：
+ *   - 内置渠道：扫描 plugins/channels/<name>/bridge.mjs
+ *   - 外部渠道：扫描数据目录 / 环境变量插件目录里的 bridge.mjs
+ * 渠道 bridge 是普通 Node cordis 插件，可以 inject httpApi / settings / hub 等，
+ * 自行注册自己的 /api/<channel>/... 路由，因此后续新增渠道插件无需改 server/index.mjs。
+ *
+ * 安全提示：外部插件的 bridge.mjs 是后端 Node 代码，权限大于前端插件；只加载可信插件。
+ */
+async function collectBridgeFiles(root, depth = 0, out = []) {
+  if (!root || depth > 5) return out
+  let entries = []
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch (_) {
+    return out
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'release' || entry.name === 'target') continue
+    const full = join(root, entry.name)
+    if (entry.isDirectory()) await collectBridgeFiles(full, depth + 1, out)
+    else if (entry.isFile() && entry.name === 'bridge.mjs') out.push(full)
+  }
+  return out
+}
+
+async function loadChannelBridges(roots, ctx) {
+  const seen = new Set()
+  for (const root of roots) {
+    const files = (await collectBridgeFiles(root)).sort()
+    for (const file of files) {
+      if (seen.has(file)) continue
+      seen.add(file)
+      try {
+        const mod = await import(pathToFileURL(file).href + `?v=${Date.now()}`)
+        if (typeof mod.apply === 'function') ctx.plugin(mod, {})
+      } catch (err) {
+        console.warn(`[channel-bridge] 加载 ${file} 失败：${err?.message || err}`)
+      }
+    }
+  }
+}
+
 export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel, accessToken = '', onRestart = null } = {}) {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
   const ctx = new Context()
 
   ctx.provide('info', {
-    name: '风语后端',
+    name: '念风chat 后端',
     version: pkg.version,
     node: process.version,
     startedAt: Date.now(),
@@ -77,6 +125,17 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
   await Promise.all([ctx.sessions.ready(), ctx.settings?.ready?.()])
   paths.dataDir = ctx.instance?.info?.().dataDir || paths.dataDir
 
+  // HTTP 服务已就绪、httpApi 已 provide 后，再自动加载渠道后端桥（无需逐个写进本文件）。
+  // 外部插件目录优先级：环境变量 > 设置页配置 > 默认 <数据目录>/plugins。
+  const configuredPluginDir = String(ctx.settings?.get?.()?.plugins?.dir || '').trim()
+  const externalPluginDir =
+    process.env.NIANFENG_PLUGINS_DIR ||
+    process.env.FENGYU_PLUGINS_DIR ||
+    configuredPluginDir ||
+    join(paths.dataDir || dataDir || join(ROOT, 'user_data'), 'plugins')
+  await loadChannelBridges([join(ROOT, 'plugins', 'channels'), externalPluginDir], ctx)
+  await new Promise(resolve => setTimeout(resolve, 0))
+
   return {
     ctx,
     port: info.port,
@@ -111,7 +170,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
 // 直接运行：node server/index.mjs
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // WebUI 监听与访问令牌来自当前数据目录的 config.json（明文 network 段）。
-  // 桌面壳会把 FENGYU_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
+  // 桌面壳会把 NIANFENG_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
   // 交给 Rust 在创建 WebView 时带 ?token= 打开，避免启用 token 后桌面白屏。
   const resolved = await resolveDataDir(ROOT)
   let network = {}
@@ -120,13 +179,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } catch (_) {
     network = {}
   }
-  const accessToken = String(process.env.FENGYU_WEBUI_TOKEN ?? network.webuiToken ?? '').trim()
-  const host = String(process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
+  const accessToken = String(process.env.NIANFENG_WEBUI_TOKEN || process.env.FENGYU_WEBUI_TOKEN || network.webuiToken || '').trim()
+  const host = String(process.env.NIANFENG_WEBUI_HOST || process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
   const configuredPort = Number(network.webuiPort) > 0 ? Number(network.webuiPort) : 0
   const port = configuredPort || Number(process.env.PORT || 8788)
   await ensurePortsFree([port], { autoStop: true, log: console })
-  if (process.env.FENGYU_HOME_DIR) {
-    const tokenFile = join(resolve(process.env.FENGYU_HOME_DIR), '.webui-token')
+  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
+  if (homeEnv) {
+    const tokenFile = join(resolve(homeEnv), '.webui-token')
     try {
       if (accessToken) await writeFile(tokenFile, accessToken, 'utf8')
       else await rm(tokenFile, { force: true })
@@ -138,26 +198,26 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const backend = await startBackend({
     port,
     host,
-    staticDir: process.env.FENGYU_STATIC_DIR || undefined,
-    dataDir: process.env.FENGYU_DATA_DIR || undefined,
+    staticDir: process.env.NIANFENG_STATIC_DIR || process.env.FENGYU_STATIC_DIR || undefined,
+    dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     accessToken,
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)
-  console.log(`  │  风语后端 · cordis v4                        │`)
+  console.log(`  │  念风chat 后端 · cordis v4                        │`)
   console.log(`  │  ${backend.url.padEnd(44, ' ')} │`)
   console.log(`  └──────────────────────────────────────────────┘`)
   console.log(`  数据目录：${backend.dataDir}`)
-  if (process.env.FENGYU_HOME_DIR) {
+  if (homeEnv) {
     try {
-      await writeFile(join(resolve(process.env.FENGYU_HOME_DIR), '.webui-port'), String(backend.port), 'utf8')
+      await writeFile(join(resolve(homeEnv), '.webui-port'), String(backend.port), 'utf8')
     } catch (_) {
       /* 端口文件仅用于桌面壳导航，写不了不影响服务 */
     }
   }
   console.log('  按 Ctrl+C 停止')
   // 桌面壳 / 部署脚本通过这一行判断服务已就绪
-  console.log(`FENGYU_READY ${backend.url}`)
+  console.log(`NIANFENG_READY ${backend.url}`)
   const shutdown = async () => {
     console.log('\n正在关闭…')
     await backend.close()

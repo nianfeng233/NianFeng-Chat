@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * X8 · markdown-enhancer
  * 增强 Markdown：提供 markdown 服务，气泡实现按需调用。
@@ -8,7 +13,7 @@ export const name = 'markdown-enhancer'
 export const version = '1.0.0'
 export const displayName = 'Markdown 增强'
 export const description = '可选扩展 · 为气泡提供 Markdown 渲染服务。'
-export const author = '风语社区'
+export const author = '念风社区'
 export const icon = '📝'
 export const core = false
 export const enabled = true

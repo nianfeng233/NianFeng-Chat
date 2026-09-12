@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * S5 · bg-image
  * 可选中背景：使用用户在「外观 → 背景」上传的图片（压缩后保存在本机 config）。
@@ -6,7 +11,7 @@ export const name = 'bg-image'
 export const version = '1.0.0'
 export const displayName = '自定义背景图'
 export const description = '可选中背景 · 用户上传的图片，自动压缩后保存在本机。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🖼️'
 export const core = false
 export const depends = { 'bg-provider': '^1.0.0' }

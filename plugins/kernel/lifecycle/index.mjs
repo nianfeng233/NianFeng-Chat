@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * K4 · lifecycle
  * 统一的生命周期钩子：setup（apply）/ start / stop / dispose。
@@ -7,7 +12,7 @@ export const name = 'lifecycle'
 export const version = '1.0.0'
 export const displayName = '生命周期'
 export const description = '内核层 · 提供 setup / start / stop / dispose 钩子与阶段统计。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '♻️'
 export const core = true
 export const inject = ['event-bus']

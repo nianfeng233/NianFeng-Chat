@@ -1,3 +1,8 @@
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
 # 版本管理与发布规范（RELEASING）
 
 > 面向后续维护者与新会话的“单一事实来源”。任何发布动作都必须走本文件描述的流程；
@@ -12,7 +17,7 @@
    禁止在发布工作树里手工改代码（下次同步会被覆盖）。
 3. **发布产物与源码分离**：
    * Git 仓库只放纯净源码（约 2 MB），不放 `node.exe`、`exe`、`node_modules`、`user_data` 等；
-   * 预编译产物（`风语.exe`、Web 部署包）通过 GitHub Releases 附件分发。
+   * 预编译产物（`念风Chat.exe`、Web 部署包）通过 GitHub Releases 附件分发。
 4. **发布前必须过安全门禁**：`scripts/prepare-publish.mjs` 会扫描用户名、本机绝对路径、API Key、
    私钥、邮箱、手机号、身份证号、`user_data` 等；扫描不通过直接中止。
 5. **可复现**：任何一个 tag 都必须能由对应源码重新执行 `npm run build:release` 生成两个发布版。
@@ -27,16 +32,16 @@
 | `release/web/source/` | 打包脚本生成的纯净 Web 源码 | 否（构建产物） |
 | `release/web/deploy/` | Web 可部署版（含便携 Node） | 否（作为 Release 附件） |
 | `release/desktop/source/` | 桌面壳源码 + 运行时 app | 否（构建产物） |
-| `release/desktop/deploy/风语.exe` | Windows 桌面单文件 | 否（作为 Release 附件） |
+| `release/desktop/deploy/念风Chat.exe` | Windows 桌面单文件 | 否（作为 Release 附件） |
 | `release/publish/` | **GitHub 发布仓库工作树**，内容 = `release/web/source` 的纯净副本 | 是（发布仓库，独立 `.git`） |
-| `release/*.zip`、`release/fengyu-desktop-*.exe` | Release 附件 | 否 |
+| `release/*.zip`、`release/nianfeng-desktop-*.exe` | Release 附件 | 否 |
 
 > `release/publish` 不参与 `npm run build:release` 的清理（打包只删除 `release/web` 与 `release/desktop`），
 > 因此可以安全地作为发布仓库长期存在。
 
 当前 GitHub 发布仓库：
 
-* `https://github.com/nianfeng233/fengyu-chat`（public，Apache-2.0）
+* `https://github.com/nianfeng233/NianFeng-Chat`（public，Apache-2.0）
 
 ---
 
@@ -89,7 +94,7 @@ feat: 外部插件目录与热扫描
 fix: exe 系统通知头像缺失
 docs: 重写 README 与发布规范
 chore: 升级 cordis
-release: 风语 v0.41.0
+release: 念风 v0.41.0
 ```
 
 ---
@@ -103,7 +108,7 @@ release: 风语 v0.41.0
 # 1. 全量测试（模块检查 / 后端 / 前端端到端 / 对话 / 工具 / 厂商协议）
 npm test
 
-# 2. 生成两个发布版（Web 源码 + Web 部署 + 桌面源码 + 风语.exe）
+# 2. 生成两个发布版（Web 源码 + Web 部署 + 桌面源码 + 念风Chat.exe）
 npm run build:release
 
 # 3. 同步到发布工作树并强制安全扫描
@@ -111,7 +116,7 @@ node scripts/prepare-publish.mjs
 #    输出文件数与内容 SHA-256；如发现敏感内容会列出并退出
 
 # 4. 一键提交 / 打 tag / 推送 / 创建 Release（含附件）
-node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md --assets "release/fengyu-desktop-v0.41.0.exe,release/fengyu-web-deploy-v0.41.0.zip,release/fengyu-web-source-v0.41.0.zip"
+node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md --assets "release/nianfeng-desktop-v0.41.0.exe,release/nianfeng-web-deploy-v0.41.0.zip,release/nianfeng-web-source-v0.41.0.zip"
 ```
 
 如果 `gh` 未登录：`gh auth login`（推荐）或确保 SSH / PAT 凭据已配置。
@@ -132,7 +137,7 @@ node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md 
 额外注意：
 
 * 桌面壳编译使用 `--remap-path-prefix` 把 `%USERPROFILE%\.cargo`、`%USERPROFILE%\.rustup`
-  与工作区路径映射为 `/cargo`、`/rustup`、`/workspace`；发布前仍会对 `风语.exe` 做二次字符串检查。
+  与工作区路径映射为 `/cargo`、`/rustup`、`/workspace`；发布前仍会对 `念风Chat.exe` 做二次字符串检查。
 * `.gitignore` 忽略 `release/`、`user_data/`、`data/`、`.tmp/`、`node_modules/`、`target/`。
 * 代码中不要写死任何真实姓名、邮箱、QQ/微信/手机号、机器路径或密钥；示例一律用占位符。
 

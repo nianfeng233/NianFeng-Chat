@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** notification 样式：右下角通知中心，按系统通知 / 角色消息 / 其他通知三种样式渲染 */
 export const NOTIFICATION_CSS = `
   .notify-center{

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V7 · session-list
  * 会话列表：搜索、选中/取消、右键菜单（重命名 / 删除 / 清空）、紧凑模式搜索浮层。
@@ -6,10 +11,10 @@ export const name = 'session-list'
 export const version = '1.0.0'
 export const displayName = '会话列表'
 export const description = '视觉内容 · 会话列表与搜索。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📋'
 export const core = true
-export const depends = { 'left-list-panel': '^1.0.0', 'session-service': '^1.0.0' }
+export const depends = { 'left-list-panel': '^1.0.0', 'session-service': '^2.0.0' }
 export const inject = ['slots', 'session-service', 'event-bus', 'modal', 'context-menu', 'toast', 'i18n']
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -76,6 +81,9 @@ export function apply(ctx) {
         .list()
         .slice()
         .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+        // 渠道自己的会话记录（如微信clawbot）只在「渠道详情 / 设置→聊天记录」里维护，
+        // 不再作为普通会话显示，避免同一个角色出现两个入口、收到两份消息。
+        .filter(conv => !conv.meta?.hiddenFromSessionList)
         .filter(conv => {
           if (!keyword) return true
           return conv.name.toLowerCase().includes(q) || String(conv.preview || '').toLowerCase().includes(q)

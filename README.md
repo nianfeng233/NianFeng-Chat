@@ -1,15 +1,20 @@
-# 风语 (Fengyu)
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# 念风Chat（NianFeng-Chat）
 
 [English](README.en.md) | 简体中文
 
-风语是一个本地优先的 AI 聊天客户端。前端与本地后端都运行在 cordis 之上，功能通过插件组织；
+念风Chat（NianFeng-Chat）是一个本地优先、插件化的 AI 聊天客户端。前端与本地后端都运行在 cordis 之上，功能通过插件组织；
 插件目录和数据目录都可以放在外部；同一套源码可以构建 Web 部署版和 Windows 桌面版。
 
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
 
-- 当前版本：v0.41.0
+- 当前版本：v0.42.0
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
-- 仓库：<https://github.com/nianfeng233/fengyu-chat>
+- 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
 
 ## 功能与架构
 
@@ -17,7 +22,7 @@
   kernel / foundation / domain / shell / views / features / extras 分层。
 - **本地后端**：Node.js + cordis 应用，零 Web 框架手写 HTTP / SSE；负责模型接入、会话持久化、
   文件服务等。
-- **桌面端**：Rust + WebView2 无边框容器，内嵌便携 Node 运行时，可打包为单个 `风语.exe`。
+- **桌面端**：Rust + WebView2 无边框容器，内嵌便携 Node 运行时，可打包为单个 `念风Chat.exe`。
 - **可选中服务**：主题、背景、气泡样式、模型、语言都可以注册多个实现，并在设置中切换。
 - **外部插件**：内置插件随版本发布；用户插件放在 `<数据目录>/plugins/` 或任意指定目录，
   重新扫描后加载；升级 exe 不删除外部插件目录。
@@ -25,6 +30,8 @@
 - **网络**：默认监听 `127.0.0.1`；可切换 `0.0.0.0` 并设置访问令牌，保存后按提示重启生效。
 - **通知**：系统通知、角色消息、其他通知三类；角色消息通知带角色头像与消息预览；
   支持内置音色与自定义提示音。
+- **微信clawbot 渠道**：内置第一个真实渠道插件；添加渠道时选择角色、分类（私聊/群聊/隐私）与权限，渠道详情点「接入」后用微信扫码。微信消息会进入所选角色的 clawbot 渠道并走念风完整模型链路，模型整轮调用彻底结束后才关闭微信 typing 状态。
+
 - **语言**：内置简体中文语言包插件；复制该插件目录并修改翻译表即可新增语种。
 
 ## 对话机制
@@ -51,7 +58,7 @@ npm install
 npm start
 ```
 
-启动后打开 `设置 → 模型`，关闭“使用风语内置模型”（官方服务端尚未发布，当前为空状态），
+启动后打开 `设置 → 模型`，关闭“使用念风内置模型”（官方服务端尚未发布，当前为空状态），
 添加提供商（OpenAI 兼容 / DeepSeek / Anthropic / Gemini / Ollama），填写 Base URL 与 API Key，
 获取模型列表并设置默认模型，即可开始聊天。
 
@@ -76,9 +83,9 @@ npm run sync-plugins
 ```
 
 外部插件目录（默认 `<数据目录>/plugins/`，exe 为
-`%LOCALAPPDATA%\FengyuChat\user_data\plugins\`）中的插件按以下结构放置：
+`%LOCALAPPDATA%\NianFengChat\user_data\plugins\`）中的插件按以下结构放置：
 
-```
+```text
 <外部目录>/views/my-plugin/index.mjs
 ```
 
@@ -96,10 +103,53 @@ export function apply(ctx) {
 }
 ```
 
+插件可以注册自己的配置面板，「设置 → 插件」对应条目后会出现「设置」按钮：
+
+```js
+export function apply(ctx) {
+  const manager = ctx.inject('plugin-manager')
+  ctx.effect(() => manager.registerSettings({
+    id: 'my-plugin',
+    title: '我的插件设置',
+    description: '在插件页直接完成的专属配置。',
+    render(container, { close, manager: pm }) {
+      // container.innerHTML = ...
+      return () => { /* 面板关闭时清理 */ }
+    },
+  }))
+}
+```
+
+后端渠道桥也采用同一思路：在 `plugins/channels/<name>/bridge.mjs` 里注入 `httpApi` 并注册
+自己的 `/api/<channel>/...` 路由，启动时会自动加载，不需要改 `server/index.mjs`。
+
+### 内置渠道插件：微信clawbot
+
+插件目录：`plugins/channels/wechat-clawbot/`（可单独分发，编译 exe 时会一并作为内置插件打包）。
+
+使用步骤：
+
+1. 打开「渠道」页，点击「添加渠道」，在菜单中选择 **微信clawbot**；
+2. 在渠道设置窗口里选择使用角色、渠道分类（私聊 / 群聊 / 隐私）、用户显示名 / 用户唯一标识，并按需勾选权限；
+3. 添加完成后在左侧选中该渠道，右侧详情点「接入」；使用手机微信扫描弹出的二维码；
+4. 扫码确认后渠道变为「已接入」，微信侧发来的消息会进入对应角色的 clawbot 渠道；
+5. 模型整轮调用（含工具调用与全部回复消息）结束后，微信侧的 typing 状态会自动关闭；
+6. 聊天记录可在「设置 → 聊天记录」里查看和修改；插件专属配置也可从「设置 → 插件 → 微信clawbot → 设置」打开。
+
+单独分发：
+
+```bash
+npm run build:clawbot-plugin
+```
+
+仓库内独立分发目录为 `extensions/wechat-clawbot/`；执行打包脚本会在 `release/plugins/wechat-clawbot/` 生成同样结构的分发包，并尽量生成同名 zip。插件后端桥在
+`plugins/channels/wechat-clawbot/bridge.mjs`，完整版启动时会自动加载；外部插件目录
+放置方式见下一节。
+
 ## 构建
 
 ```bash
-npm run build:release   # Web 源码 + Web 部署 + 桌面源码 + 风语.exe
+npm run build:release   # Web 源码 + Web 部署 + 桌面源码 + 念风Chat.exe
 npm run build:desktop   # 只构建桌面版
 ```
 
@@ -108,18 +158,19 @@ npm run build:desktop   # 只构建桌面版
 - `release/web/source/`：纯净 Web 源码；
 - `release/web/deploy/`：Web 可部署版（自带便携 Node）；
 - `release/desktop/source/`：桌面壳源码与运行时 app；
-- `release/desktop/deploy/风语.exe`：Windows 桌面单文件。
+- `release/desktop/deploy/念风Chat.exe`：Windows 桌面单文件。
 
-`node.exe`、`风语.exe` 与部署压缩包体积较大，作为 GitHub Release 附件分发，不进入 Git 仓库。
+`node.exe`、`念风Chat.exe` 与部署压缩包体积较大，作为 GitHub Release 附件分发，不进入 Git 仓库。
 
 ## 测试
 
 ```bash
-npm test              # 模块检查 + 后端 API + 前端端到端 + 对话 / 工具 / 厂商协议
+npm test              # 模块检查 + 后端 API + Clawbot + 前端端到端 + 对话 / 工具 / 厂商协议
 npm run test:smoke    # 前端端到端（真实后端与 SSE）
+npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 ```
 
-当前 `npm test` 通过；`scripts/smoke.mjs` 共 207 项通过。
+当前 `npm test` 通过；`scripts/smoke.mjs` 共 212 项通过。
 
 ## 版本管理与发布
 
@@ -139,7 +190,7 @@ npm run test:smoke    # 前端端到端（真实后端与 SSE）
 
 ## 目录结构
 
-```
+```text
 .
 ├── index.html
 ├── start.mjs             # 后端 + WebUI + 反向代理
@@ -165,6 +216,7 @@ npm run test:smoke    # 前端端到端（真实后端与 SSE）
 - [`docs/CHAT-FLOW.md`](docs/CHAT-FLOW.md) — 消息链路
 - [`docs/PLUGIN-GUIDE.md`](docs/PLUGIN-GUIDE.md) — 插件开发指南
 - [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — 插件清单
+- [docs/wechat-clawbot-plugin.md](docs/wechat-clawbot-plugin.md) — 微信clawbot 渠道插件更新与本体改动说明
 - [`docs/RELEASING.md`](docs/RELEASING.md) — 版本管理与发布规范
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows 使用与排障
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — 桌面壳构建

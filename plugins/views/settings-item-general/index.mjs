@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V17 · settings-item-general
  * 通用设置：启动行为、语言、调试开关。
@@ -6,7 +11,7 @@ export const name = 'settings-item-general'
 export const version = '1.0.0'
 export const displayName = '设置项 · 通用'
 export const description = '设置页 · 应用行为与基础偏好。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔧'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0' }

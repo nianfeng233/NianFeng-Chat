@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V? · settings-item-chat-records
  * 设置 → 聊天记录：
@@ -11,10 +16,10 @@ export const name = 'settings-item-chat-records'
 export const version = '2.0.0'
 export const displayName = '设置项 · 聊天记录'
 export const description = '设置页 · 图形化 / JSON 双模式查看与编辑聊天记录，草稿式保存。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'chat-store': '^1.0.0', 'session-service': '^1.0.0' }
+export const depends = { 'settings-container': '^1.0.0', 'chat-store': '^1.0.0', 'session-service': '^2.0.0' }
 export const inject = ['settings-container', 'chat-store', 'session-service', 'toast', 'modal?', 'event-bus']
 export const provides = []
 
@@ -35,8 +40,21 @@ const CSS = `
   .record-list-head strong{font-size:13px}
   .record-group{margin-bottom:10px}
   .record-group-title{padding:4px 6px;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .record-search-wrap{margin-bottom:8px}
+  .record-search{width:100%;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.55);color:var(--text);font-size:12px;outline:none;box-sizing:border-box}
+  .record-search:focus{border-color:var(--accent)}
+  .record-role{margin-bottom:6px;border-radius:10px;border:1px solid transparent;overflow:hidden}
+  .record-role.expanded{border-color:var(--border);background:rgba(255,255,255,.35)}
+  .record-role-head{display:flex;align-items:center;gap:7px;width:100%;padding:7px 8px;border:none;background:transparent;color:var(--text);font-size:12.5px;cursor:pointer;text-align:left}
+  .record-role-head:hover{background:rgba(255,255,255,.55)}
+  .record-role .chev{width:12px;flex:0 0 auto;color:var(--text-4)}
+  .record-role-name{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .record-role-count{flex:0 0 auto;font-size:10.5px;color:var(--text-4)}
+  .record-role-body{padding:0 6px 6px 22px}
   .record-channel{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:7px 9px;margin-bottom:3px;border:none;border-radius:9px;background:transparent;color:var(--text);font-size:12px;cursor:pointer;text-align:left}
-  .record-channel span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .record-channel span{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .record-channel b{font-size:11.5px;color:var(--text-2);font-weight:600}
+  .record-channel em{font-style:normal;font-size:10.5px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .record-channel small{flex:0 0 auto;color:var(--text-4);font-size:10.5px}
   .record-channel:hover{background:rgba(255,255,255,.55)}
   .record-channel.active{background:var(--accent-soft);color:var(--accent)}
@@ -65,6 +83,8 @@ const CSS = `
   .record-card-content{margin-top:6px;font-size:12.5px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .record-card-doc{padding:6px 8px;border-radius:8px;background:rgba(90,120,180,.08);border:1px dashed rgba(90,120,180,.3);font-size:12px}
   .record-card-tag{margin-left:auto;color:var(--text-4);font-size:10.5px}
+  .record-card-del{flex:0 0 auto;width:24px;height:24px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
+  .record-card-del:hover{background:rgba(198,91,91,.12);color:#c65b5b}
   .record-source{flex:1;min-height:440px;resize:vertical;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:rgba(255,255,255,.62);color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.65;outline:none;white-space:pre;tab-size:2}
   .record-source:focus{border-color:var(--accent)}
   .record-source[hidden]{display:none}
@@ -107,6 +127,9 @@ export function apply(ctx) {
         <div class="record-page">
           <aside class="record-list">
             <div class="record-list-head"><strong>角色 / 渠道</strong><button class="record-btn" data-record-refresh-list>刷新</button></div>
+              <div class="record-search-wrap">
+                <input class="record-search" data-record-search placeholder="搜索角色名或渠道 ID" autocomplete="off" spellcheck="false" />
+              </div>
             <div data-record-list></div>
           </aside>
           <section class="record-main">
@@ -152,6 +175,7 @@ export function apply(ctx) {
       )
 
       const listEl = container.querySelector('[data-record-list]')
+      const listSearchEl = container.querySelector('[data-record-search]')
       const pathEl = container.querySelector('[data-record-path]')
       const dirtyEl = container.querySelector('[data-record-dirty]')
       const errorEl = container.querySelector('[data-record-error]')
@@ -170,6 +194,9 @@ export function apply(ctx) {
       let dirty = false
       let mode = 'cards'
       let editingIndex = -1
+      let listKeyword = ''
+      let listInitialized = false
+      const expandedRoles = new Set()
 
       const setError = message => {
         if (!message) {
@@ -241,6 +268,7 @@ export function apply(ctx) {
                 <span>${escapeHtml(message.time || String(message.timestamp || '').slice(11, 16) || '')}</span>
                 <span>${escapeHtml(message.sender_name || '')}</span>
                 <span class="record-card-tag">${escapeHtml(message.message_id || message.id || '')}</span>
+                <button class="record-card-del" data-record-delete="${index}" type="button" title="删除这条消息（需点保存生效）">🗑</button>
               </div>
               <div class="record-card-content">${content}</div>
             </div>`
@@ -248,7 +276,23 @@ export function apply(ctx) {
           .join('')
         for (const card of cardsEl.querySelectorAll('[data-record-card]')) {
           card.addEventListener('click', () => openEditor(Number(card.dataset.recordCard)))
+          card.querySelector('[data-record-delete]')?.addEventListener('click', event => {
+            event.stopPropagation()
+            const index = Number(event.currentTarget.dataset.recordDelete)
+            if (!Number.isInteger(index) || index < 0 || index >= draft.length) return
+            draft.splice(index, 1)
+            setDirty(true)
+            setError('')
+            updateJsonSource()
+            renderCards()
+            renderList()
+          })
         }
+      }
+
+      const channelKindLabel = channelId => {
+        const kind = String(channelId || '').split(':')[0]
+        return { nova: 'Nova 网页', 'wechat-clawbot': '微信clawbot' }[kind] || kind || '渠道'
       }
 
       const renderList = () => {
@@ -263,21 +307,61 @@ export function apply(ctx) {
           if (!groups.has(key)) groups.set(key, [])
           groups.get(key).push(record)
         }
-        listEl.innerHTML = [...groups.entries()]
-          .map(([roleId, items]) => {
-            const title = sessions.get(items[0].conversationId)?.name || roleId
-            const buttons = items
+
+        const keyword = listKeyword.trim().toLowerCase()
+        const visible = []
+        for (const [roleId, allItems] of groups) {
+          const roleName = sessions.get(allItems[0]?.conversationId)?.name || roleId
+          const roleHit = keyword && String(roleName).toLowerCase().includes(keyword)
+          const matched = keyword
+            ? (roleHit ? allItems : allItems.filter(record => String(record.channelId).toLowerCase().includes(keyword)))
+            : allItems
+          if (!matched.length) continue
+          visible.push({ roleId, roleName, items: matched, allItems })
+        }
+        if (!visible.length) {
+          listEl.innerHTML = '<div class="record-empty">没有匹配的角色或渠道</div>'
+          return
+        }
+
+        if (!listInitialized) {
+          listInitialized = true
+          const activeOwner = visible.find(group => group.allItems.some(record => record.channelId === activeChannel))
+          if (activeOwner) expandedRoles.add(activeOwner.roleId)
+        }
+
+        listEl.innerHTML = visible
+          .map(({ roleId, roleName, items, allItems }) => {
+            const expanded = keyword ? true : expandedRoles.has(roleId)
+            const channels = items
               .map(record => {
                 const count = store.messagesOf(record.channelId).length
+                const label = channelKindLabel(record.channelId)
                 return `<button class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}">
-                  <span title="${escapeHtml(record.channelId)}">${escapeHtml(record.channelId)}</span>
+                  <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(label)}</b><em>${escapeHtml(record.channelId)}</em></span>
                   <small>${count} 条</small>
                 </button>`
               })
               .join('')
-            return `<div class="record-group"><div class="record-group-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>${buttons}</div>`
+            return `<div class="record-role ${expanded ? 'expanded' : ''}">
+              <button class="record-role-head" data-role-toggle="${escapeHtml(roleId)}">
+                <span class="chev">${expanded ? '▾' : '▸'}</span>
+                <span class="record-role-name" title="${escapeHtml(roleName)}">${escapeHtml(roleName)}</span>
+                <span class="record-role-count">${allItems.length} 个渠道</span>
+              </button>
+              <div class="record-role-body" ${expanded ? '' : 'hidden'}>${channels}</div>
+            </div>`
           })
           .join('')
+
+        for (const button of listEl.querySelectorAll('[data-role-toggle]')) {
+          button.addEventListener('click', () => {
+            const id = button.dataset.roleToggle
+            if (expandedRoles.has(id)) expandedRoles.delete(id)
+            else expandedRoles.add(id)
+            renderList()
+          })
+        }
         for (const button of listEl.querySelectorAll('[data-channel]')) {
           button.addEventListener('click', () => switchChannel(button.dataset.channel))
         }
@@ -427,8 +511,13 @@ export function apply(ctx) {
       container.querySelector('[data-record-reload]').addEventListener('click', reloadDraft)
       container.querySelector('[data-record-add]').addEventListener('click', () => openEditor(-1))
       container.querySelector('[data-record-refresh-list]').addEventListener('click', () => {
+        listInitialized = false
         renderList()
         if (activeChannel) loadChannel(activeChannel)
+      })
+      listSearchEl?.addEventListener('input', () => {
+        listKeyword = listSearchEl.value || ''
+        renderList()
       })
       sourceEl.addEventListener('input', () => {
         try {
@@ -462,9 +551,19 @@ export function apply(ctx) {
         if (payload?.channelId === activeChannel && !dirty) loadChannel(activeChannel)
         else renderList()
       })
+      // 渠道详情点「打开聊天记录」时，定位到对应渠道而不是另开普通会话。
+      const offSelect = events.on('chat-records:select', payload => {
+        const channelId = String(payload?.channelId || '')
+        const record = channelId ? store.channelRecord(channelId) : null
+        if (!record) return
+        listInitialized = true
+        expandedRoles.add(record.roleId || record.conversationId)
+        loadChannel(channelId)
+      })
 
       return () => {
         offReplaced()
+        offSelect()
         container.innerHTML = ''
       }
     },

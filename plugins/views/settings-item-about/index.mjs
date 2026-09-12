@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V23 · settings-item-about
  * 关于：版本、内核、插件与服务统计、调试面板入口。
@@ -6,7 +11,7 @@ export const name = 'settings-item-about'
 export const version = '1.0.0'
 export const displayName = '设置项 · 关于'
 export const description = '设置页 · 版本与插件系统信息。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = 'ℹ️'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
@@ -30,15 +35,16 @@ export function apply(ctx) {
     render(container) {
       const render = () => {
         const stats = manager.stats()
-        const appVersion = ctx.registry.get('app')?.version || '0.41.0'
+        const appVersion = ctx.registry.get('app')?.version || '0.42.0'
         const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
-        container.innerHTML = page('关于', '关于当前版本以及插件系统信息。', `
+        container.innerHTML = page('关于', '念风：本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）。', `
           ${section('', `<div class="settings-card" style="padding:22px">
               <div class="about-head">
-                <div class="about-mark">风</div>
+                <div class="about-mark">念</div>
                 <div>
-                  <div class="setting-name" style="font-size:15px">风语 · AI Chat</div>
-                  <div class="about-version">Version ${escapeHtml(appVersion)} · 插件化架构</div>
+                  <div class="setting-name" style="font-size:15px">念风chat</div>
+                  <div class="about-version">NianFeng-Chat · Version ${escapeHtml(appVersion)} · 插件化架构</div>
+                    <div class="about-version">本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）</div>
                 </div>
               </div>
             </div>`)}

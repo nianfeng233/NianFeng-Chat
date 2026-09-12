@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * S2 · bg-provider
  * 背景接口：可选中型服务（绿雾 / 纯色 / 图片…）。
@@ -7,7 +12,7 @@ export const name = 'bg-provider'
 export const version = '1.0.0'
 export const displayName = '背景接口'
 export const description = '视觉框架 · 背景可选中服务，用户可在已安装实现间切换。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🌫️'
 export const core = true
 export const depends = { 'service-container': '^1.0.0' }

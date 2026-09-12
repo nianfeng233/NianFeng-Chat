@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /** bg-aurora 样式：demo 的浅绿光团动画 */
 export const AURORA_CSS = `
   .bg-layer{position:fixed;inset:0;z-index:-1;pointer-events:none;}

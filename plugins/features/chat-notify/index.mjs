@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * B? · chat-notify
  * 角色消息通知桥：把“收到新消息”翻译成 notification 服务的三种通知之一。
@@ -14,13 +19,13 @@ export const name = 'chat-notify'
 export const version = '1.0.0'
 export const displayName = '角色消息提醒'
 export const description = '业务功能 · 后台或非当前会话收到角色消息时，发送带角色头像与预览的通知。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔔'
 export const core = false
 export const depends = {
   'message-service': '^1.0.0',
-  'session-service': '^1.0.0',
-  notification: '^1.0.0',
+  'session-service': '^2.0.0',
+  notification: '^2.1.0',
   config: '^1.0.0',
 }
 export const inject = ['message-service', 'session-service', 'config', 'event-bus', 'notification?']
@@ -50,6 +55,11 @@ export function apply(ctx) {
 
   const shouldNotify = conversationId => {
     if (config.get('notify.messages', true) === false) return false
+    const conv = sessions.get(conversationId)
+    // 外部渠道（如微信clawbot）的会话记录特意不进入普通会话列表，
+    // 因此它在列表里永远“不是当前会话”；继续按普通消息提醒会在每次
+    // 渠道回复后弹通知，既无法点击回到被隐藏的会话，也和界面不一致。
+    if (conv?.meta?.hiddenFromSessionList || conv?.meta?.channelConversation === true) return false
     const hidden = typeof document !== 'undefined' && !!document.hidden
     if (hidden) return true
     return sessions.activeId() !== conversationId

@@ -1,8 +1,13 @@
-# Fengyu
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
+# NianFeng-Chat
 
 English | [简体中文](README.md)
 
-Fengyu is a local-first AI chat client. Both the frontend and the local backend run on cordis,
+NianFeng-Chat is a local-first, plugin-based AI chat client. Both the frontend and the local backend run on cordis,
 and features are organized as plugins. The plugin directory and the data directory can both be
 placed outside the application directory. The same source tree builds both a Web deployment and
 a Windows desktop application.
@@ -10,9 +15,9 @@ a Windows desktop application.
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
 
-- Current version: v0.41.0
+- Current version: v0.42.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
-- Repository: <https://github.com/nianfeng233/fengyu-chat>
+- Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 
 ## Features and Architecture
 
@@ -21,7 +26,7 @@ a Windows desktop application.
 - **Local backend**: a Node.js cordis application with a hand-written HTTP/SSE layer and no Web
   framework. It handles model access, session persistence, file serving, and related services.
 - **Desktop shell**: Rust + WebView2 borderless window with an embedded portable Node runtime,
-  packaged as a single `风语.exe`.
+  packaged as a single `念风Chat.exe`.
 - **Selectable services**: themes, backgrounds, bubble styles, models, and languages can each have
   multiple implementations that are selected in Settings.
 - **External plugins**: built-in plugins ship with each release; user plugins can live in
@@ -92,9 +97,9 @@ npm run sync-plugins
 ```
 
 External plugins live in `<data-dir>/plugins/` by default (for the exe:
-`%LOCALAPPDATA%\FengyuChat\user_data\plugins\`) and use this layout:
+`%LOCALAPPDATA%\NianFengChat\user_data\plugins\`) and use this layout:
 
-```
+```text
 <external-dir>/views/my-plugin/index.mjs
 ```
 
@@ -112,10 +117,41 @@ export function apply(ctx) {
 }
 ```
 
+Plugins can register their own settings panels; the Plugins page then shows a “Settings” action:
+
+```js
+export function apply(ctx) {
+  const manager = ctx.inject('plugin-manager')
+  ctx.effect(() => manager.registerSettings({
+    id: 'my-plugin',
+    title: 'My Plugin Settings',
+    description: 'Plugin-specific configuration.',
+    render(container, { close, manager: pm }) {
+      container.innerHTML = '...'
+      return () => { /* cleanup on close */ }
+    },
+  }))
+}
+```
+
+Channel backend bridges are auto-discovered from `plugins/channels/<name>/bridge.mjs`; inject
+`httpApi` and register your own `/api/<channel>/...` routes without touching the core.
+
+### Built-in channel plugin: WeChat Clawbot
+
+- Add it from Channels → Add Channel → **WeChat Clawbot**;
+- configure role, category (private/group/privacy), user name / user id and permissions;
+- click Connect in channel details, scan the QR code with WeChat, then use it;
+- channel messages go through the full model pipeline; typing is closed after the whole model
+  call (including tool calls and all reply messages) finishes;
+- channel conversations are hidden from the normal session list and can be viewed/edited under
+  Settings → Chat Records;
+- plugin-specific panel: Settings → Plugins → WeChat Clawbot → Settings.
+
 ## Building
 
 ```bash
-npm run build:release   # Web source + Web deploy + desktop source + Fengyu.exe
+npm run build:release   # Web source + Web deploy + desktop source + 念风Chat.exe
 npm run build:desktop   # desktop only
 ```
 
@@ -124,9 +160,9 @@ Artifacts are written to `release/`:
 - `release/web/source/`: clean Web source;
 - `release/web/deploy/`: Web deployment with a portable Node runtime;
 - `release/desktop/source/`: desktop shell source and runtime app;
-- `release/desktop/deploy/风语.exe`: single-file Windows desktop build.
+- `release/desktop/deploy/念风Chat.exe`: single-file Windows desktop build.
 
-`node.exe`, `风语.exe`, and deployment archives are large and are distributed as GitHub Release
+`node.exe`, `念风Chat.exe`, and deployment archives are large and are distributed as GitHub Release
 assets rather than committed to Git.
 
 ## Tests
@@ -136,7 +172,7 @@ npm test              # module checks + backend API + end-to-end + chat / tools 
 npm run test:smoke    # frontend end-to-end against the real backend and SSE
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 207 checks.
+`npm test` currently passes; `scripts/smoke.mjs` passes 212 checks.
 
 ## Versioning and Releases
 
@@ -160,7 +196,7 @@ numbers, `user_data`, and similar content.
 
 ## Directory Layout
 
-```
+```text
 .
 ├── index.html
 ├── start.mjs             # backend + WebUI + reverse proxy

@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V20 · settings-item-bubble
  * 气泡样式选择：把区块插入 V19 的外观页（文档 §8.3 的交互闭环）。
@@ -6,7 +11,7 @@ export const name = 'settings-item-bubble'
 export const version = '1.0.0'
 export const displayName = '设置项 · 气泡'
 export const description = '设置页 · 在已安装的气泡实现之间切换。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '💠'
 export const core = true
 export const depends = { 'settings-item-theme': '^1.0.0', 'message-list': '^1.0.0' }

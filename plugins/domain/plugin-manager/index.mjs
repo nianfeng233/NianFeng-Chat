@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * D7 · plugin-manager
  * 插件启停 / 安装 / 卸载 的用户侧入口（文档 §4.4）。
@@ -7,12 +12,31 @@ export const name = 'plugin-manager'
 export const version = '1.0.0'
 export const displayName = '插件管理器'
 export const description = '业务服务 · 插件启停 / 安装 / 卸载与状态整理。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = { 'plugin-loader': '^1.0.0', config: '^1.0.0' }
 export const inject = ['plugin-loader', 'config', 'event-bus', 'toast', 'modal']
 export const provides = [{ name: 'plugin-manager', type: 'singleton' }]
+
+import { useStyle } from '../../../src/util/style.mjs'
+
+const PANEL_CSS = `
+  .plugin-panel-mask{position:fixed;inset:0;z-index:1150;display:flex;align-items:center;justify-content:center;background:rgba(18,28,38,.34);backdrop-filter:blur(2px);}
+  .plugin-panel{width:min(620px,94vw);max-height:88vh;overflow:auto;padding:18px 20px;border-radius:18px;background:var(--panel-solid,#fff);box-shadow:0 24px 70px rgba(20,40,60,.3);display:flex;flex-direction:column;gap:12px;color:var(--text);}
+  .plugin-panel-head{display:flex;align-items:flex-start;gap:12px;}
+  .plugin-panel-title{font-size:16px;font-weight:650;color:var(--text);}
+  .plugin-panel-sub{font-size:12px;color:var(--text-3);line-height:1.6;margin-top:3px;}
+  .plugin-panel-close{margin-left:auto;width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text-3);cursor:pointer;}
+  .plugin-panel-body{display:flex;flex-direction:column;gap:12px;}
+  .plugin-panel-body .settings-section{margin-top:0;}
+  .plugin-panel-empty{padding:22px 8px;text-align:center;color:var(--text-4);font-size:12.5px;}
+  .plugin-panel-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.48);}
+  .plugin-panel-item-main{flex:1;min-width:0;}
+  .plugin-panel-item-name{font-size:13px;font-weight:600;color:var(--text);}
+  .plugin-panel-item-desc{font-size:11.5px;color:var(--text-3);line-height:1.6;margin-top:4px;word-break:break-all;}
+  .plugin-panel-item-actions{display:flex;gap:7px;flex:0 0 auto;}
+`
 
 export function apply(ctx) {
   const loader = ctx.inject('plugin-loader')
@@ -20,6 +44,23 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   const toast = ctx.inject('toast')
   const modal = ctx.inject('modal')
+
+  const panels = new Map()
+  let panelOverlay = null
+  let panelCleanup = null
+
+  useStyle(ctx, PANEL_CSS)
+
+  const closePanel = () => {
+    try {
+      panelCleanup?.()
+    } catch (_) {
+      /* ignore */
+    }
+    panelCleanup = null
+    panelOverlay?.remove()
+    panelOverlay = null
+  }
 
   const STATUS_LABEL = {
     active: '已启用',
@@ -29,8 +70,80 @@ export function apply(ctx) {
     pending: '加载中',
   }
 
+  const escapeText = value =>
+    String(value ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m])
+
   const service = {
     name: 'plugin-manager',
+
+    /**
+     * 插件设置面板注册：插件可以在自己的 apply 里调用
+     *   ctx.inject('plugin-manager').registerSettings({ id, title, description, render })
+     * render(container, { ctx, manager, close }) 返回的清理函数会在面板关闭时执行。
+     * 这样插件专属配置可以直接出现在「设置 → 插件」对应条目后的「设置」按钮里。
+     */
+    registerSettings(definition = {}) {
+      const id = String(definition.id || '').trim()
+      if (!id) throw new Error('插件设置面板必须声明 id')
+      panels.set(id, {
+        id,
+        title: String(definition.title || '插件设置'),
+        description: String(definition.description || ''),
+        render: typeof definition.render === 'function' ? definition.render : null,
+      })
+      events.emit('plugin:settings-registered', { id })
+      return () => service.unregisterSettings(id)
+    },
+
+    unregisterSettings(id) {
+      panels.delete(String(id || ''))
+      events.emit('plugin:settings-registered', { id, removed: true })
+      return true
+    },
+
+    settingsOf(id) {
+      const panel = panels.get(String(id || ''))
+      return panel ? { id: panel.id, title: panel.title, description: panel.description } : null
+    },
+
+    hasSettings: id => panels.has(String(id || '')),
+
+    /** 打开插件自己的设置面板（没有注册面板时返回 false） */
+    openSettings(id) {
+      const panel = panels.get(String(id || ''))
+      if (!panel || !panel.render) {
+        toast.warn('该插件没有提供设置面板')
+        return false
+      }
+      closePanel()
+      panelOverlay = document.createElement('div')
+      panelOverlay.className = 'plugin-panel-mask'
+      panelOverlay.innerHTML = `
+        <div class="plugin-panel" role="dialog" aria-modal="true">
+          <div class="plugin-panel-head">
+            <div>
+              <div class="plugin-panel-title">${escapeText(panel.title)}</div>
+              <div class="plugin-panel-sub">${escapeText(panel.description || `插件 ${panel.id} 的设置面板`)}</div>
+            </div>
+            <button class="plugin-panel-close" title="关闭">✕</button>
+          </div>
+          <div class="plugin-panel-body"></div>
+        </div>`
+      const body = panelOverlay.querySelector('.plugin-panel-body')
+      try {
+        const cleanup = panel.render(body, { ctx, manager: service, close: closePanel })
+        panelCleanup = typeof cleanup === 'function' ? cleanup : null
+      } catch (err) {
+        ctx.logger.error(`插件 ${panel.id} 设置面板渲染失败`, err)
+        body.innerHTML = '<div class="plugin-panel-empty">设置面板渲染失败，请查看日志。</div>'
+      }
+      panelOverlay.querySelector('.plugin-panel-close')?.addEventListener('click', closePanel)
+      panelOverlay.addEventListener('mousedown', event => {
+        if (event.target === panelOverlay) closePanel()
+      })
+      document.body.appendChild(panelOverlay)
+      return true
+    },
 
     /** 插件列表（含状态与可操作性） */
     list({ includeCore = true, includeRemoved = false } = {}) {
@@ -76,6 +189,8 @@ export function apply(ctx) {
         provides: meta.provides || [],
         slots: meta.slots || [],
         installTime: record.installTime || 0,
+        hasSettings: panels.has(id),
+        settingsTitle: panels.get(id)?.title || '',
       }
     },
 

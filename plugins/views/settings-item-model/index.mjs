@@ -1,7 +1,12 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * V18 · settings-item-model（V4 改版）
  *
- * 模型页分成两套面板，由顶层开关「使用风语内置模型」（默认开启）切换：
+ * 模型页分成两套面板，由顶层开关「使用念风内置模型」（默认开启）切换：
  *
  *  1) 开启：内置模型列表 + 请求参数（自定义请求体 / 超时时间）。
  *     内置模型来自官方服务端。官方服务端是独立的官网项目、尚未发布，
@@ -19,7 +24,7 @@ export const name = 'settings-item-model'
 export const version = '4.0.0'
 export const displayName = '设置项 · 模型'
 export const description = '设置页 · 内置模型开关与自定义提供商管理。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
 export const depends = { 'settings-container': '^1.0.0', 'backend-client': '^1.0.0' }
@@ -146,7 +151,7 @@ export function apply(ctx) {
           <div class="model-empty-title">官方服务尚未接入</div>
           <div class="model-empty-desc">${escapeHtml(
             builtin?.reason ||
-              '「风语内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未发布，因此这里没有可用的内置模型。',
+              '「念风内置模型」由官方服务端提供（登录 / 计费 / 官方模型都在官网侧）。官方服务端是独立项目、当前尚未发布，因此这里没有可用的内置模型。',
           )}</div>
           <div class="model-empty-actions">
             <button class="outline-btn" data-action="reload-builtin">重新检测</button>
@@ -593,15 +598,15 @@ export function apply(ctx) {
         container.innerHTML = page(
           '模型',
           official
-            ? '统一管理模型来源：默认可使用风语内置模型；关闭开关后可配置任意 OpenAI 兼容 / Anthropic / Ollama 提供商。'
+            ? '统一管理模型来源：默认可使用念风内置模型；关闭开关后可配置任意 OpenAI 兼容 / Anthropic / Ollama 提供商。'
             : '配置任意 OpenAI 兼容 / Anthropic / Ollama 提供商。',
           `
           ${
             official
               ? card(
                   row(
-                    '使用风语内置模型',
-                    '由「风语官方服务」插件提供；官方服务端尚未制作时，下方会如实展示空状态。禁用该插件后本区块会一起隐藏。',
+                    '使用念风内置模型',
+                    '由「念风官方服务」插件提供；官方服务端尚未制作时，下方会如实展示空状态。禁用该插件后本区块会一起隐藏。',
                     `<span class="model-mode-hint">${
                       useBuiltin ? '<span class="model-mode-pill">默认开启</span>' : '<span class="model-mode-pill" style="background:rgba(0,0,0,.05);color:var(--text-3)">已关闭</span>'
                     }<button class="switch ${useBuiltin ? 'on' : ''}" data-action="toggle-builtin"></button></span>`,
@@ -611,7 +616,7 @@ export function apply(ctx) {
           }
           ${
             staleBackend
-              ? '<div class="settings-note model-stale">检测到正在运行的后端进程缺少最新接口（provider-crud 等）。请完全关闭风语（旧窗口 / 终端）后重新运行 start.cmd 或 npm start，再回来配置模型。</div>'
+              ? '<div class="settings-note model-stale">检测到正在运行的后端进程缺少最新接口（provider-crud 等）。请完全关闭念风（旧窗口 / 终端）后重新运行 start.cmd 或 npm start，再回来配置模型。</div>'
               : ''
           }
           ${useBuiltin ? builtinPanel() : customPanel()}
@@ -844,7 +849,7 @@ export function apply(ctx) {
 
       const friendlyError = err => {
         const message = err?.message || String(err)
-        return /接口不存在/.test(message) ? `${message}（看起来是旧版后端进程，请完全退出后重新启动风语）` : message
+        return /接口不存在/.test(message) ? `${message}（看起来是旧版后端进程，请完全退出后重新启动念风）` : message
       }
 
       const handleAction = async (action, target) => {
@@ -856,7 +861,7 @@ export function apply(ctx) {
           switch (action) {
             case 'toggle-builtin': {
               if (!officialService()) {
-                toast.warn('风语官方服务插件未启用，内置模型入口不可用')
+                toast.warn('念风官方服务插件未启用，内置模型入口不可用')
                 break
               }
               const next = !(config.get('model.useBuiltin', true) !== false)
@@ -868,7 +873,7 @@ export function apply(ctx) {
             }
             case 'reload-builtin':
               if (!officialService()) {
-                toast.warn('风语官方服务插件未启用，内置模型入口不可用')
+                toast.warn('念风官方服务插件未启用，内置模型入口不可用')
                 break
               }
               await loadBuiltin({ notify: true })

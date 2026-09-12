@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * K3 · dependency-resolver
  * 暴露插件依赖图、拓扑顺序与循环检测结果，供插件管理器与调试面板使用。
@@ -7,7 +12,7 @@ export const name = 'dependency-resolver'
 export const version = '1.0.0'
 export const displayName = '依赖解析器'
 export const description = '内核层 · 拓扑排序依赖、检测循环依赖、版本兼容性检查。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧮'
 export const core = true
 export const inject = []

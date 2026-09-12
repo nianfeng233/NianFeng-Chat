@@ -1,6 +1,11 @@
+<!--
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
+-->
 # 插件清单与实现状态
 
-> 共 **84 个前端插件 + 8 个后端插件**（核心 66 · 可选 18）。
+> 共 **87 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 19）。微信clawbot 渠道插件同时包含前端插件、Node 后端桥与独立分发目录。
 > 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**。
 
 ---
@@ -12,12 +17,13 @@
 | L0 内核 | `plugins/kernel/` | 5 | event-bus / plugin-loader / dependency-resolver / lifecycle / service-container |
 | L1 基础服务 | `plugins/foundation/` | 15 | storage / config / logger / i18n / theme-tokens / slots / 各种宿主 / shortcuts / notification / error-reporter / **backend-client** |
 | L2 业务服务 | `plugins/domain/` | 14 | session / message / model-registry / model-service / view-router / channel-registry / plugin-manager / search / export / **chat-store / document-service / chat-permissions / chat-queue / tool-registry** |
+| L2.5 渠道插件 | `plugins/channels/` | 1 | **微信clawbot**（前端渠道类型 + `bridge.mjs` 后端桥） |
 | L3 视觉框架 | `plugins/shell/` | 9 | app-shell / bg-provider / bg-aurora / bg-solid / bg-image / titlebar / rail / left-list-panel / right-main-panel |
 | L4 视觉内容 | `plugins/views/` | 31 | 三视图 + 顶栏/侧栏部件 + 全局搜索 + 设置项（V1~V24 全覆盖） |
 | L5 业务功能 | `plugins/features/` | 8 | chat-flow / channel-base / **model-adapter-backend / chat-tools / context-builder** / character-editor / **chat-notify** / official-service |
 | L6 可选扩展 | `plugins/extras/` | 2 | markdown-enhancer / **lang-zh-cn（语言包示例）** |
-| 后端 | `server/plugins/` | 8 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导） |
-| **合计** | | **92** | 前端 84 + 后端 8 |
+| 后端 | `server/plugins/` | 9 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/wechat-clawbot/bridge.mjs` 渠道后端桥 |
+| **合计** | | **96** | 前端 87 + 后端 9（含 Clawbot 前后端、用户身份、插件健康守卫） |
 
 ---
 
@@ -37,6 +43,7 @@
 | 插件 | 层 | 状态 | 一句话 |
 |---|---|---|---|
 | `backend-client` | L1 | ✅ | WebUI ↔ 本地后端的唯一通道（REST / SSE / 健康检查） |
+| `wechat-clawbot` | L2.5 | ✅ | 微信 Clawbot 渠道：扫码接入、角色/分类/权限、typing 与聊天记录 |
 | `model-adapter-backend` | L5 | ✅ | 把后端提供商注册为前端模型（真实流式对话；OpenAI/DeepSeek/Claude/Gemini/Ollama 由后端适配器转换） |
 | `session-service` | L2 | ✅ | 会话 + 后端持久化 + 离线降级 + 迁移 |
 | `message-service` | L2 | ✅ | 消息与全部 `message:*` 事件 |
@@ -44,6 +51,8 @@
 | `document-service` | L2 | ✅ | 资料原文入库与按 token 分段读取 |
 | `chat-permissions` | L2 | ✅ | 渠道权限表、跨渠道校验、敏感确认、审计 |
 | `chat-queue` | L2 | ✅ | 角色级 FIFO 串行队列 |
+| `user-identity` | L2 | ✅ | 统一用户标识：默认本机配置，联网账号插件可注册 provider |
+| `plugin-health-guard` | L5 | ✅ | 启动插件自检，发现红色错误时弹窗引导到插件设置 |
 | `tool-registry` | L2 | ✅ | 通用 function-calling 工具注册表 |
 | `chat-tools` | L5 | ✅ | read_messages / chat_send / send_document / read_document |
 | `context-builder` | L5 | ✅ | 工作记忆 + 渠道记忆合并、去重、token 预算截断 |
@@ -85,7 +94,7 @@
 |---|---|
 | 登录 / 注册 / 官方模型 | 官方服务端由独立官网项目提供，本仓库是纯客户端；模型页已提供内置模型空状态 |
 | 多设备云同步 | 需要云端存储与冲突合并 |
-| 微信 / Discord / 邮箱 / Telegram 渠道 | 协议与权限问题（添加渠道菜单标注原因） |
+| Discord / 邮箱 / Telegram 渠道 | 协议与权限问题（添加渠道菜单标注原因）；微信渠道已由 `wechat-clawbot` 插件实现 |
 | 插件市场 / 在线安装 | 需要服务端索引与签名校验 |
 | 代码运行器 | 缺少安全沙箱 |
 | 插件权限沙箱 | 插件与内核同进程运行，无法真正隔离；隐私页改为如实说明 |

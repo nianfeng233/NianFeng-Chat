@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * B1 · chat-flow
  * 聊天主流程（文档 §6.4 / §6.5）：
@@ -19,11 +24,11 @@ export const name = 'chat-flow'
 export const version = '2.0.0'
 export const displayName = '聊天流程'
 export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔀'
 export const core = true
 export const depends = {
-  'session-service': '^1.0.0',
+  'session-service': '^2.0.0',
   'message-service': '^1.0.0',
   'model-service': '^1.0.0',
   'chat-store': '^1.0.0',
@@ -40,6 +45,7 @@ export const inject = [
   'config',
   'toast',
   'api?',
+  'user-identity?',
   'chat-store?',
   'chat-tools?',
   'context-builder?',
@@ -430,9 +436,11 @@ export function apply(ctx) {
     entry.usage = null
     entry.thinkingMs = 0
     entry.lastRound = null
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
     const who = permissions?.contextFor(conversationId) || {
-      userId: config.get('chat.userId', 'web-user'),
-      userName: resolveUserNickname(config),
+      userId: identity.userId || config.get('chat.userId', 'web-user'),
+      userName: identity.userName || resolveUserNickname(config),
+      identitySource: identity.source || 'local',
     }
 
     try {
@@ -441,7 +449,7 @@ export function apply(ctx) {
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
-          sender_id: who.userId,
+          sender_id: who.identityUserId || who.userId,
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',
@@ -465,7 +473,7 @@ export function apply(ctx) {
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
         warnedLegacyBackend = true
         ctx.logger.warn('[chat-flow] 后端未上报 tools 能力（可能是未重启的旧进程），将按文本工具协议兼容运行')
-        ctx.inject('toast')?.warn?.('后端版本较旧，未包含工具调用支持：请用 stop / start 重启风语。当前会尝试文本协议兼容。')
+        ctx.inject('toast')?.warn?.('后端版本较旧，未包含工具调用支持：请用 stop / start 重启念风。当前会尝试文本协议兼容。')
       }
       const roundMessages = []
       const sentContents = new Map()
@@ -682,16 +690,18 @@ export function apply(ctx) {
     entry.suppressStream = false
     const startedAt = Date.now()
     try {
+      const identity = ctx.registry.get('user-identity')?.get?.() || {}
       const who = permissions?.contextFor(conversationId) || {
-        userId: config.get('chat.userId', 'web-user'),
-        userName: resolveUserNickname(config),
+        userId: identity.userId || config.get('chat.userId', 'web-user'),
+        userName: identity.userName || resolveUserNickname(config),
+        identitySource: identity.source || 'local',
       }
       let userMessage = null
       if (!skipUserAppend && store) {
         userMessage = store.append(conversationId, {
           role: 'user',
           content: text,
-          sender_id: who.userId,
+          sender_id: who.identityUserId || who.userId,
           sender_name: who.userName,
           status: 'sent',
           source: 'nova',
@@ -757,8 +767,11 @@ export function apply(ctx) {
 
     const roleId = roleOf(conv)
     const agent = toolsEnabled()
+    // 渠道插件可以先把入站消息写入自己的渠道记录，再以 skipUserAppend=true
+    // 触发模型轮次，避免 message:send 重复插入同一条用户消息。
+    const turnOptions = { skipUserAppend: payload.skipUserAppend === true }
     if (agent) store.channelForConversation(conversationId)
-    const task = () => (agent ? runAgentTurn(conversationId, text, roleId) : runLegacy(conversationId, text, roleId))
+    const task = () => (agent ? runAgentTurn(conversationId, text, roleId, turnOptions) : runLegacy(conversationId, text, roleId, turnOptions))
 
     if (queue) {
       queue.enqueue(roleId, task).catch(error => {

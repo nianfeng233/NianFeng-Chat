@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * B2 · channel-base
  * 渠道接入基座：渠道插件只需要声明类型 + 连接钩子，
@@ -7,10 +12,10 @@ export const name = 'channel-base'
 export const version = '1.0.0'
 export const displayName = '渠道基座'
 export const description = '业务功能 · 渠道插件公共基座，负责连接状态与消息落库。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🛠️'
 export const core = true
-export const depends = { 'channel-registry': '^1.0.0', 'session-service': '^1.0.0', 'message-service': '^1.0.0' }
+export const depends = { 'channel-registry': '^1.0.0', 'session-service': '^2.0.0', 'message-service': '^1.0.0' }
 export const inject = ['channel-registry', 'session-service', 'message-service', 'event-bus', 'toast']
 export const provides = [{ name: 'channel-base', type: 'singleton' }]
 
@@ -45,6 +50,11 @@ export function apply(ctx) {
         icon: def.icon,
         description: def.description,
         meta: { plugin: ctx.id },
+        // 渠道插件可以自定义“添加渠道”与“渠道详情”流程；
+        // 未提供时 channel-list / channel-detail-host 走通用 UI。
+        create: def.create,
+        detail: def.detail,
+        settingsSchema: def.settingsSchema,
         connect: async channel => {
           await def.connect?.(channel)
           return channel

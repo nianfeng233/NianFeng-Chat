@@ -1,7 +1,12 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 对话链路集成测试（真实 HTTP + SSE，不依赖云端 Key / Ollama）
  *
- *   本地 Mock OpenAI 兼容服务 ↔ 风语后端 /api/chat
+ *   本地 Mock OpenAI 兼容服务 ↔ 念风后端 /api/chat
  *
  * 覆盖：
  *   - 新建 OpenAI 兼容提供商（Base URL / API Key）
@@ -36,7 +41,7 @@ const api = (base, path, options = {}) =>
   })
 
 async function main() {
-  console.log('\n① 启动本地 Mock OpenAI + 风语后端')
+  console.log('\n① 启动本地 Mock OpenAI + 念风后端')
   const mock = await startMockOpenAI({ port: 0, apiKey: 'sk-mock' })
   const backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
   const base = backend.url

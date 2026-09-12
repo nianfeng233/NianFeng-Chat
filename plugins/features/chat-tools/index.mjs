@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * B? · chat-tools
  * 聊天工具集（文档 §6）：
@@ -12,7 +17,7 @@ export const name = 'chat-tools'
 export const version = '1.0.0'
 export const displayName = '聊天工具集'
 export const description = '业务功能 · read_messages / chat_send / send_document / read_document。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = {
@@ -70,9 +75,12 @@ export function apply(ctx) {
     return decision
   }
 
+  /** 保留权限层给出的真实原因（无权限 / 需要确认 / 用户拒绝），不要一律吞成“目标渠道不可用”。 */
+  const denied = decision => ({ ok: false, code: decision.code, error: decision.error || '目标渠道不可用' })
+
   const readMessages = async (args, context) => {
     const decision = await authorize(args, context, 'read')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
     const query = args.query ?? (args.semantic ? String(args.semantic) : '')
     const result = store.search({
       channelId: decision.channelId,
@@ -119,7 +127,7 @@ export function apply(ctx) {
 
   const chatSend = async (args, context) => {
     const decision = await authorize(args, context, 'send')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
 
     const conv = sessions.get(context.conversationId)
     const channelId = decision.channelId
@@ -195,7 +203,7 @@ export function apply(ctx) {
 
   const sendDocument = async (args, context) => {
     const decision = await authorize(args, context, 'send')
-    if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+    if (!decision.ok) return denied(decision)
 
     const channelId = decision.channelId
     const isCurrent = channelId === context.channelId
@@ -276,7 +284,7 @@ export function apply(ctx) {
         action: 'read',
         channel: doc.channel_id,
       })
-      if (!decision.ok) return { ok: false, code: decision.code, error: '目标渠道不可用' }
+      if (!decision.ok) return denied(decision)
     }
     const maxTokens = Math.max(100, Math.min(Number(args.max_tokens) || 0 || Number(config.get('chat.readTokens', 1500)) || 1500, 4000))
     const result = documents.read(docId, { offset: args.offset ?? 0, maxTokens })

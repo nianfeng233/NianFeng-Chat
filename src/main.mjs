@@ -1,13 +1,18 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * 应用入口：创建基于真实 cordis 的运行时 → 加载插件 → 启动 → 暴露调试对象。
  *
  * cordis 负责：插件生命周期（fiber）、依赖注入、事件总线、日志、服务注册。
- * 风语运行时负责：插件清单、状态视图、启停策略、诊断信息。
+ * 念风运行时负责：插件清单、状态视图、启停策略、诊断信息。
  */
 import { App, VERSION, STATUS } from './runtime/app.mjs'
 import { plugins as builtinPluginEntries } from '../plugins/registry.mjs'
 
-const CONFIG_KEY = 'fengyu:config'
+const CONFIG_KEY = 'nianfeng:config'
 
 function readBootConfig() {
   try {
@@ -87,7 +92,7 @@ export async function boot() {
 
   const ms = Math.round(performance.now() - t0)
   console.log(
-    `%c风语%c 已启动 · ${app.activeCount}/${entries.length} 个插件激活 · cordis v4 · ${ms}ms`,
+    `%c念风%c 已启动 · ${app.activeCount}/${entries.length} 个插件激活 · cordis v4 · ${ms}ms`,
     'color:#70a15a;font-weight:600',
     'color:#8b919c',
   )
@@ -115,7 +120,7 @@ function writeDiagnostics(app) {
     diag.dataset.plugins = JSON.stringify(list.map(r => ({ id: r.id, status: r.status })))
     document.body.appendChild(diag)
   } catch (err) {
-    console.warn('[fengyu] 诊断信息写入失败', err)
+    console.warn('[nianfeng] 诊断信息写入失败', err)
   }
 }
 

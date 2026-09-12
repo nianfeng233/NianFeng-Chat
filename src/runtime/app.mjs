@@ -1,8 +1,13 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
- * 风语应用运行时：真实 cordis 之上的薄封装。
+ * 念风应用运行时：真实 cordis 之上的薄封装。
  *
  * 职责：
- *  - 创建 cordis Context，并把风语约定（事件索引 / 服务台账 / 插件状态）挂上去
+ *  - 创建 cordis Context，并把念风约定（事件索引 / 服务台账 / 插件状态）挂上去
  *  - 动态 import 插件模块 → 交给 cordis 的 ctx.plugin() 管理生命周期与依赖注入
  *  - 提供插件管理器需要的状态视图（active / inactive / error / disabled）与启停
  *  - 语义冲突启发式检测（插槽拥挤 / 多监听者 / 多实现）
@@ -14,7 +19,7 @@ import { satisfies } from './semver.mjs'
 import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 
-export const VERSION = '0.40.0'
+export const VERSION = '0.42.0'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -50,7 +55,7 @@ export class App {
     this.services.set('app', { name: 'app', type: 'singleton', owner: 'kernel', meta: {}, value: this.publicApi() })
     this.serviceOwners.set('app', 'kernel')
 
-    // 根 ctx 的风语兼容视图（调试对象 / 引导脚本使用；插件拿到的是各自 fiber 的兼容视图）
+    // 根 ctx 的念风兼容视图（调试对象 / 引导脚本使用；插件拿到的是各自 fiber 的兼容视图）
     this.rootCompat = createCompat(this, this.cordis, { id: 'app', meta: { plugin: { name: 'app' } } })
 
     this.eventsFacade = {
@@ -380,9 +385,18 @@ export class App {
       }
     }
 
-    // 按依赖顺序逐个交给 cordis
+    // 按依赖顺序逐个交给 cordis；
+    // 只有依赖插件缺失 / 加载失败 / 未激活时阻止加载；版本不匹配仅标记警告，
+    // 因为服务注入本身已经提供了运行时兼容性判断，避免历史版本号声明误伤核心插件。
     for (const record of this.orderedRecords()) {
       if (record.status !== STATUS.PENDING) continue
+      const hardIssues = this.hardDependsIssues(record)
+      if (hardIssues.length) {
+        record.status = STATUS.INACTIVE
+        record.reason = `依赖不满足：${hardIssues.join('、')}`
+        this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: hardIssues })
+        continue
+      }
       this.activate(record)
     }
 
@@ -475,7 +489,7 @@ export class App {
     }
   }
 
-  /** 根据 cordis fiber 状态回填风语状态 */
+  /** 根据 cordis fiber 状态回填念风状态 */
   reclassify() {
     for (const record of this.records.values()) {
       // 手动标记为禁用 / 循环依赖的保持不变
@@ -524,7 +538,8 @@ export class App {
     return false
   }
 
-  missingDeps(record) {
+  /** 只检查插件 depends 声明（不含 cordis inject 服务），用于加载前的版本/依赖判定 */
+  dependsIssues(record) {
     const missing = []
     for (const [dep, range] of Object.entries(record.manifest.depends || {})) {
       const target = this.records.get(dep)
@@ -533,6 +548,16 @@ export class App {
       else if (target.status === STATUS.ERROR) missing.push(`${dep}(加载失败)`)
       else if (target.status === STATUS.INACTIVE || target.status === STATUS.DISABLED) missing.push(`${dep}(未激活)`)
     }
+    return [...new Set(missing)]
+  }
+
+  /** 硬依赖问题：缺失 / 加载失败 / 未激活；版本不匹配只做警告，不阻塞加载 */
+  hardDependsIssues(record) {
+    return this.dependsIssues(record).filter(item => !/实际|版本不匹配/.test(String(item)))
+  }
+
+  missingDeps(record) {
+    const missing = [...this.dependsIssues(record)]
     for (const name of record.inject || []) {
       if (name === 'app') continue
       if ((record.optionalInject || []).includes(name)) continue
@@ -584,6 +609,14 @@ export class App {
     record.error = null
     record.reason = ''
     record.started = false
+    const depIssues = this.hardDependsIssues(record)
+    if (depIssues.length) {
+      record.status = STATUS.INACTIVE
+      record.reason = `依赖不满足：${depIssues.join('、')}`
+      this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: depIssues })
+      this.emit('plugin:enabled', { id })
+      return false
+    }
     this.activate(record)
     await this.settle(1500)
     this.reclassify()
@@ -659,6 +692,19 @@ export class App {
 
     for (const record of this.records.values()) {
       const id = record.id
+
+      // 依赖版本不匹配：不阻塞加载，但明确标黄提示，避免协议悄悄漂移。
+      for (const item of this.dependsIssues(record)) {
+        if (/实际/.test(String(item))) {
+          push(
+            id,
+            'warning',
+            `依赖版本不匹配：${item}`,
+            '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内',
+          )
+        }
+      }
+
       if (record.status === STATUS.ERROR) {
         push(id, 'error', `加载/运行失败：${record.reason || '未知错误'}`, record.error?.stack || '')
       }
@@ -666,7 +712,17 @@ export class App {
         push(id, 'error', `服务冲突：${record.reason}`, '另一个插件已经注册了同名 singleton 服务')
       }
       if (record.status === STATUS.INACTIVE) {
-        push(id, 'warning', `未激活：${record.reason || '依赖未就绪'}`, '检查 inject 服务名或依赖插件是否启用')
+        const hard = this.hardDependsIssues(record)
+        const versionOnly = !hard.length && /实际|版本/.test(record.reason || '')
+        if (!versionOnly) {
+          const detail = hard.length ? hard.join('、') : record.reason || '依赖未就绪'
+          push(
+            id,
+            'error',
+            `缺少依赖：${detail}`,
+            '检查依赖插件是否安装、启用或加载成功，或依赖版本是否满足声明范围',
+          )
+        }
       }
       if (record.status !== STATUS.ACTIVE) continue
 

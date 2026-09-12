@@ -1,9 +1,14 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * F12 · notification
  * 消息通知：右下角通知中心 + 系统级通知 + 提示音。
  *
  * 三种通知样式：
- *   - system    系统通知：风语 logo + 标题 + 内容；
+ *   - system    系统通知：念风 logo + 标题 + 内容；
  *   - character 角色消息：左侧角色头像，右侧角色名 + 消息预览；
  *   - other     其他通知：通用图标 + 标题 + 内容。
  *
@@ -21,7 +26,7 @@ export const name = 'notification'
 export const version = '2.1.0'
 export const displayName = '消息通知'
 export const description = '基础服务 · 右下角通知中心（系统通知 / 角色消息 / 其他）、系统通知头像、自定义提示音。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '🔔'
 export const core = false
 export const depends = { config: '^1.0.0' }
@@ -30,7 +35,7 @@ export const provides = [{ name: 'notification', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { NOTIFICATION_CSS } from './style.mjs'
-import { FENGYU_LOGO, avatarHtmlFromInfo } from '../../../src/util/identity.mjs'
+import { BRAND_LOGO, avatarHtmlFromInfo } from '../../../src/util/identity.mjs'
 
 const MAX_CARDS = 5
 const CARD_DURATION = 6200
@@ -113,7 +118,7 @@ export function apply(ctx) {
         { className: 'notify-avatar', title: options.title },
       )
     } else if (kind === 'system') {
-      iconHtml = `<div class="notify-logo"><img src="${FENGYU_LOGO}" alt="风语" /></div>`
+      iconHtml = `<div class="notify-logo"><img src="${BRAND_LOGO}" alt="念风chat" /></div>`
     } else {
       iconHtml = `<div class="notify-emoji">${BELL_ICON}</div>`
     }
@@ -125,7 +130,7 @@ export function apply(ctx) {
         <div class="notify-desc"></div>
       </div>
       <button class="notify-close" type="button" title="关闭" aria-label="关闭">×</button>`
-    el.querySelector('.notify-title').textContent = String(options.title || '风语')
+    el.querySelector('.notify-title').textContent = String(options.title || '念风chat')
     el.querySelector('.notify-desc').textContent = String(options.body || '')
     el.querySelector('.notify-close').addEventListener('click', event => {
       event.stopPropagation()
@@ -302,7 +307,7 @@ export function apply(ctx) {
       const dataUrl = textAvatarToDataUrl({ text, c1: options.c1, c2: options.c2 })
       if (dataUrl) return dataUrl
     }
-    return imageToDataUrl(new URL(FENGYU_LOGO, typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/').href)
+    return imageToDataUrl(new URL(BRAND_LOGO, typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/').href)
   }
 
   /** 系统级通知：桌面宿主优先，其次浏览器 Notification */
@@ -326,7 +331,7 @@ export function apply(ctx) {
       try {
         const n = new Notification(title, {
           body,
-          icon: iconDataUrl || FENGYU_LOGO,
+          icon: iconDataUrl || BRAND_LOGO,
           silent: true,
         })
         n.onclick = () => {
@@ -381,7 +386,7 @@ export function apply(ctx) {
     notify(options = {}) {
       const {
         kind = 'system',
-        title = '风语',
+        title = '念风chat',
         body = '',
         level = 'info',
         system = true,

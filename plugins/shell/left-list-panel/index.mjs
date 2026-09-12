@@ -1,3 +1,8 @@
+/*
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ */
 /**
  * S7 · left-list-panel
  * 左列表玻璃板容器（文档 §8.2）：
@@ -8,7 +13,7 @@ export const name = 'left-list-panel'
 export const version = '1.0.0'
 export const displayName = '左列表容器'
 export const description = '视觉框架 · 左列表玻璃板容器，负责视图列表切换与宽度记忆。'
-export const author = '风语内核'
+export const author = '念风内核'
 export const icon = '📋'
 export const core = true
 export const depends = { 'app-shell': '^1.0.0', 'view-router': '^1.0.0' }
