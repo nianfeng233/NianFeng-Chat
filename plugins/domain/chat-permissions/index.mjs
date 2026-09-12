@@ -27,6 +27,15 @@ import { resolveUserNickname } from '../../../src/util/identity.mjs'
 const NS = 'chat-permissions'
 const KEY = 'data'
 const CONFIRM_TIMEOUT = 120000
+/** 用户输入的确认词：去掉零宽字符 / 空白与句末标点后匹配；其它内容一律视为拒绝。 */
+const APPROVE_TEXTS = new Set(['确认', '确认授权', '确定', '同意', 'confirm'])
+const normalizeConfirmText = value =>
+  String(value ?? '')
+    .replace(/[\u200b-\u200d\ufeff]/gi, '')
+    .replace(/[\s\u00a0]+/g, '')
+    .replace(/[。.!！?？,，、~～]+$/g, '')
+    .trim()
+    .toLowerCase()
 
 export function apply(ctx) {
   const store = ctx.inject('chat-store')
@@ -68,6 +77,24 @@ export function apply(ctx) {
     const userId = String(config.get('chat.userId', 'web-user') || 'web-user')
     const identityUserId = String(identity.userId || userId)
     const userName = String(identity.userName || resolveUserNickname(config))
+    // 确认主体：除网页端主人身份外，还要包含来源渠道自己声明的身份 / 信任名单。
+    // 外部渠道（微信clawbot / NapCat / QQ 官方机器人）收到“确认”时，发送者标识来自
+    // 渠道侧，不一定是网页端身份；这里在创建 pending 时一次性固化允许确认的 ID 列表，
+    // 避免用户明明在自己的渠道里回复“确认”却被当成普通消息写入聊天记录。
+    const confirmUserIds = []
+    const addConfirmId = value => {
+      const id = String(value ?? '').trim()
+      if (!id || confirmUserIds.includes(id)) return
+      confirmUserIds.push(id)
+      // NapCat / QQ 群聊的发送者标识带 qq: 前缀，而渠道配置里的信任名单可能只写数字。
+      if (!id.includes(':') && /^\d{3,20}$/.test(id)) confirmUserIds.push(`qq:${id}`)
+    }
+    addConfirmId(userId)
+    addConfirmId(identityUserId)
+    addConfirmId(conv.meta?.identityUserId)
+    addConfirmId(conv.meta?.identityUserName)
+    for (const trusted of Array.isArray(conv.meta?.trustedConfirmIds) ? conv.meta.trustedConfirmIds : []) addConfirmId(trusted)
+    for (const trusted of Array.isArray(conv.meta?.trustedUserIds) ? conv.meta.trustedUserIds : []) addConfirmId(trusted)
     return {
       conversationId,
       roleId: conv.meta?.roleId || conv.id,
@@ -76,6 +103,7 @@ export function apply(ctx) {
       identityUserId,
       userName,
       identitySource: identity.source || 'local',
+      confirmUserIds,
       channel,
       channelGroup: channel.group || 'private',
       // 渠道插件在会话 meta 上声明的策略（clawbot 的“跨渠道读取 / 发送”开关）。
@@ -119,13 +147,17 @@ export function apply(ctx) {
         targetName: confirmTarget.targetName || confirmTarget.targetChannelId,
         createdAt: Date.now(),
       }
-      // 允许确认的主体：默认是网页端主人（userId / identityUserId）；群聊等多人渠道
-      // 可以由渠道插件显式传入 trusted openid 列表；空数组表示“谁都不能确认”。
+      // 允许确认的主体：优先使用来源会话固化的 confirmUserIds（网页主人 + 渠道身份 /
+      // 信任名单）；调用方也可以显式覆盖；空数组表示“谁都不能确认”。
+      const defaultAllowed =
+        Array.isArray(confirmTarget.confirmUserIds) && confirmTarget.confirmUserIds.length
+          ? confirmTarget.confirmUserIds
+          : [confirmTarget.userId, confirmTarget.identityUserId]
       const allowed =
         allowedUserIds === null
-          ? [confirmTarget.userId, confirmTarget.identityUserId].map(item => String(item || '').trim()).filter(Boolean)
+          ? [...new Set(defaultAllowed.map(item => String(item || '').trim()).filter(Boolean))]
           : Array.isArray(allowedUserIds)
-            ? allowedUserIds.map(item => String(item || '').trim()).filter(Boolean)
+            ? [...new Set(allowedUserIds.map(item => String(item || '').trim()).filter(Boolean))]
             : null
       const finish = (approved, { timedOut = false } = {}) => {
         const record = pending.get(id)
@@ -309,22 +341,34 @@ export function apply(ctx) {
     /**
      * 用户输入“确认”/其它内容时由拦截器或渠道插件调用；返回是否消费了这条输入。
      * options.senderId：消息发送者标识（群聊里是成员 openid / 渠道内稳定 ID）。
-     * options.allowedUserIds：显式覆盖待确认请求允许的 senderId 列表；
-     *   不传时使用请求创建时的默认列表（网页端主人）。
+     * options.allowedUserIds：渠道插件在解析时补充的允许确认 ID（会与请求创建时
+     *   固化的 confirmUserIds 取并集，而不是覆盖，避免渠道身份变化后旧 pending 失效）。
      * 非授权发送者的“确认”会被无视（handled=false），既不消耗请求也不改变状态。
      */
     resolvePending(conversationId, text, options = {}) {
       const item = [...pending.values()].find(record => record.conversationId === conversationId)
       if (!item) return { handled: false }
       const senderId = String(options.senderId || '').trim()
-      const allowed = Array.isArray(options.allowedUserIds)
+      const extraAllowed = Array.isArray(options.allowedUserIds)
         ? options.allowedUserIds.map(value => String(value || '').trim()).filter(Boolean)
-        : item.allowedUserIds
+        : []
+      const allowed =
+        !Array.isArray(options.allowedUserIds) && item.allowedUserIds === null
+          ? null
+          : [
+              ...new Set([
+                ...extraAllowed,
+                ...(Array.isArray(item.allowedUserIds) ? item.allowedUserIds.map(value => String(value || '').trim()).filter(Boolean) : []),
+              ]),
+            ]
       if (senderId && Array.isArray(allowed) && !allowed.includes(senderId)) {
+        ctx.logger.debug?.(`[chat-permissions] 忽略未授权确认：sender=${senderId || '空'} allowed=${allowed.join(',') || '无'}`)
         return { handled: false, ignored: true }
       }
-      const approved = String(text ?? '').trim() === '确认'
+      const normalized = normalizeConfirmText(text)
+      const approved = APPROVE_TEXTS.has(normalized)
       item.finish(approved)
+      ctx.logger.debug?.(`[chat-permissions] 确认输入已消费：${approved ? '同意' : '拒绝'}（${JSON.stringify(String(text ?? '').slice(0, 20))}）`)
       // handled=true 表示这条输入已被确认流程消费（无论同意还是拒绝）；
       // approved 才表示是否放行。非授权发送者在上面的分支里返回 ignored。
       return { handled: true, approved }
@@ -339,6 +383,10 @@ export function apply(ctx) {
     payload => {
       const text = payload?.text
       if (!text || !pending.size) return payload
+      // 外部渠道插件会先用真实渠道身份调用 resolvePending；它们随后发出的
+      // message:send 只用于触发模型，不能因为 payload 里没有 senderId 就把
+      // 未授权渠道的确认“补批准”。网页输入框没有这两个标记，保持原有行为。
+      if (payload?.skipUserAppend === true || payload?.external === true) return payload
       const item = [...pending.values()].find(record => record.conversationId === payload.conversationId)
       if (!item) return payload
       const result = service.resolvePending(payload.conversationId, text, {

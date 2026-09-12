@@ -700,12 +700,13 @@ export function apply(ctx) {
       ? channel.meta.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean)
       : []
     const trustedForSender = trustedIds.map(id => (id.startsWith('qq:') ? id : `qq:${id}`))
+    const trustedForGroup = trustedIds.map(id => (id.startsWith('qq:') ? id : `qq:group:${id}`))
     const confirmContext =
       message.sessionType === 'group'
-        ? { senderId: String(message.senderId || ''), allowedUserIds: trustedIds }
+        ? { senderId: String(sender.userId || ''), allowedUserIds: trustedForGroup }
         : (binding?.identityMode || 'owner') === 'guest'
           ? { senderId: sender.userId, allowedUserIds: trustedForSender }
-          : { senderId: sender.userId, allowedUserIds: null }
+          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean) }
     const chatPermissions = ctx.registry.get('chat-permissions')
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text, confirmContext)
     if (pendingConfirm?.handled) {

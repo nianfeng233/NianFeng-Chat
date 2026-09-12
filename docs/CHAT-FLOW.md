@@ -20,7 +20,8 @@
   │  -> events.emit('message:send', {...}, { interceptor: true })
   ▼
 [chat-permissions]  若当前会话有敏感确认在等待：
-  │  输入“确认” -> 放行原工具调用
+  │  网页输入框：输入“确认” -> 放行原工具调用
+  │  外部渠道：微信clawbot / NapCat 插件先用渠道身份消费“确认”，不会触发模型
   │  输入其它   -> 视为拒绝
   │  两种情况下这条输入都被消费（confirmHandled=true）
   ▼

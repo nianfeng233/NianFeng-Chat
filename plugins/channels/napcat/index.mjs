@@ -599,14 +599,19 @@ export function apply(ctx) {
     let decision = null
     if (category !== 'group') {
       decision = { trigger: true, ignore: false, reason: 'private', rules }
-    } else if (rules.requireAt) {
-      let trigger = message.mentionedSelf === true
-      let reason = 'requireAt'
-      if (trigger && rules.whitelistForAt === true) {
+    } else if (message.mentionedSelf === true) {
+      // @ 机器人始终优先回复（可再受“艾特白名单”限制）；
+      // “仅 @ 时回复”关闭后，只影响未 @ 的普通消息是否按概率触发。
+      let trigger = true
+      let reason = 'mention'
+      if (rules.whitelistForAt === true) {
         trigger = whitelistAllowed()
-        reason = trigger ? 'requireAt+whitelist' : 'requireAt+whitelist-blocked'
+        reason = trigger ? 'mention+whitelist' : 'mention+whitelist-blocked'
       }
       decision = { trigger, ignore: false, reason, rules }
+    } else if (rules.requireAt) {
+      // 启用“仅 @ 时回复”：没有 @ 机器人的群消息不触发，只静默写入上下文。
+      decision = { trigger: false, ignore: false, reason: 'requireAt', rules }
     } else {
       const probability = Math.max(0, Math.min(100, Number(rules.replyProbability) || 0))
       let trigger = true
@@ -764,10 +769,10 @@ export function apply(ctx) {
     const chatPermissions = ctx.registry.get('chat-permissions')
     const confirmContext =
       targetTypeOf(channel) === 'group'
-        ? { senderId: sender.userId, allowedUserIds: senderIds }
+        ? { senderId: sender.userId, allowedUserIds: trustedForSender }
         : channel.meta?.identityMode === 'guest'
           ? { senderId: sender.userId, allowedUserIds: trustedForSender }
-          : { senderId: sender.userId, allowedUserIds: null }
+          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean) }
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, text, confirmContext)
     if (pendingConfirm?.handled) {
       await ackInbox(channel.id, [message.id])
@@ -789,6 +794,7 @@ export function apply(ctx) {
         senderRole: message.senderRole || '',
         messageId: message.messageId,
         mentionedSelf: message.mentionedSelf === true,
+        atUserIds: Array.isArray(message.atUserIds) ? message.atUserIds : [],
         quote: message.quote || null,
         images: Array.isArray(message.images) ? message.images : [],
         triggered: decision.trigger === true,
@@ -1182,14 +1188,14 @@ export function apply(ctx) {
               <div class="nc-field-help">白名单列表本身不会自动生效；下面两个开关分别控制「艾特回复」和「概率回复」是否只允许白名单里的 QQ 触发。</div>
             </label>
             <div class="nc-checks" style="flex-direction:column;gap:7px">
-              <label><input type="checkbox" data-nc-whitelist-at ${rules.whitelistForAt === true ? 'checked' : ''} /> 艾特回复时应用白名单（只有白名单 QQ 的 @ 才会触发）</label>
+              <label><input type="checkbox" data-nc-whitelist-at ${rules.whitelistForAt === true ? 'checked' : ''} /> @ 触发也受白名单限制（只有白名单 QQ 的 @ 才会回复）</label>
               <label><input type="checkbox" data-nc-whitelist-prob ${rules.whitelistForProbability === true ? 'checked' : ''} /> 概率回复时应用白名单（只有白名单 QQ 才参与概率触发）</label>
             </div>
-            <label class="nc-checks">
-              <label><input type="checkbox" data-nc-require-at ${rules.requireAt !== false ? 'checked' : ''} /> 启用艾特才回复（只有 @ 登录的机器人 QQ 才触发模型）</label>
-            </label>
+            <div class="nc-checks">
+              <label><input type="checkbox" data-nc-require-at ${rules.requireAt !== false ? 'checked' : ''} /> 仅 @ 时回复（关闭后：@ 仍直接回复，其它消息按概率触发）</label>
+            </div>
             <div class="nc-field" data-nc-probability-row>
-              <span>回复概率（关闭艾特限制后，任何消息按概率触发模型）</span>
+              <span>普通消息回复概率（@ 机器人的消息不受此概率影响）</span>
               <div class="nc-range-row">
                 <input type="range" min="0" max="100" step="1" data-nc-probability value="${Number(rules.replyProbability) || 0}" />
                 <input class="nc-range-num" type="number" min="0" max="100" step="1" data-nc-probability-number value="${Number(rules.replyProbability) || 0}" />
@@ -1611,7 +1617,7 @@ export function apply(ctx) {
         </label>
         ${
           editingInstance && instance?.mode === 'reverse' && instance?.hasToken
-            ? '<label class="nc-checks"><label><input type="checkbox" data-nc-inst-clear-token /> 清空 Token（让 NapCat 保持不填 Token，兼容已有反向连接）</label></label>'
+            ? '<div class="nc-checks"><label><input type="checkbox" data-nc-inst-clear-token /> 清空 Token（让 NapCat 保持不填 Token，兼容已有反向连接）</label></div>'
             : ''
         }
         <div class="nc-note" data-nc-inst-note>
