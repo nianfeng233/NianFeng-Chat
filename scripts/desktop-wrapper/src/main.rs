@@ -57,8 +57,12 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let base_dir = prepare_base_dir()?;
-    let runtime_dir = base_dir.join("runtime");
+    // 按 BUILD_ID 使用独立运行时目录：升级 exe 时旧版本 node.exe 可能仍在运行，
+    // 覆盖 runtime/node.exe 会触发“文件被占用(os error 32)”导致双击无反应。
+    // 每个构建号一个目录，互不冲突；旧目录会尽力清理，清理失败不影响本次启动。
+    let runtime_dir = base_dir.join(format!("runtime-{BUILD_ID}"));
     extract_app(&runtime_dir)?;
+    cleanup_old_runtimes(&base_dir, &runtime_dir);
 
     let app_dir = runtime_dir.join("app");
     let node_path = runtime_dir.join("node.exe");
@@ -306,9 +310,31 @@ fn fail(message: &str) -> ! {
             break;
         }
     }
+    show_fatal_message(&line);
     eprintln!("{line}");
     std::process::exit(1);
 }
+
+#[cfg(target_os = "windows")]
+fn show_fatal_message(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND};
+    let title: Vec<u16> = "念风chat 启动失败\0".encode_utf16().collect();
+    let body: Vec<u16> = format!("{message}\n\n日志目录：%LOCALAPPDATA%\\NianFengChat\\error.log\0")
+        .encode_utf16()
+        .collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_message(_message: &str) {}
+
 
 fn now_string() -> String {
     // 避免引入时间库：使用 systemtime 转 unix 秒；日志只用于排查。
@@ -338,6 +364,25 @@ fn extract_app(base_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&marker, BUILD_ID)?;
     Ok(())
 }
+
+/// 尽力清理旧构建的运行时目录；删除失败（旧 node.exe 还在运行）就保留，不影响新版本启动。
+fn cleanup_old_runtimes(base_dir: &Path, current: &Path) {
+    if let Ok(entries) = fs::read_dir(base_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == current || !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+            if name.starts_with("runtime-") {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+    // 旧版本使用固定 runtime/；被占用时忽略，新版本使用 runtime-<BUILD_ID>。
+    let _ = fs::remove_dir_all(base_dir.join("runtime"));
+}
+
 
 fn free_port() -> Result<u16, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;

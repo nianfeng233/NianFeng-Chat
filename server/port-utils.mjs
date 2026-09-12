@@ -67,7 +67,7 @@ export async function looksLikeNianFeng(port) {
     const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: timeout(1200) })
     if (res.ok) {
       const data = await res.json().catch(() => null)
-      if (data && (data.name === '念风后端' || data.ok === true)) return true
+      if (data && (String(data.name || '').includes('念风') || data.ok === true)) return true
     }
   } catch (_) {
     /* 继续尝试页面 */
