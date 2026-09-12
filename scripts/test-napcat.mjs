@@ -207,6 +207,30 @@ async function main() {
     )
     check('群消息识别出 @ 机器人', inboxMessage?.mentionedSelf === true && inboxMessage?.text?.includes('你好'), `mentionedSelf=${inboxMessage?.mentionedSelf} text=${inboxMessage?.text}`)
 
+    // 3b) 事件不带 self_id 时回退到 get_login_info 的登录账号；
+    //     message 数组里没有 at、但 raw_message 的 CQ 码里有时也要能识别 @ 机器人。
+    pushEvent({
+      post_type: 'message',
+      message_type: 'group',
+      sub_type: 'normal',
+      message_id: 1002,
+      group_id: 22222,
+      user_id: 10002,
+      time: Math.floor(Date.now() / 1000),
+      raw_message: '[CQ:at,qq=10001] 回退检测',
+      message: [{ type: 'text', data: { text: '回退检测' } }],
+      sender: { user_id: 10002, nickname: 'QQ昵称甲', card: '群昵称甲', role: 'member' },
+    })
+    const fallbackMessage = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(channelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '1002')?.message || null
+    })
+    check(
+      '缺少 self_id 时使用登录账号检测 @ 机器人',
+      fallbackMessage?.mentionedSelf === true && fallbackMessage?.selfId === '10001' && fallbackMessage?.atUserIds?.includes('10001'),
+      JSON.stringify({ selfId: fallbackMessage?.selfId, mentionedSelf: fallbackMessage?.mentionedSelf, atUserIds: fallbackMessage?.atUserIds }),
+    )
+
     // 4) 发送：引用 + 艾特
     const beforeActions = actions.length
     const send = await request('/napcat/send', {

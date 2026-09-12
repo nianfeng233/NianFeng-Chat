@@ -184,13 +184,23 @@ function segmentImages(segments) {
   return out
 }
 
-function segmentMentionedSelf(segments, selfId) {
-  const id = String(selfId || '')
-  if (!id) return false
+/** 群号 / QQ 号可能有字符串、数字、带前后空格等形态：统一成去除非数字后的结果再比较。 */
+function normalizeQqId(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  const digits = text.replace(/\D/g, '')
+  return digits || text
+}
+
+function segmentMentionedSelf(segments, selfIds) {
+  const ids = (Array.isArray(selfIds) ? selfIds : [selfIds])
+    .map(normalizeQqId)
+    .filter(Boolean)
+  if (!ids.length) return false
   return (Array.isArray(segments) ? segments : []).some(segment => {
     if (segment?.type !== 'at') return false
-    const qq = String(segment?.data?.qq || '')
-    return qq === id
+    const qq = normalizeQqId(segment?.data?.qq)
+    return qq && ids.includes(qq)
   })
 }
 
@@ -699,8 +709,23 @@ export function apply(ctx) {
     const senderId = String(payload.user_id ?? sender.user_id ?? '')
     const peerId = messageType === 'group' ? groupId : senderId
     if (!peerId) return null
-    const selfId = String(payload.self_id ?? rt.login?.userId ?? '')
+    const payloadSelfId = String(payload.self_id ?? '').trim()
+    const loginSelfId = String(rt.login?.userId ?? '').trim()
+    // 某些 NapCat 版本 / 转发链路不会在每个消息事件里带 self_id；登录信息里的 userId
+    // 同样可以作为 @ 检测的主体，避免“@ 了机器人但 mentionedSelf=false”。
+    const selfId = payloadSelfId || loginSelfId
+    const selfIds = [...new Set([payloadSelfId, loginSelfId].filter(Boolean))]
     const segments = normalizeSegments(payload.message)
+    // 部分适配器在 message 数组里不带 at，只在 raw_message 的 CQ 码里带；两边都检测一次。
+    const rawSegments = normalizeSegments(payload.raw_message || '')
+    const atUserIds = [
+      ...new Set(
+        [...(Array.isArray(segments) ? segments : []), ...(Array.isArray(rawSegments) ? rawSegments : [])]
+          .filter(segment => segment?.type === 'at')
+          .map(segment => String(segment?.data?.qq ?? '').trim())
+          .filter(qq => qq && qq !== 'all'),
+      ),
+    ]
     const text = segmentText(segments)
     const images = segmentImages(segments)
     const quoted = segmentQuote(segments)
@@ -718,8 +743,11 @@ export function apply(ctx) {
       senderCard: safeString(messageType === 'group' ? sender.card || '' : '', 80),
       senderRole: safeString(sender.role || '', 20),
       selfId,
-      mentionedSelf: segmentMentionedSelf(segments, selfId),
-      mentionAll: (Array.isArray(segments) ? segments : []).some(segment => segment?.type === 'at' && String(segment?.data?.qq) === 'all'),
+      mentionedSelf: segmentMentionedSelf(segments, selfIds) || segmentMentionedSelf(rawSegments, selfIds),
+      atUserIds,
+      mentionAll: [...(Array.isArray(segments) ? segments : []), ...(Array.isArray(rawSegments) ? rawSegments : [])].some(
+        segment => segment?.type === 'at' && normalizeQqId(segment?.data?.qq) === 'all',
+      ),
       text,
       images: [],
       rawImages: images,

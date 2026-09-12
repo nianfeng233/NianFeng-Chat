@@ -952,11 +952,14 @@ export function apply(ctx) {
     const conv = ensureConversation(channel)
     if (!conv) return
 
+    const identity = channelIdentity(channel)
     // 跨渠道敏感操作的“确认 / 拒绝”回复直接交给 chat-permissions 消费，
     // 不再作为普通聊天内容触发新一轮模型调用（与输入框确认的语义保持一致）。
+    // 微信侧发送者由渠道身份代表主人，因此把当前渠道身份一并作为允许确认人传进去。
     const chatPermissions = ctx.registry.get('chat-permissions')
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text, {
-      senderId: channelIdentity(channel).userId,
+      senderId: identity.userId,
+      allowedUserIds: [identity.userId].filter(Boolean),
     })
     if (pendingConfirm?.handled) {
       await ackInbox(channel.id, [message.id])
@@ -964,7 +967,6 @@ export function apply(ctx) {
     }
 
     const permissions = permissionsOf(channel)
-    const identity = channelIdentity(channel)
     if (store?.append) {
       store.append(conv.id, {
         role: 'user',

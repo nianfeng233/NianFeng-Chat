@@ -207,6 +207,29 @@ async function main() {
         messageType: 'group',
       }).trigger === false,
   )
+  // 用户只勾选“@ 触发也受白名单限制”、没有勾选“仅 @ 时回复”时，
+  // @ 机器人也必须稳定回复，不能再被回复概率随机拦下。
+  check(
+    'NapCat 群聊规则：关闭仅@限制后，@ 机器人仍然直接触发',
+    napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 0 }), {
+      senderId: '42',
+      messageType: 'group',
+      mentionedSelf: true,
+    }).trigger === true,
+  )
+  check(
+    'NapCat 群聊规则：关闭仅@限制后，普通消息仍按概率触发',
+    napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 100 }), {
+      senderId: '42',
+      messageType: 'group',
+      mentionedSelf: false,
+    }).trigger === true &&
+      napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 0 }), {
+        senderId: '42',
+        messageType: 'group',
+        mentionedSelf: false,
+      }).trigger === false,
+  )
 
   const smokeSessions = ctx.inject('session-service')
   const hiddenConversation = smokeSessions.create({ name: '隐藏渠道会话冒烟', meta: { hiddenFromSessionList: true } })
@@ -597,6 +620,87 @@ async function main() {
     sessions.remove(inputConv.id)
   }
 
+  section('⑥c 外部渠道敏感确认（微信clawbot 回归）')
+  {
+    const permissions = ctx.inject('chat-permissions')
+    const store = ctx.inject('chat-store')
+    const groups = channelRegistry.groups('private')
+    const group = groups[0] || channelRegistry.addGroup('private', '确认测试')
+    const roleConv = sessions.create({ id: 'smoke-confirm-role', name: '确认测试角色' })
+    const targetConv = sessions.create({ id: 'smoke-confirm-target', name: '确认目标网页会话' })
+    const clawConv = sessions.create({
+      id: 'smoke-confirm-claw',
+      name: '微信确认测试会话',
+      meta: {
+        channelId: 'wechat-clawbot:smoke-confirm-claw-channel',
+        channelType: 'wechat-clawbot',
+        channelGroup: 'private',
+        source: 'wechat-clawbot',
+        roleId: roleConv.id,
+        hiddenFromSessionList: true,
+        channelConversation: true,
+        // 故意使用与网页端身份不同的渠道身份，覆盖“微信主人自定义用户标识”的场景。
+        identityUserId: 'smoke-wechat-owner',
+        identityUserName: '微信主人',
+        crossReadable: true,
+        crossSendable: true,
+        sensitiveConfirm: true,
+      },
+    })
+    const clawChannel = channelRegistry.addChannel('private', group.id, {
+      type: 'wechat-clawbot',
+      name: '微信确认测试渠道',
+      color: '#07c160',
+      status: 'online',
+      meta: {
+        kind: 'wechat-clawbot',
+        roleId: roleConv.id,
+        category: 'private',
+        identity: { userId: 'smoke-wechat-owner', userName: '微信主人' },
+        conversationId: clawConv.id,
+        permissions: { read: true, reply: true, context: true, typing: false, images: false, documents: false, crossRead: true, crossSend: true, confirm: true },
+      },
+    })
+    let confirmRequest = null
+    const offRequest = ctx.on('chat:confirm-request', payload => {
+      confirmRequest = payload
+    })
+    const pendingDecision = permissions.authorize({
+      conversationId: clawConv.id,
+      action: 'read',
+      channel: `nova:web:${targetConv.id}`,
+    })
+    await waitFor(() => confirmRequest, { timeout: 2000 })
+    check('外部渠道跨渠道操作会创建敏感确认', !!confirmRequest && confirmRequest.conversationId === clawConv.id, JSON.stringify(confirmRequest))
+    const clawChannelId = `wechat-clawbot:${clawChannel.id}`
+    const beforeConfirmMessages = store.messagesOf(clawChannelId).length
+    ctx.emit('backend:event', {
+      event: 'clawbot:message',
+      data: {
+        channelId: clawChannel.id,
+        message: {
+          id: 'smoke-wx-confirm-1',
+          text: '确认',
+          fromUserId: 'smoke-openid-1',
+          contextToken: 'smoke-ctx',
+          nickname: '微信主人',
+        },
+      },
+    })
+    const confirmed = await Promise.race([pendingDecision, sleep(1500).then(() => null)])
+    check('微信侧回复“确认”后放行跨渠道读取', confirmed?.ok === true && confirmed?.confirmed === true, JSON.stringify(confirmed))
+    check(
+      '渠道身份确认不会把“确认”写进聊天记录',
+      store.messagesOf(clawChannelId).length === beforeConfirmMessages,
+      `${beforeConfirmMessages} → ${store.messagesOf(clawChannelId).length}`,
+    )
+    offRequest?.()
+    channelRegistry.removeChannel('private', clawChannel.id)
+    sessions.remove(clawConv.id)
+    sessions.remove(targetConv.id)
+    sessions.remove(roleConv.id)
+  }
+
   // 角色下拉框回归：chat-store 会把普通会话登记为 nova 网页渠道，它们仍是角色；
   // 其它渠道（wechat-clawbot / qqbot）的聊天记录容器不能被当成角色列出来。
   const roleConv = smokeSessions.create({ id: 'smoke-role-conv', name: '冒烟角色' })
@@ -676,6 +780,10 @@ async function main() {
   const ncRequireAt = ncCreateDialog?.querySelector('[data-nc-require-at]')
   const ncProbability = ncCreateDialog?.querySelector('[data-nc-probability]')
   const ncProbabilityNumber = ncCreateDialog?.querySelector('[data-nc-probability-number]')
+  check(
+    'NapCat “仅 @ 时回复”复选框不再嵌套 label（避免点击被浏览器双触发）',
+    !!ncRequireAt && ncRequireAt.closest('label')?.parentElement?.tagName !== 'LABEL',
+  )
   if (ncRequireAt && ncProbability) {
     ncRequireAt.checked = false
     ncRequireAt.dispatchEvent({ type: 'change' })
