@@ -6,10 +6,39 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 89 个插件，按目录名排序；真正的加载顺序由
+ * 共 90 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
+  {
+    "id": "napcat",
+    "version": "1.0.0",
+    "displayName": "NapCat",
+    "description": "渠道插件 · NapCatQQ / OneBot 11：私聊、群聊、隐私、连接复用与群聊规则。",
+    "core": false,
+    "enabled": true,
+    "icon": "🐱",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "channel-base": "^1.0.0",
+      "channel-list": "^1.0.0",
+      "channel-detail-host": "^3.0.0",
+      "session-service": "^2.0.0"
+    },
+    "optionalDepends": {},
+    "provides": [
+      {
+        "name": "napcat-channel",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [
+      "network"
+    ],
+    "path": "./plugins/channels/napcat/index.mjs",
+    "dir": "plugins/channels/napcat"
+  },
   {
     "id": "qqbot",
     "version": "1.2.1",
@@ -26,6 +55,7 @@ export const plugins = [
       "channel-detail-host": "^3.0.0",
       "session-service": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "network"
@@ -49,6 +79,7 @@ export const plugins = [
       "channel-detail-host": "^3.0.0",
       "session-service": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "network"
@@ -69,6 +100,7 @@ export const plugins = [
     "depends": {
       "storage": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "channel-registry",
@@ -94,6 +126,7 @@ export const plugins = [
       "config": "^1.0.0",
       "event-bus": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-permissions",
@@ -117,6 +150,7 @@ export const plugins = [
     "depends": {
       "event-bus": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-queue",
@@ -141,6 +175,7 @@ export const plugins = [
       "session-service": "^2.0.0",
       "message-service": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-store",
@@ -164,6 +199,7 @@ export const plugins = [
     "depends": {
       "storage": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "document-service",
@@ -185,6 +221,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "export-service",
@@ -206,6 +243,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "image-service",
@@ -230,6 +268,7 @@ export const plugins = [
       "session-service": "^2.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "message-service",
@@ -253,6 +292,7 @@ export const plugins = [
     "depends": {
       "service-container": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "model-registry",
@@ -277,6 +317,7 @@ export const plugins = [
       "model-registry": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "model-service",
@@ -301,6 +342,7 @@ export const plugins = [
       "plugin-loader": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "plugin-manager",
@@ -324,6 +366,7 @@ export const plugins = [
     "depends": {
       "session-service": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "search-service",
@@ -348,6 +391,7 @@ export const plugins = [
       "storage": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "session-service",
@@ -371,6 +415,7 @@ export const plugins = [
     "depends": {
       "event-bus": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "tool-registry",
@@ -394,6 +439,7 @@ export const plugins = [
     "depends": {
       "config": "^1.1.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "user-identity",
@@ -417,6 +463,7 @@ export const plugins = [
     "depends": {
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "view-router",
@@ -440,6 +487,7 @@ export const plugins = [
     "depends": {
       "i18n": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/extras/lang-zh-cn/index.mjs",
@@ -456,6 +504,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "markdown",
@@ -481,6 +530,7 @@ export const plugins = [
       "session-service": "^2.0.0",
       "message-service": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "channel-base",
@@ -505,6 +555,7 @@ export const plugins = [
       "session-service": "^2.0.0",
       "model-registry": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "character-editor",
@@ -535,6 +586,7 @@ export const plugins = [
       "chat-queue": "^1.0.0",
       "chat-permissions": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-flow",
@@ -561,6 +613,7 @@ export const plugins = [
       "notification": "^2.1.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/features/chat-notify/index.mjs",
@@ -584,6 +637,7 @@ export const plugins = [
       "context-builder": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-tools",
@@ -608,6 +662,7 @@ export const plugins = [
       "chat-store": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "context-builder",
@@ -632,6 +687,7 @@ export const plugins = [
       "model-registry": "^1.0.0",
       "backend-client": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/features/model-adapter-backend/index.mjs",
@@ -650,6 +706,7 @@ export const plugins = [
     "depends": {
       "settings-container": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "official-service",
@@ -675,6 +732,7 @@ export const plugins = [
     "depends": {
       "plugin-manager": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/features/plugin-health-guard/index.mjs",
@@ -691,6 +749,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "api",
@@ -716,6 +775,7 @@ export const plugins = [
     "depends": {
       "storage": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "config",
@@ -737,6 +797,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "context-menu",
@@ -758,6 +819,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "error-reporter",
@@ -781,6 +843,7 @@ export const plugins = [
     "depends": {
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "i18n",
@@ -802,6 +865,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "shortcuts",
@@ -823,6 +887,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "logs",
@@ -844,6 +909,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "modal",
@@ -867,6 +933,7 @@ export const plugins = [
     "depends": {
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "notification",
@@ -891,6 +958,7 @@ export const plugins = [
       "config": "^1.0.0",
       "event-bus": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "permissions",
@@ -912,6 +980,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "slots",
@@ -933,6 +1002,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "storage",
@@ -956,6 +1026,7 @@ export const plugins = [
     "depends": {
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "theme",
@@ -977,6 +1048,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "toast",
@@ -998,6 +1070,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "tooltip",
@@ -1019,6 +1092,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "dependency-resolver",
@@ -1040,6 +1114,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "event-bus",
@@ -1061,6 +1136,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "lifecycle",
@@ -1085,6 +1161,7 @@ export const plugins = [
       "event-bus": "^1.0.0",
       "dependency-resolver": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "plugin-loader",
@@ -1106,6 +1183,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "service-container",
@@ -1127,6 +1205,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {},
+    "optionalDepends": {},
     "provides": [
       {
         "name": "app-shell",
@@ -1150,6 +1229,7 @@ export const plugins = [
     "depends": {
       "bg-provider": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/shell/bg-aurora/index.mjs",
@@ -1168,6 +1248,7 @@ export const plugins = [
     "depends": {
       "bg-provider": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/shell/bg-image/index.mjs",
@@ -1186,6 +1267,7 @@ export const plugins = [
     "depends": {
       "service-container": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "bg-provider",
@@ -1209,6 +1291,7 @@ export const plugins = [
     "depends": {
       "bg-provider": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/shell/bg-solid/index.mjs",
@@ -1228,6 +1311,7 @@ export const plugins = [
       "app-shell": "^1.0.0",
       "view-router": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "left-list-panel",
@@ -1251,6 +1335,7 @@ export const plugins = [
     "depends": {
       "app-shell": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "rail",
@@ -1275,6 +1360,7 @@ export const plugins = [
       "app-shell": "^1.0.0",
       "view-router": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "right-main-panel",
@@ -1298,6 +1384,7 @@ export const plugins = [
     "depends": {
       "app-shell": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "titlebar",
@@ -1321,6 +1408,7 @@ export const plugins = [
     "depends": {
       "titlebar": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/brand-widget/index.mjs",
@@ -1339,6 +1427,7 @@ export const plugins = [
     "depends": {
       "message-list": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/bubble-default/index.mjs",
@@ -1358,6 +1447,7 @@ export const plugins = [
       "channel-view": "^1.0.0",
       "channel-registry": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/channel-detail-host/index.mjs",
@@ -1377,6 +1467,7 @@ export const plugins = [
       "left-list-panel": "^1.0.0",
       "channel-registry": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "channel-list",
@@ -1402,6 +1493,7 @@ export const plugins = [
       "left-list-panel": "^1.0.0",
       "view-router": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "channel-view",
@@ -1425,6 +1517,7 @@ export const plugins = [
     "depends": {
       "chat-view": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/chat-header/index.mjs",
@@ -1445,6 +1538,7 @@ export const plugins = [
       "left-list-panel": "^1.0.0",
       "view-router": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "chat-view",
@@ -1469,6 +1563,7 @@ export const plugins = [
       "chat-view": "^1.0.0",
       "message-service": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "composer",
@@ -1493,6 +1588,7 @@ export const plugins = [
       "search-service": "^1.0.0",
       "rail": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "global-search",
@@ -1517,6 +1613,7 @@ export const plugins = [
       "chat-view": "^1.0.0",
       "message-service": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "message-list",
@@ -1545,6 +1642,7 @@ export const plugins = [
       "rail": "^1.0.0",
       "view-router": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/rail-nav-buttons/index.mjs",
@@ -1563,6 +1661,7 @@ export const plugins = [
     "depends": {
       "rail": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "rail-plugin-slot",
@@ -1587,6 +1686,7 @@ export const plugins = [
       "left-list-panel": "^1.0.0",
       "session-service": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/session-list/index.mjs",
@@ -1605,6 +1705,7 @@ export const plugins = [
     "depends": {
       "settings-view": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "settings-container",
@@ -1629,6 +1730,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "plugin-manager": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-about/index.mjs",
@@ -1648,6 +1750,7 @@ export const plugins = [
       "settings-item-theme": "^1.0.0",
       "message-list": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-bubble/index.mjs",
@@ -1668,6 +1771,7 @@ export const plugins = [
       "chat-store": "^1.0.0",
       "session-service": "^2.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-chat-records/index.mjs",
@@ -1687,6 +1791,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "permissions": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "code-execution"
@@ -1708,6 +1813,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "permissions": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-data/index.mjs",
@@ -1726,6 +1832,7 @@ export const plugins = [
     "depends": {
       "settings-container": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-general/index.mjs",
@@ -1745,6 +1852,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "backend-client": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "network"
@@ -1767,6 +1875,7 @@ export const plugins = [
       "permissions": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "network"
@@ -1789,6 +1898,7 @@ export const plugins = [
       "notification": "^2.1.0",
       "permissions": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [
       "notify"
@@ -1810,6 +1920,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "plugin-manager": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-plugins/index.mjs",
@@ -1829,6 +1940,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "permissions": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-privacy/index.mjs",
@@ -1848,6 +1960,7 @@ export const plugins = [
       "settings-container": "^1.0.0",
       "keyboard-shortcuts": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-shortcuts/index.mjs",
@@ -1868,6 +1981,7 @@ export const plugins = [
       "theme-tokens": "^1.0.0",
       "bg-provider": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "appearance-page",
@@ -1891,6 +2005,7 @@ export const plugins = [
     "depends": {
       "settings-container": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/settings-item-unimplemented/index.mjs",
@@ -1909,6 +2024,7 @@ export const plugins = [
     "depends": {
       "app-shell": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [
       {
         "name": "settings-view",
@@ -1933,6 +2049,7 @@ export const plugins = [
       "titlebar": "^1.0.0",
       "config": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/user-widget/index.mjs",
@@ -1951,6 +2068,7 @@ export const plugins = [
     "depends": {
       "titlebar": "^1.0.0"
     },
+    "optionalDepends": {},
     "provides": [],
     "permissions": [],
     "path": "./plugins/views/win-buttons/index.mjs",

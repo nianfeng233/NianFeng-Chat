@@ -124,11 +124,15 @@ export function apply(ctx) {
     removeExternalPlugin: id => request(`/plugins/external/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
 
-    sessions: () => request('/sessions'),
+    sessions: (options = {}) => request(`/sessions${options?.compact ? '?compact=1' : ''}`),
     createSession: conv => request('/sessions', { method: 'POST', body: conv }),
     saveSession: conv => request(`/sessions/${conv.id}`, { method: 'PUT', body: conv }),
     deleteSession: id => request(`/sessions/${id}`, { method: 'DELETE' }),
     addMessage: (id, message) => request(`/sessions/${id}/messages`, { method: 'POST', body: message }),
+    updateMessage: (id, messageId, patch) => request(`/sessions/${id}/messages/${encodeURIComponent(messageId)}`, { method: 'PUT', body: patch }),
+    removeMessage: (id, messageId) => request(`/sessions/${id}/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' }),
+    replaceMessages: (id, messages) => request(`/sessions/${id}/messages`, { method: 'PUT', body: { messages } }),
+    clearMessages: id => request(`/sessions/${id}/messages`, { method: 'DELETE' }),
 
     translate: (text, target = 'en', extra = {}) => request('/translate', { method: 'POST', body: { text, target, ...extra }, timeoutMs: 120000 }),
     rss: url => request(`/rss?url=${encodeURIComponent(url)}`, { timeoutMs: 25000 }),

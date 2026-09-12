@@ -338,6 +338,15 @@ export function apply(ctx) {
     }
 
     /* ---------------- 事件 ---------------- */
+    const onActivated = payload => {
+      const nextTab = payload?.tab
+      // 新建 / 编辑渠道被放到别的分类时，列表自动切过去，避免看起来像“没添加成功”。
+      if (nextTab && nextTab !== tab && ['private', 'group', 'privacy'].includes(nextTab)) {
+        tab = nextTab
+        tabsEl.querySelectorAll('.tab').forEach(button => button.classList.toggle('active', button.dataset.tab === nextTab))
+      }
+      render()
+    }
     const offs = [
       events.on('channel:group-updated', render),
       events.on('channel:group-added', render),
@@ -346,7 +355,7 @@ export function apply(ctx) {
       events.on('channel:updated', render),
       events.on('channel:removed', render),
       events.on('channel:moved', render),
-      events.on('channel:activated', render),
+      events.on('channel:activated', onActivated),
       events.on('channel:status', render),
       events.on('channel:type-registered', render),
       events.on('channel:sync', render),

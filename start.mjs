@@ -24,7 +24,8 @@ import { ensurePortsFree } from './server/port-utils.mjs'
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
 const args = new Set(process.argv.slice(2))
 const singlePort = args.has('--serve') || args.has('--single-port')
-const autoOpen = !args.has('--no-open')
+const noOpenEnv = String(process.env.NIANFENG_NO_OPEN || process.env.FENGYU_NO_OPEN || '').trim()
+const autoOpen = !args.has('--no-open') && !/^(1|true|yes|on)$/i.test(noOpenEnv)
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',

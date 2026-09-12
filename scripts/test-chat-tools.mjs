@@ -846,8 +846,26 @@ async function main() {
   await backend.ctx.sessions.flush()
   const rawData = JSON.parse(await readFile(join(dataDir, 'sessions.json'), 'utf8'))
   const rawConv = rawData.conversations.find(conversation => conversation.id === conv1.id)
-  const rawStructured = rawConv?.messages?.find(message => message.message_id && message.channel_id && message.seq)
-  check('结构化消息元数据已写入 sessions.json', !!rawStructured && String(rawStructured.channel_id).startsWith('nova:web:'), JSON.stringify(rawStructured || null).slice(0, 160))
+  check(
+    'sessions.json 只保留会话元数据，不再堆积聊天原文',
+    !!rawConv && (!Array.isArray(rawConv.messages) || rawConv.messages.length === 0) && Number(rawConv.messageCount) > 0,
+    JSON.stringify({ messages: rawConv?.messages?.length, messageCount: rawConv?.messageCount }),
+  )
+  let rawStructured = null
+  try {
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(join(dataDir, 'chat.db'))
+    rawStructured = db
+      .prepare('SELECT data FROM messages WHERE conversation_id = ? ORDER BY seq ASC')
+      .all(conv1.id)
+      .map(row => JSON.parse(row.data))
+      .find(message => message.message_id && message.channel_id && message.seq)
+    db.close()
+  } catch (_) {
+    /* 旧 Node 回退 JSON 模式时下面仍从 rawConv 里找 */
+    rawStructured = rawConv?.messages?.find(message => message.message_id && message.channel_id && message.seq)
+  }
+  check('结构化消息元数据已写入 chat.db 聊天记录库', !!rawStructured && String(rawStructured.channel_id).startsWith('nova:web:'), JSON.stringify(rawStructured || null).slice(0, 160))
   await backend.close()
   await mock.close()
   await rm(dataDir, { recursive: true, force: true }).catch(() => {})

@@ -41,7 +41,7 @@
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 |
 | `dpi` | 0.1.2 | Apache-2.0 AND MIT |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
-| `nianfeng-desktop` | 0.42.0 | MIT |
+| `nianfeng-desktop` | 1.0.0 | MIT |
 | `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
 | `http` | 1.5.0 | MIT OR Apache-2.0 |
 | `icu_collections` | 2.3.0 | Unicode-3.0 |

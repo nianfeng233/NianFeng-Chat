@@ -1,0 +1,20 @@
+{
+  "id": "napcat",
+  "name": "NapCat",
+  "displayName": "NapCat",
+  "version": "1.0.0",
+  "author": "念风插件",
+  "description": "NapCatQQ / OneBot 11 渠道插件：私聊、群聊、隐私，多 QQ 连接复用、群聊规则与发现会话。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "🐱",
+  "color": "#0099ff",
+  "type": "channel",
+  "core": false,
+  "permissions": ["network"],
+  "distribution": {
+    "directory": "plugins/channels/napcat",
+    "zip": "napcat-plugin-v1.0.0.zip",
+    "placement": "完整版内置目录：plugins/channels/napcat；外部目录：<插件目录>/channels/napcat"
+  }
+}

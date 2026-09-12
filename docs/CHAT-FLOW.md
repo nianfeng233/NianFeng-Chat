@@ -55,7 +55,7 @@
   ▼
 [message-list] 调度渲染；[bubble-default] 负责气泡、代码块、资料卡片、流式光标
   │
-  ├─> [session-service] 防抖写回后端 sessions.json
+  ├─> [session-service] 消息级防抖写回后端（元数据 sessions.json + 聊天原文 chat.db）
   ├─> [composer] 停止生成 / “正在输入”状态
   └─> [chat-notify] -> [notification] 页面在后台 / 不在当前会话时，逐条生成通知（角色消息带角色头像、名称与内容预览）
 ```

@@ -10,9 +10,9 @@
 | 版本 | 目录 | 说明 |
 |---|---|---|
 | Web 源码 | `release/web/source/` | 纯净源码，不含个人数据与 `node_modules`，适合推送 GitHub |
-| Web 部署 | `release/web/deploy/` | 自带便携 Node 运行时，双击 `启动念风.cmd` 即可运行 |
+| Web 部署 | `release/web/deploy/` | 自带便携 Node 运行时；有桌面双击 `启动念风.cmd`；云服务器双击 `启动念风-无浏览器.cmd`，不需要 WebView2 |
 | 桌面源码 | `release/desktop/source/` | Rust 桌面壳源码 + 无 `official-service` 的运行时 app + 可嵌入的 Node 运行时 |
-| 桌面部署 | `release/desktop/deploy/念风Chat.exe` | 单文件、无边框窗口、已内嵌 Node 运行时与全部前端资源 |
+| 桌面部署 | `release/desktop/deploy/念风Chat.exe` | 单文件、无边框窗口、已内嵌 Node 运行时与全部前端资源；无 WebView2 时自动回退浏览器 |
 
 重新生成：
 
@@ -41,7 +41,9 @@ npm run build:release -- --web-only   # 只生成 Web 版
 ## 环境要求
 
 - 开发机：Windows 10/11、Visual Studio Build Tools（MSVC linker）、Rust MSVC toolchain、WebView2 Runtime（Win11 / 新版 Edge 已自带）。
-- 用户机：Windows 10/11；WebView2 Runtime 缺失时需安装 Evergreen Runtime。
+- 用户机：Windows 10/11；建议安装 WebView2 Runtime（Win11 / 新版 Edge 已自带）。
+- 云服务器 / Windows Server：如果缺少 WebView2 Runtime，`念风Chat.exe` 会先尝试自动下载安装器并静默安装（国内加速镜像优先），安装成功后正常启动；安装失败才回退到系统默认浏览器打开 WebUI，并保持 Node 服务后台运行。也可以直接使用 Web 部署版的 `启动念风-无浏览器.cmd`，完全不需要 WebView2。过程日志写入 `%LOCALAPPDATA%\NianFengChat\error.log`。
+- 镜像地址可用环境变量 `NIANFENG_WEBVIEW2_INSTALLER_URL` 覆盖；离线环境可用 `NIANFENG_WEBVIEW2_INSTALLER_PATH` 指定本机已下载好的 `MicrosoftEdgeWebview2Setup.exe`；不想自动安装可传 `--no-webview-install` 或设置 `NIANFENG_NO_WEBVIEW_INSTALL=1`。
 
 ## 数据目录
 

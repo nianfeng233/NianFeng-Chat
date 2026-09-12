@@ -266,8 +266,14 @@ export function apply(ctx) {
       // 而不是被固定规则误导成跨渠道一律不可用。
       const policy = store.channelRecord?.(useChannelId) || channel || null
       const isPrivacy = policy?.group === 'privacy'
-      const memoryRounds = Math.max(0, Number(config.get('chat.memoryRounds', 5)) || 0)
-      const channelRounds = Math.max(0, Number(config.get('chat.channelRounds', 5)) || 0)
+      // 渠道插件可以按渠道指定上下文策略：
+      //   contextMode === 'channel-only' 只使用当前渠道记录（例如 NapCat 群聊）；
+      //   contextRounds > 0 覆盖全局 channelRounds（例如群聊固定最近 20 轮）。
+      const channelOnly = policy?.contextMode === 'channel-only'
+      const memoryRoundsConfig = Math.max(0, Number(config.get('chat.memoryRounds', 5)) || 0)
+      const memoryRounds = isPrivacy || channelOnly ? 0 : memoryRoundsConfig
+      const perChannelRounds = Math.max(0, Number(policy?.contextRounds) || 0)
+      const channelRounds = perChannelRounds > 0 ? perChannelRounds : Math.max(0, Number(config.get('chat.channelRounds', 5)) || 0)
       const maxRounds = memoryRounds + channelRounds || 10
       const system = systemContent({
         persona,
@@ -281,17 +287,22 @@ export function apply(ctx) {
 
       // 当前渠道有工具协议轨迹时，用 assistant.tool_calls + role=tool 的真实历史；
       // 其它渠道仍用可见消息的工作记忆补齐。
+      // channel-only 渠道（例如 NapCat 群聊）直接使用自己渠道的可见消息轮次，
+      // 不再走工具协议 transcript，避免静默写入的群消息被 transcript 截掉。
       const transcript =
-        typeof store.transcriptMessages === 'function' ? store.transcriptMessages(useChannelId, { limitTurns: maxRounds }) : []
+        channelOnly || typeof store.transcriptMessages !== 'function'
+          ? []
+          : store.transcriptMessages(useChannelId, { limitTurns: maxRounds })
       let history = []
       let totalRounds = 0
       let selectedRounds = 0
 
       if (transcript.length) {
-        // 隐私渠道完全独立：不引入任何其它渠道的工作记忆。
-        const others = isPrivacy
-          ? []
-          : store.workingMessages({ roleId, limit: memoryRounds, excludeChannelId: useChannelId })
+        // 隐私渠道 / 群聊 channel-only 渠道：不引入任何其它渠道的工作记忆。
+        const others =
+          memoryRounds <= 0
+            ? []
+            : store.workingMessages({ roleId, limit: memoryRounds, excludeChannelId: useChannelId })
         const otherWire = others.map(toModelMessage).filter(Boolean)
         const visible = store.messagesOf(useChannelId)
         const info = store.transcriptInfo?.(useChannelId)
@@ -331,8 +342,8 @@ export function apply(ctx) {
         ]
         totalRounds = transcript.length
       } else {
-        // 隐私渠道不使用角色级工作记忆，只用本渠道自己的历史。
-        const working = isPrivacy ? [] : store.workingMessages({ roleId, limit: memoryRounds })
+        // 隐私渠道 / 群聊 channel-only 渠道不使用角色级工作记忆，只用本渠道自己的历史。
+        const working = memoryRounds <= 0 ? [] : store.workingMessages({ roleId, limit: memoryRounds })
         const fromChannel = store.rounds(useChannelId, channelRounds).flatMap(round => round.messages)
 
         // message_id 去重；重叠部分以工作记忆为准，当前渠道记忆只补不重复

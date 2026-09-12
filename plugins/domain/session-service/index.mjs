@@ -47,14 +47,37 @@ export function apply(ctx) {
   let lastSyncError = ''
   let syncing = false
   const pushTimers = new Map()
+  const messagePushTimers = new Map()
 
-  const persistLocal = () => storage.set(NS, KEY, data)
+  const messageCountOf = conv => {
+    const explicit = Number(conv?.messageCount)
+    const loaded = Array.isArray(conv?.messages) ? conv.messages.length : 0
+    return Math.max(Number.isFinite(explicit) && explicit >= 0 ? explicit : 0, loaded)
+  }
+  const withoutMessages = conv => {
+    if (!conv) return conv
+    const { messages, ...meta } = conv
+    meta.messageCount = messageCountOf(conv)
+    return meta
+  }
+
+  /**
+   * 本地 localStorage 只做「离线滚动缓存」：
+   *   - 后端在线时，完整历史在 SQLite（chat.db），localStorage 不再保存全量消息；
+   *   - 离线时保留每个会话最近 50 条，保证还能继续聊、界面不空。
+   */
+  const persistLocal = () => {
+    const conversations = data.conversations.map(conv => {
+      const messages = Array.isArray(conv.messages) ? conv.messages : []
+      // 离线兜底只保留最近 20 条；完整历史以 SQLite / 后端为准，避免 localStorage 走旧版爆掉。
+      const keep = messages.slice(-20)
+      return { ...conv, messages: keep, messageCount: messageCountOf(conv), localTruncated: messages.length > keep.length }
+    })
+    storage.set(NS, KEY, { conversations, activeId: data.activeId, removedIds: data.removedIds || [] })
+  }
   const randomId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
   const find = id => data.conversations.find(c => c.id === id) || null
-  const conversationRank = conv => [
-    Number(conv?.updatedAt || conv?.createdAt || 0) || 0,
-    Array.isArray(conv?.messages) ? conv.messages.length : 0,
-  ]
+  const conversationRank = conv => [Number(conv?.updatedAt || conv?.createdAt || 0) || 0, messageCountOf(conv)]
   /** 判断 a 是否比 b 新（时间相同则消息更多的更新，全部相同则不算更新） */
   const isNewerConversation = (a, b) => {
     const [at, am] = conversationRank(a)
@@ -90,6 +113,53 @@ export function apply(ctx) {
     }
   }
 
+  /** 后端已关闭 / 离线时的请求失败不值得刷警告，页面会在重连后自动补写。 */
+  const isTransientSyncError = err =>
+    err?.status === 404 || /fetch failed|Failed to fetch|NetworkError|ECONNREFUSED|连接|离线/i.test(String(err?.message || err || ''))
+
+  /** 消息级写回：SQLite 后端每条消息独立 upsert，不再重写整个会话。 */
+  const scheduleMessagePush = (conversationId, message, delay = 220) => {
+    if (source !== 'server' || !api || !conversationId || !message?.id) return
+    const key = `${conversationId}:${message.id}`
+    const pending = messagePushTimers.get(key) || { timer: null }
+    if (pending.timer) clearTimeout(pending.timer)
+    pending.timer = setTimeout(() => {
+      pending.timer = null
+      const current = find(conversationId)
+      const latest = current?.messages?.find(item => item.id === message.id)
+      if (!latest || source !== 'server' || !api) return
+      api.addMessage(conversationId, latest).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`消息写回失败：${err.message}`) })
+    }, delay)
+    messagePushTimers.set(key, pending)
+  }
+
+  const flushMessagePush = conversationId => {
+    for (const [key, pending] of [...messagePushTimers.entries()]) {
+      if (!key.startsWith(`${conversationId}:`)) continue
+      if (pending.timer) clearTimeout(pending.timer)
+      messagePushTimers.delete(key)
+    }
+  }
+
+  /**
+   * 离线重连后的补写：
+   *   - 本地只有截断缓存（localStorage 最近 20 条）时，只对本地消息逐条 upsert，
+   *     绝不能用截断列表 replace，否则会把后端完整历史覆盖掉；
+   *   - 本地内存里有完整消息且确认比后端新时，才整段 replace。
+   */
+  const pushFullMessagesIfNeeded = async (conv, remote) => {
+    if (!api || !conv || !Array.isArray(conv.messages) || !conv.messages.length) return
+    if (remote && conv.localTruncated === true) {
+      for (const message of conv.messages) {
+        await api.addMessage(conv.id, message).catch(() => {})
+      }
+      return
+    }
+    const remoteCount = remote ? Number(remote.messageCount ?? remote.messages?.length ?? 0) : 0
+    if (remote && remoteCount === conv.messages.length && !isNewerConversation(conv, remote)) return
+    await api.replaceMessages(conv.id, conv.messages).catch(() => {})
+  }
+
   const service = {
     name: 'session-service',
 
@@ -120,14 +190,25 @@ export function apply(ctx) {
         const { conversations, serverById, removedIds } = mergeServerConversations(server)
         const activeId = conversations.some(conv => conv.id === data.activeId) ? data.activeId : conversations[0]?.id || null
         data = { conversations, activeId, removedIds }
+        source = 'server'
         persistLocal()
 
         // 手动同步同样只推差异，不丢弃本地独有的新会话 / 未写回修改。
+        // 消息本体按会话批量补写，元数据只发送 withoutMessages(conv)，避免大 JSON。
         const queue = []
         for (const conv of conversations) {
           const remote = serverById.get(conv.id)
-          if (!remote) queue.push(api.createSession(conv))
-          else if (isNewerConversation(conv, remote)) queue.push(api.saveSession(conv))
+          if (!remote) {
+            queue.push(
+              (async () => {
+                await api.createSession(withoutMessages(conv))
+                if (Array.isArray(conv.messages) && conv.messages.length) await api.replaceMessages(conv.id, conv.messages)
+              })(),
+            )
+          } else {
+            if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
+            await pushFullMessagesIfNeeded(conv, remote)
+          }
         }
         for (const id of removedIds) queue.push(api.deleteSession(id))
         if (queue.length) await Promise.allSettled(queue)
@@ -140,6 +221,7 @@ export function apply(ctx) {
       } catch (err) {
         source = 'local'
         lastSyncError = err.message
+        persistLocal()
         ctx.emit('sessions:source', service.status())
         throw err
       } finally {
@@ -211,9 +293,10 @@ export function apply(ctx) {
       const pending = pushTimers.get(id)
       if (pending?.timer) clearTimeout(pending.timer)
       pushTimers.delete(id)
+      flushMessagePush(id)
       data.removedIds = [...new Set([...(data.removedIds || []), id])].slice(-500)
       persistLocal()
-      if (source === 'server' && api) api.deleteSession(id).catch(err => ctx.logger.warn(`删除后端会话失败：${err.message}`))
+      if (source === 'server' && api) api.deleteSession(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`删除后端会话失败：${err.message}`) })
       ctx.emit('conversation:delete', { id, conversation: conv })
       return true
     },
@@ -221,10 +304,19 @@ export function apply(ctx) {
     update(id, patch, { push = true } = {}) {
       const conv = find(id)
       if (!conv) return null
-      Object.assign(conv, patch)
+      let replacedMessages = false
+      if (Array.isArray(patch.messages)) {
+        conv.messages = patch.messages
+        conv.messageCount = patch.messages.length
+        replacedMessages = true
+        if (source === 'server' && api) api.replaceMessages(conv.id, patch.messages).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`整段聊天记录写回失败：${err.message}`) })
+      }
+      const metaPatch = { ...patch }
+      delete metaPatch.messages
+      Object.assign(conv, metaPatch)
       conv.updatedAt = patch.updatedAt || Date.now()
       persistLocal()
-      if (push) service.push(conv)
+      if (push && !replacedMessages) service.push(conv)
       ctx.emit('conversation:update', conv)
       return conv
     },
@@ -249,14 +341,16 @@ export function apply(ctx) {
     appendMessage(id, message) {
       const conv = find(id)
       if (!conv) return null
+      if (!Array.isArray(conv.messages)) conv.messages = []
       conv.messages.push(message)
+      conv.messageCount = conv.messages.length
       if (message.kind !== 'divider') {
         conv.preview = String(message.content || '').replace(/\n/g, ' ').slice(0, 80)
         conv.updatedAt = Date.now()
         conv.time = message.time || conv.time
       }
       persistLocal()
-      service.push(conv)
+      scheduleMessagePush(id, message)
       return message
     },
 
@@ -267,7 +361,7 @@ export function apply(ctx) {
       const conv = find(id)
       if (conv) conv.updatedAt = Date.now()
       persistLocal()
-      service.push(conv)
+      scheduleMessagePush(id, message)
       return message
     },
 
@@ -277,29 +371,48 @@ export function apply(ctx) {
       const index = conv.messages.findIndex(msg => msg.id === messageId)
       if (index < 0) return false
       conv.messages.splice(index, 1)
+      conv.messageCount = conv.messages.length
       conv.updatedAt = Date.now()
       persistLocal()
-      service.push(conv)
+      if (source === 'server' && api) {
+        api.removeMessage(id, messageId).catch(err => {
+          // 流式占位消息可能只在前端存在，后端 404 属于正常情况。
+          if (err?.status !== 404) ctx.logger.warn(`删除后端消息失败：${err.message}`)
+        })
+      }
       return true
+    },
+
+    replaceMessages(id, messages = []) {
+      const conv = find(id)
+      if (!conv) return null
+      conv.messages = Array.isArray(messages) ? messages : []
+      conv.messageCount = conv.messages.length
+      conv.updatedAt = Date.now()
+      persistLocal()
+      if (source === 'server' && api) api.replaceMessages(id, conv.messages).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`替换后端聊天记录失败：${err.message}`) })
+      ctx.emit('conversation:update', conv)
+      return conv
     },
 
     clearMessages(id) {
       const conv = find(id)
       if (!conv) return
       conv.messages = []
+      conv.messageCount = 0
       conv.updatedAt = Date.now()
       persistLocal()
-      service.push(conv)
+      if (source === 'server' && api) api.clearMessages(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`清空后端聊天记录失败：${err.message}`) })
       ctx.emit('conversation:update', conv)
     },
 
     /* -------- 与后端同步 -------- */
     pushCreate(conv) {
       if (source !== 'server' || !api) return
-      api.createSession(conv).catch(err => ctx.logger.warn(`创建后端会话失败：${err.message}`))
+      api.createSession(withoutMessages(conv)).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`创建后端会话失败：${err.message}`) })
     },
 
-    /** 防抖写回：聊天流式输出时不会每 2 个字符就写一次盘 */
+    /** 防抖写回会话元数据（名称 / 预览 / meta）；消息本体走消息级 API，不再发送整个 messages。 */
     push(conv) {
       if (source !== 'server' || !api || !conv) return
       const pending = pushTimers.get(conv.id) || { timer: null }
@@ -308,10 +421,10 @@ export function apply(ctx) {
         pending.timer = null
         const current = find(conv.id)
         if (!current || source !== 'server' || !api) return
-        api.saveSession(current).catch(err => {
+        api.saveSession(withoutMessages(current)).catch(err => {
           lastSyncError = err.message
           ctx.emit('sessions:source', service.status())
-          ctx.logger.warn(`会话写回失败：${err.message}`)
+          if (!isTransientSyncError(err)) ctx.logger.warn(`会话写回失败：${err.message}`)
         })
       }, 500)
       pushTimers.set(conv.id, pending)
@@ -333,6 +446,8 @@ export function apply(ctx) {
   ctx.effect(() => {
     for (const { timer } of pushTimers.values()) if (timer) clearTimeout(timer)
     pushTimers.clear()
+    for (const { timer } of messagePushTimers.values()) if (timer) clearTimeout(timer)
+    messagePushTimers.clear()
   })
 
   ctx.provide('session-service', service, { type: 'singleton' })
@@ -360,25 +475,35 @@ export function apply(ctx) {
             : conversations[0]?.id || null
           : null
         data = { conversations, activeId, removedIds }
+        source = 'server'
         persistLocal()
         ctx.emit('conversation:sync', { conversations })
 
         const queue = []
         for (const conv of conversations) {
           const remote = serverById.get(conv.id)
-          if (!remote) queue.push(api.createSession(conv))
-          else if (isNewerConversation(conv, remote)) queue.push(api.saveSession(conv))
+          if (!remote) {
+            queue.push(
+              (async () => {
+                await api.createSession(withoutMessages(conv))
+                if (Array.isArray(conv.messages) && conv.messages.length) await api.replaceMessages(conv.id, conv.messages)
+              })(),
+            )
+          } else {
+            if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
+            await pushFullMessagesIfNeeded(conv, remote)
+          }
         }
         for (const id of removedIds) queue.push(api.deleteSession(id))
         if (queue.length) await Promise.allSettled(queue)
 
-        source = 'server'
         lastSyncError = ''
         ctx.emit('sessions:source', service.status())
         ctx.logger.info(`会话已与后端同步（${server.length} 个，合并后 ${conversations.length} 个）`)
       } catch (err) {
         source = 'local'
         lastSyncError = err.message
+        persistLocal()
         ctx.emit('sessions:source', service.status())
         ctx.logger.warn(`后端不可用，会话暂存本地：${err.message}`)
       }

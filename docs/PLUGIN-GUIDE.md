@@ -22,7 +22,8 @@ export const author = '你的名字'
 export const icon = '😀'
 export const core = false                  // true = 核心，不可禁用
 export const enabled = true                // false = 默认关闭，用户可在件件管理中开启
-export const depends = { 'event-bus': '^1.0.0' }   // 依赖"件件"（影响加载顺序）
+export const depends = { 'event-bus': '^1.0.0' }   // 必须依赖（缺失 = 标红 / 不激活）
+export const optionalDepends = { 'markdown-enhancer': '^1.0.0' } // 可选依赖（缺失 = 标黄 / 不影响运行）
 export const inject = ['config', 'slots']  // 依赖"服务"（不满足则保持 PENDING，'xxx?' 表示可选）
 export const provides = [{ name: 'my-service', type: 'singleton' }]
 
@@ -56,7 +57,8 @@ npm test               # 确认没有破坏启动与闭环
 | `name` / `version` | 件件 id 与 semver |
 | `displayName` / `description` / `author` / `icon` | 件件管理页展示 |
 | `core` / `enabled` | 是否核心 / 默认是否启用 |
-| `depends` | `{ 件件名: semver范围 }`，用于拓扑排序 |
+| `depends` | `{ 插件名: semver范围 }`，必须依赖；缺失 / 未激活会标红并阻止加载 |
+| `optionalDepends` / `softDepends` | `{ 插件名: semver范围 }`，可选依赖；缺失 / 版本不匹配只标黄，不影响基础功能 |
 | `inject` | 需要的服务名数组；`'api?'` 为可选依赖 |
 | `provides` | 声明提供的服务（加载期冲突预检 + 统计） |
 | `slots` | 会用到的件槽（可选，用于语义冲突提示） |
@@ -345,7 +347,7 @@ __wind_debug.trace(true)
 ## 10. 发布前 Checklist
 
 - [ ] `name / version / displayName / description / author` 完整
-- [ ] `inject` 与 `provides` 准确，可选依赖加 `?`
+- [ ] `inject` 与 `provides` 准确，可选依赖加 `?`；插件依赖按必须 / 可选分别写 `depends` 与 `optionalDepends`
 - [ ] 没有全局变量、没有直接 `localStorage`、没有跨件件 DOM 操作
 - [ ] `ctx.on / effect / setTimeout / 件槽注册` 都能随卸载释放
 - [ ] 样式走 `useStyle` + CSS 变量，深色主题可读

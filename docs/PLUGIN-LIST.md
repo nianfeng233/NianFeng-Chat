@@ -5,7 +5,7 @@
 -->
 # 插件清单与实现状态
 
-> 共 **89 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 21）。微信clawbot / QQ官方机器人 渠道插件与 image-service 同时包含前端插件与 Node 后端桥。
+> 共 **90 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 22）。NapCat / 微信clawbot / QQ官方机器人 渠道插件与 image-service 同时包含前端插件与 Node 后端桥。
 > 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**。
 
 ---
@@ -17,13 +17,13 @@
 | L0 内核 | `plugins/kernel/` | 5 | event-bus / plugin-loader / dependency-resolver / lifecycle / service-container |
 | L1 基础服务 | `plugins/foundation/` | 15 | storage / config / logger / i18n / theme-tokens / slots / 各种宿主 / shortcuts / notification / error-reporter / **backend-client** |
 | L2 业务服务 | `plugins/domain/` | 15 | session / message / model-registry / model-service / view-router / channel-registry / plugin-manager / search / export / **chat-store / document-service / chat-permissions / chat-queue / tool-registry / image-service** |
-| L2.5 渠道插件 | `plugins/channels/` | 2 | **微信clawbot**（前端渠道类型 + `bridge.mjs` 后端桥） / **QQ官方机器人**（扫码或 AppID 接入 + 本地沙箱免白名单 + WebSocket/Webhook） |
+| L2.5 渠道插件 | `plugins/channels/` | 3 | **NapCat**（OneBot 11：私聊 / 群聊 / 隐私、多 QQ 连接复用与群聊规则） / **微信clawbot** / **QQ官方机器人** |
 | L3 视觉框架 | `plugins/shell/` | 9 | app-shell / bg-provider / bg-aurora / bg-solid / bg-image / titlebar / rail / left-list-panel / right-main-panel |
 | L4 视觉内容 | `plugins/views/` | 31 | 三视图 + 顶栏/侧栏部件 + 全局搜索 + 设置项（V1~V24 全覆盖） |
 | L5 业务功能 | `plugins/features/` | 8 | chat-flow / channel-base / **model-adapter-backend / chat-tools / context-builder** / character-editor / **chat-notify** / official-service |
 | L6 可选扩展 | `plugins/extras/` | 2 | markdown-enhancer / **lang-zh-cn（语言包示例）** |
-| 后端 | `server/plugins/` | 9 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/wechat-clawbot/bridge.mjs`、`plugins/channels/qqbot/bridge.mjs` 与 `plugins/domain/image-service/bridge.mjs` 后端桥 |
-| **合计** | | **98** | 前端 89 + 后端 9（含 Clawbot / QQ / 图片服务前后端、用户身份、插件健康守卫） |
+| 后端 | `server/plugins/` | 9 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/napcat/bridge.mjs`、`plugins/channels/wechat-clawbot/bridge.mjs`、`plugins/channels/qqbot/bridge.mjs` 与 `plugins/domain/image-service/bridge.mjs` 后端桥 |
+| **合计** | | **99** | 前端 90 + 后端 9（含 NapCat / Clawbot / QQ / 图片服务前后端、用户身份、插件健康守卫） |
 
 ---
 
@@ -45,6 +45,7 @@
 | `backend-client` | L1 | ✅ | WebUI ↔ 本地后端的唯一通道（REST / SSE / 健康检查） |
 | `wechat-clawbot` | L2.5 | ✅ | 微信 Clawbot 渠道：扫码接入、角色/分类/权限、typing 与聊天记录 |
 | `qqbot` | L2.5 | ✅ | QQ 官方机器人渠道：扫码/凭据接入、本地沙箱免白名单、user_openid 自动绑定、WebSocket/Webhook、仅私聊与被动回复 |
+| `napcat` | L2.5 | ✅ | NapCatQQ / OneBot 11 渠道：私聊 / 群聊 / 隐私、多 QQ 连接复用、群聊规则与静默 20 轮上下文 |
 | `image-service` | L2 | ✅ | 图片文件存储：消息只存 imageId，/api/images 读写、压缩与裁剪 |
 | `model-adapter-backend` | L5 | ✅ | 把后端提供商注册为前端模型（真实流式对话；OpenAI/DeepSeek/Claude/Gemini/Ollama 由后端适配器转换） |
 | `session-service` | L2 | ✅ | 会话 + 后端持久化 + 离线降级 + 迁移 |
