@@ -163,6 +163,7 @@ async function main() {
     typeof smokeManager.registerSettings,
   )
   check('NapCat 插件设置面板已注册', smokeManager.hasSettings('napcat'), smokeManager.hasSettings('napcat'))
+  check('NapCat 输入状态插件设置面板已注册', smokeManager.hasSettings('napcat-input-state'), smokeManager.hasSettings('napcat-input-state'))
 
   const napcatService = ctx.inject('napcat-channel')
   check('NapCat 扩展服务 napcat-channel 可用', typeof napcatService?.decide === 'function' && typeof napcatService?.listInstances === 'function')
@@ -509,6 +510,93 @@ async function main() {
   check('NapCat 提供自定义添加窗口', typeof napcatType?.create === 'function')
   check('NapCat 提供自定义渠道详情', typeof napcatType?.detail === 'function')
 
+  section('⑥a 渠道即时外发（跨渠道 chat_send 回归）')
+  {
+    const baseService = ctx.inject('channel-base')
+    const groups = channelRegistry.groups('private')
+    const group = groups[0] || channelRegistry.addGroup('private', '外发测试')
+    let delivered = null
+    const registration = baseService.defineChannel({
+      type: 'outbound-smoke',
+      name: '外发测试渠道',
+      color: '#8ab4ff',
+      outbound: async ({ message }) => {
+        delivered = message
+        return { ok: true }
+      },
+    })
+    const testChannel = channelRegistry.addChannel('private', group.id, {
+      type: 'outbound-smoke',
+      name: '外发测试渠道',
+      color: '#8ab4ff',
+      meta: { roleId: 'outbound-smoke-role' },
+    })
+    const outboundConv = sessions.create({
+      name: '外发测试会话',
+      meta: { channelType: 'outbound-smoke', channelId: `outbound-smoke:${testChannel.id}` },
+    })
+    channelRegistry.updateChannel('private', testChannel.id, {
+      meta: { ...(testChannel.meta || {}), conversationId: outboundConv.id },
+    })
+    messages.add(outboundConv.id, { role: 'assistant', content: '这条消息应该立即外发' })
+    const deliveredMessage = await waitFor(() => delivered, { timeout: 2000 })
+    check(
+      '助手消息写入渠道会话后立即外发（不再等整轮结束）',
+      deliveredMessage?.content === '这条消息应该立即外发',
+      String(deliveredMessage?.content || ''),
+    )
+    registration.dispose?.()
+    channelRegistry.removeChannel('private', testChannel.id)
+    sessions.remove(outboundConv.id)
+  }
+
+  section('⑥b NapCat 输入状态（整轮刷新，结束停止）')
+  {
+    const groups = channelRegistry.groups('private')
+    const group = groups[0] || channelRegistry.addGroup('private', '输入状态测试')
+    const inputConv = sessions.create({
+      name: '输入状态测试会话',
+      meta: { channelType: 'napcat', channelId: 'napcat:input-state-test' },
+    })
+    const inputChannel = channelRegistry.addChannel('private', group.id, {
+      type: 'napcat',
+      name: '输入状态测试',
+      color: '#0099ff',
+      meta: {
+        conversationId: inputConv.id,
+        instanceId: 'inst-input-test',
+        targetType: 'private',
+        targetId: '10001',
+        category: 'private',
+      },
+    })
+    const calls = []
+    const originalAction = napcatService.action
+    napcatService.action = async (instanceId, action, params) => {
+      calls.push({ instanceId, action, params })
+      return { ok: true }
+    }
+    config.set('napcat.inputState.enabled', true)
+    config.set('napcat.inputState.intervalMs', 50)
+    ctx.emit('chat:request-start', { conversationId: inputConv.id })
+    await sleep(120)
+    const inputCalls = calls.filter(call => call.action === 'set_input_status')
+    check(
+      'NapCat 私聊整轮期间持续刷新输入中',
+      inputCalls.length >= 1 && inputCalls[0]?.params?.user_id === 10001,
+      JSON.stringify(inputCalls.slice(0, 2)),
+    )
+    ctx.emit('chat:request-done', { conversationId: inputConv.id })
+    await sleep(30)
+    const countAtStop = calls.length
+    await sleep(180)
+    check('NapCat 整轮结束后停止刷新输入中', calls.length === countAtStop, `${countAtStop} → ${calls.length}`)
+    napcatService.action = originalAction
+    config.set('napcat.inputState.intervalMs', 3000)
+    channelRegistry.removeChannel('private', inputChannel.id)
+    sessions.remove(inputConv.id)
+  }
+
   // 角色下拉框回归：chat-store 会把普通会话登记为 nova 网页渠道，它们仍是角色；
   // 其它渠道（wechat-clawbot / qqbot）的聊天记录容器不能被当成角色列出来。
   const roleConv = smokeSessions.create({ id: 'smoke-role-conv', name: '冒烟角色' })
@@ -843,11 +931,10 @@ async function main() {
   settingsContainer.open('model')
   await sleep(80)
   const modelContent = document.querySelector('.settings-content')
-  check('模型页默认展示内置模型开关', (modelContent?.textContent || '').includes('使用念风内置模型'))
-  const builtinToggle = document.querySelector('.settings-content [data-action="toggle-builtin"]')
-  check('内置模型开关默认开启', !!builtinToggle && builtinToggle.classList.contains('on'))
+  check('官方服务插件已移出仓库（不编译、不推送）', !ctx.inject('plugin-manager').describe('official-service'))
+  check('模型页默认展示自定义提供商面板', !!document.querySelector('.settings-content .model-provider-layout'))
   check('当前生效有模型选择按钮', !!document.querySelector('.settings-content [data-active-model]'))
-  check('内置模型展示官方服务未接入空状态', (modelContent?.textContent || '').includes('官方服务尚未接入'))
+  check('失败转移配置入口存在', (modelContent?.textContent || '').includes('失败自动切换模型'))
   const reasoningSlider = document.querySelector('.settings-content [data-slider="reasoning"]')
   const temperatureSlider = document.querySelector('.settings-content [data-slider="temperature"]')
   check('推理等级是独立滑块', !!reasoningSlider && !!reasoningSlider.querySelector('input[type="range"]'))
@@ -871,8 +958,6 @@ async function main() {
   // 恢复默认，避免影响后续对话测试
   ctx.inject('config').set('chat.reasoningEffort', 'off')
   ctx.inject('config').set('chat.temperature', 1)
-  builtinToggle?.click()
-  await waitFor(() => document.querySelector('.settings-content .model-provider-layout'), { timeout: 3000 })
   check('关闭开关后切换为自定义提供商面板', !!document.querySelector('.settings-content .model-provider-layout'))
   check(
     '自定义提供商面板能看到后端提供商',
@@ -951,11 +1036,6 @@ async function main() {
   const uiProviderDeleted = await waitFor(() => backend.ctx.settings.get().providers['smoke-ui']?.deleted === true, { timeout: 3000 })
   check('可通过界面删除提供商', !!uiProviderDeleted)
 
-  // 恢复默认的内置模型开关，避免影响后续测试
-  document.querySelector('.settings-content [data-action="toggle-builtin"]')?.click()
-  await sleep(30)
-  check('可以切回内置模型面板', (document.querySelector('.settings-content')?.textContent || '').includes('官方服务尚未接入'))
-
   settingsContainer.open('data')
   await sleep(120)
   const dataText = document.querySelector('.settings-content')?.textContent || ''
@@ -1002,6 +1082,27 @@ async function main() {
   settingsView.close()
   await sleep(20)
   check('设置页可关闭', !settingsView.isOpen())
+
+  section('⑩a 运行日志页')
+  settingsView.open('logs')
+  await sleep(80)
+  check('运行日志页已注册并可打开', !!document.querySelector('.logs-list'))
+  check(
+    '运行日志页有级别 / 分类 / 搜索控件',
+    !!document.querySelector('[data-logs-level]') &&
+      !!document.querySelector('[data-logs-cat]') &&
+      !!document.querySelector('[data-logs-search]'),
+  )
+  check('运行日志页能显示已收集的日志', document.querySelectorAll('.logs-row').length > 0, String(document.querySelectorAll('.logs-row').length))
+  backend.ctx.logger.info('SMOKE_RUNTIME_LOG_LINE')
+  await sleep(150)
+  settingsView.close()
+  await sleep(20)
+  settingsView.open('logs')
+  const backendLogShown = await waitFor(() => document.querySelector('.logs-list')?.textContent?.includes('SMOKE_RUNTIME_LOG_LINE'), { timeout: 3000 })
+  check('后端日志可进入运行日志页（历史拉取）', !!backendLogShown)
+  settingsView.close()
+  await sleep(20)
 
   section('⑩b 捏人窗口与插件权限')
   const characterSessions = ctx.inject('session-service')

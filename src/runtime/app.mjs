@@ -19,7 +19,7 @@ import { satisfies } from './semver.mjs'
 import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 
-export const VERSION = '1.0.0'
+export const VERSION = '1.1.0'
 
 export const STATUS = {
   PENDING: 'pending',

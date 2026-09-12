@@ -402,8 +402,29 @@ export function apply(ctx) {
     }
     if (!cancelled) {
       const message = error?.message || String(error)
-      ctx.inject('toast')?.error?.(`模型调用失败：${message}`)
-      ctx.logger.error('[chat-flow] 模型调用失败', error)
+      const timedOut = /timeout|超时|aborted.*timeout|ETIMEDOUT/i.test(message)
+      ctx.inject('toast')?.error?.(`模型调用失败${timedOut ? '（请求超时）' : ''}：${message}`)
+      ctx.logger.error(`[chat-flow] 模型调用失败${timedOut ? '（请求超时，可在设置 → 网络调整超时时间）' : ''}`, error)
+      // 外部渠道看不到网页 toast：把原始错误内容作为一条助手消息写回来源渠道。
+      try {
+        const channel = store?.channelForConversation?.(conversationId)
+        const external = channel && channel.source !== 'nova' && !String(channel.channelId || '').startsWith('nova:web:')
+        if (external && typeof store?.append === 'function') {
+          const conv = sessions.get(conversationId)
+          const raw = String(message || '').trim() || '未知错误'
+          store.append(conversationId, {
+            role: 'assistant',
+            content: `【模型调用失败】${raw}`,
+            sender_name: conv?.name || '角色',
+            is_bot: true,
+            source: 'nova',
+            visibility: 'shareable',
+            meta: { fallback: 'model-error', error: raw, timedOut },
+          })
+        }
+      } catch (writeErr) {
+        ctx.logger?.warn?.(`[chat-flow] 写入渠道错误提示失败：${writeErr?.message || writeErr}`)
+      }
     }
   }
 
@@ -506,6 +527,8 @@ export function apply(ctx) {
       let textualMode = false
       let toolRetries = 0
       const toolRetryLimit = Math.max(0, Number(config.get('chat.toolRetryLimit', 2)) || 0)
+      let emptyRetries = 0
+      const emptyRetryLimit = Math.max(0, Number(config.get('chat.emptyRetryLimit', 2)) || 0)
       while (round < maxRounds && !entry.cancelled) {
         round += 1
         // 每一轮模型调用前恢复“思考中”占位；真正发消息或降级时会复用/移除它
@@ -533,6 +556,11 @@ export function apply(ctx) {
           elapsedMs: Date.now() - startedAt,
           round,
         }
+        ctx.logger.info(
+          `[chat-flow] 第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
+            `工具 ${(result.toolCalls || []).length} 个 · 正文 ${String(result.text || '').length} 字` +
+            `${result.reason ? ` · finish=${result.reason}` : ''}`,
+        )
         let toolCalls = normalizeToolCalls(result.toolCalls)
         let roundTextual = false
         const reasoning = result.reasoning || ''
@@ -567,6 +595,36 @@ export function apply(ctx) {
         }
 
         if (!toolCalls.length) {
+          const hasText = String(result.text || '').trim().length > 0
+          if (!hasText) {
+            if (entry.draftId) removeDraft(entry, conversationId)
+            if (emptyRetries < emptyRetryLimit) {
+              emptyRetries += 1
+              roundMessages.push({
+                role: 'user',
+                content:
+                  `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。` +
+                  '请立刻调用 chat_send 工具发送你想说的内容；需要结束本轮时 end=true。不要只输出思考过程。',
+              })
+              ctx.logger.warn(`[chat-flow] 第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
+              continue
+            }
+            ctx.logger.warn('[chat-flow] 模型连续返回空回复，本轮终止')
+            ctx.inject('toast')?.warn?.('模型连续返回空回复，本轮已停止。可重试、更换模型或查看运行日志。')
+            const notice = '（模型连续返回空回复，本轮已停止。可重试、更换模型或查看运行日志。）'
+            entry.finalWire = { role: 'assistant', content: notice }
+            store.append(conversationId, {
+              role: 'assistant',
+              content: notice,
+              sender_id: `role_${conv.id}`,
+              sender_name: conv.name,
+              is_bot: true,
+              source: 'nova',
+              meta: { fallback: 'empty-response', ...(callMeta(entry.lastRound) || {}) },
+            })
+            ended = true
+            break
+          }
           const strict = toolsEnabled() && config.get('chat.requireToolCall', true) !== false && !entry.toolUnsupported && options.toolChoice !== 'none'
           if (strict && toolRetries < toolRetryLimit) {
             // 严格模式：模型直接输出正文时不展示，按系统纠错要求它改用工具
@@ -625,6 +683,8 @@ export function apply(ctx) {
           if (entry.cancelled) throw abortError()
           const args = parseArgs(call.function.arguments)
           emitToolStatus(conversationId, call.function.name)
+          const toolStartedAt = Date.now()
+          ctx.logger.info(`[chat-flow] 调用工具 ${call.function.name}：${JSON.stringify(args).slice(0, 300)}`)
           const output = await Promise.race([
             tools.execute(call.function.name, args, {
               conversationId,
@@ -643,6 +703,10 @@ export function apply(ctx) {
             }),
           ])
           if (entry.cancelled) throw abortError()
+          ctx.logger.info(
+            `[chat-flow] 工具 ${call.function.name} 完成：${Date.now() - toolStartedAt}ms · ${output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'}` +
+              `${Array.isArray(output?.message_ids) && output.message_ids.length ? ` · 消息 ${output.message_ids.length} 条` : ''}`,
+          )
           attachCallInfo(conversationId, output?.message_ids, entry.lastRound)
           // 工具结果本身只发文本：把 output.images 从 JSON 里剥离，避免 base64
           // 混进 role=tool 的 content；图片随后作为一条 user 多模态消息单独注入。
@@ -699,9 +763,11 @@ export function apply(ctx) {
       finalizeTranscript(entry, conversationId)
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
+      const totalMs = Date.now() - startedAt
+      ctx.logger.info(`[chat-flow] 本轮结束：总耗时 ${totalMs}ms · 模型思考 ${entry.thinkingMs || 0}ms`)
       events.emit('chat:request-done', {
         conversationId,
-        elapsed: Date.now() - startedAt,
+        elapsed: totalMs,
         thinkingMs: entry.thinkingMs || 0,
         usage: entry.usage || null,
       })
@@ -784,9 +850,11 @@ export function apply(ctx) {
       finalizeTranscript(entry, conversationId)
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
+      const totalMs = Date.now() - startedAt
+      ctx.logger.info(`[chat-flow] 旧版链路结束：总耗时 ${totalMs}ms`)
       events.emit('chat:request-done', {
         conversationId,
-        elapsed: Date.now() - startedAt,
+        elapsed: totalMs,
         thinkingMs: entry.thinkingMs || 0,
         usage: entry.usage || null,
       })

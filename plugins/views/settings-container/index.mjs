@@ -16,7 +16,7 @@ export const author = '念风内核'
 export const icon = '🧱'
 export const core = true
 export const depends = { 'settings-view': '^1.0.0' }
-export const inject = ['slots', 'event-bus']
+export const inject = ['slots', 'event-bus', 'i18n?']
 export const provides = [{ name: 'settings-container', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -24,6 +24,7 @@ import { SETTINGS_CONTAINER_CSS } from './style.mjs'
 
 export function apply(ctx) {
   const events = ctx.inject('event-bus')
+  const i18n = ctx.inject('i18n?')
   useStyle(ctx, SETTINGS_CONTAINER_CSS)
 
   /** id -> { id, group, label, icon, order, render } */
@@ -32,6 +33,7 @@ export function apply(ctx) {
   let contentEl = null
   let activeId = null
   let cleanupCurrent = null
+  let navSearchQuery = ''
 
   const sorted = () =>
     [...pages.values()].sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0) || a.order - b.order)
@@ -43,6 +45,7 @@ export function apply(ctx) {
         if (!groups.has(page.group)) groups.set(page.group, [])
         groups.get(page.group).push(page)
       }
+      const query = navSearchQuery.trim().toLowerCase()
       host.innerHTML = [...groups.entries()]
         .map(
           ([group, list]) => `
@@ -50,7 +53,9 @@ export function apply(ctx) {
             <div class="settings-nav-head">${group}</div>
             ${list
               .map(
-                page => `<button class="settings-nav-item ${page.id === activeId ? 'active' : ''}" data-page="${page.id}">
+                page => `<button class="settings-nav-item ${page.id === activeId ? 'active' : ''}" data-page="${page.id}" data-settings-label="${escapeAttr(
+                  `${group} ${page.label}`,
+                )}">
                   ${page.icon || ''}<span class="nav-label">${page.label}</span>
                 </button>`,
               )
@@ -58,6 +63,16 @@ export function apply(ctx) {
           </div>`,
         )
         .join('')
+      if (!query) continue
+      for (const groupEl of host.querySelectorAll('.settings-nav-group')) {
+        let visible = 0
+        for (const item of groupEl.querySelectorAll('.settings-nav-item')) {
+          const match = String(item.dataset.settingsLabel || '').toLowerCase().includes(query)
+          item.hidden = !match
+          if (match) visible += 1
+        }
+        groupEl.hidden = visible === 0
+      }
     }
   }
 
@@ -110,17 +125,30 @@ export function apply(ctx) {
   }
 
   ctx.slots.register('settings:nav', container => {
-    navHosts.set(container, container)
-    container.classList.add('settings-nav-list')
+    container.innerHTML = `
+      <label class="settings-nav-search">
+        <span>⌕</span>
+        <input type="search" data-settings-search placeholder="${escapeAttr(i18n?.t?.('settings.search', '搜索设置…') || '搜索设置…')}" />
+      </label>
+      <div class="settings-nav-list" data-settings-nav-list></div>`
+    const listEl = container.querySelector('[data-settings-nav-list]')
+    navHosts.set(listEl, listEl)
+    const searchInput = container.querySelector('[data-settings-search]')
+    const onSearch = () => {
+      navSearchQuery = searchInput.value
+      renderNav()
+    }
     const onClick = e => {
       const btn = e.target.closest('.settings-nav-item')
       if (btn) openPage(btn.dataset.page)
     }
+    searchInput.addEventListener('input', onSearch)
     container.addEventListener('click', onClick)
     renderNav()
     return () => {
+      searchInput.removeEventListener('input', onSearch)
       container.removeEventListener('click', onClick)
-      navHosts.delete(container)
+      navHosts.delete(listEl)
       container.innerHTML = ''
     }
   })
@@ -153,4 +181,8 @@ export function apply(ctx) {
     offOpened()
   })
   ctx.logger.debug('设置容器就绪')
+}
+
+function escapeAttr(value) {
+  return String(value ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m])
 }

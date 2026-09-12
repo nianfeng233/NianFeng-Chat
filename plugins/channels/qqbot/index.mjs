@@ -63,7 +63,6 @@ const DEFAULT_PERMISSIONS = {
   read: true,
   reply: true,
   context: true,
-  active: false,
   crossRead: false,
   crossSend: false,
   confirm: true,
@@ -72,7 +71,6 @@ const PERMISSION_META = [
   ['read', '接收消息', '把 QQ 消息写入角色上下文'],
   ['reply', '自动回复', '模型生成后作为被动消息发回 QQ'],
   ['context', '参与工作记忆', '私聊渠道消息参与角色级工作记忆'],
-  ['active', '允许主动消息', '被动回复窗口/次数用尽时改发主动消息；QQ 主动额度很小，默认关闭'],
   ['crossRead', '跨渠道读取', '允许该角色读取其它渠道记录'],
   ['crossSend', '跨渠道发送', '允许向其它渠道发送消息'],
   ['confirm', '敏感操作确认', '跨渠道等敏感操作需要二次确认'],
@@ -80,7 +78,7 @@ const PERMISSION_META = [
 const STATUS_LABEL = { online: '已接入', connecting: '连接中', offline: '未连接', error: '异常' }
 const STATUS_COLOR = { online: '#70a15a', connecting: '#c9a227', offline: '#b3b9c2', error: '#c65b5b' }
 const PASSIVE_HINT =
-  'QQ 被动回复：官方窗口口径不一致，插件总是先带 msg_id 尝试被动回复；窗口失效或同一条消息超过 5 次时，可在权限里允许改发主动消息。主动消息每月仅 4 条，默认关闭。'
+  'QQ 被动回复：官方窗口口径不一致，插件总是先带 msg_id 尝试被动回复；窗口失效或同一条消息超过 5 次时，会自动改发主动消息（是否成功仍取决于 QQ 官方额度）。'
 
 export function apply(ctx) {
   const base = ctx.inject('channel-base')
@@ -97,6 +95,8 @@ export function apply(ctx) {
 
   /** conversationId -> resolve，等 chat-flow 整轮完成 */
   const pendingTurns = new Map()
+  /** conversationId -> 本轮入站上下文（外发时用于 sessionType / peerId / msg_id 解析） */
+  const activeTurns = new Map()
   /** conversationId -> 串行 Promise，保证同一渠道消息按顺序处理 */
   const busyChains = new Map()
   /** channelId -> Set(messageId)，页面内去重（SSE 与 inbox 可能同时到达） */
@@ -502,95 +502,130 @@ export function apply(ctx) {
     }
   }
 
-  async function runInboundTurn(channel, conv, message, binding, permissions) {
-    const beforeIds = new Set((sessions.messages(conv.id) || []).map(item => item.id))
-    await new Promise(resolve => {
-      let settled = false
-      const finish = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
-        resolve()
+  /** 解析外发需要的会话类型 / peer / 被动回复 msg_id。 */
+  function resolveOutboundTarget(channel, conversationId) {
+    const active = activeTurns.get(conversationId)
+    if (active && String(active.channel?.id || '') === String(channel.id)) {
+      return {
+        sessionType: active.message.sessionType,
+        peerId: active.message.peerId,
+        msgId: active.message.qqMessageId || '',
+        eventId: active.message.eventId || '',
       }
-      const timer = setTimeout(finish, 10 * 60 * 1000)
-      pendingTurns.set(conv.id, finish)
-      try {
-        if (!ctx.registry.get('chat-flow')) finish()
-        else events.emit('message:send', { conversationId: conv.id, text: message.text, skipUserAppend: true })
-      } catch (_) {
-        finish()
+    }
+    const lastInbound = [...(sessions.messages(conversationId) || [])]
+      .reverse()
+      .find(item => item.meta?.direction === 'inbound' && item.meta?.peerId)
+    if (lastInbound) {
+      return {
+        sessionType: lastInbound.meta.sessionType || 'private',
+        peerId: lastInbound.meta.peerId,
+        msgId: lastInbound.meta.qqMessageId || '',
+        eventId: lastInbound.meta.qqEventId || '',
       }
-    })
+    }
+    const binding = bindingsOf(channel)[0]
+    if (binding) {
+      return {
+        sessionType: binding.sessionType || 'private',
+        peerId: binding.peerId,
+        msgId: '',
+        eventId: '',
+      }
+    }
+    return null
+  }
 
-    const fresh = (sessions.messages(conv.id) || []).filter(
-      item =>
-        !beforeIds.has(item.id) &&
-        item.role === 'assistant' &&
-        !item.streaming &&
-        !item.error &&
-        (String(item.content || '').trim() || (Array.isArray(item.meta?.images) && item.meta.images.length > 0)),
-    )
-    for (const item of fresh) {
-      const payloadBase = {
-        channelId: channel.id,
-        sessionType: message.sessionType,
-        peerId: message.peerId,
-        msgId: message.qqMessageId || '',
-        eventId: message.eventId || '',
+  /**
+   * 即时外发：消息写入渠道会话后立刻发送，不再等整轮结束。
+   * 有被动 msg_id 时先走被动回复；窗口失效 / 次数用尽自动改发主动消息，
+   * 不再需要用户额外开启权限开关（实际能否发出仍受 QQ 官方额度限制）。
+   */
+  async function deliverOutbound({ channel, conversationId, message }) {
+    const target = resolveOutboundTarget(channel, conversationId)
+    if (!target) return { ok: false, error: 'QQ 官方机器人渠道还没有可用的目标会话，无法外发' }
+    const payloadBase = {
+      channelId: channel.id,
+      sessionType: target.sessionType,
+      peerId: target.peerId,
+      msgId: target.msgId,
+      eventId: target.eventId,
+    }
+    const preferActive = !payloadBase.msgId
+    const errors = []
+    let sent = false
+    let lastResult = null
+    for (const segment of splitForQQ(buildOutboundText(message))) {
+      if (!segment) continue
+      const payload = { ...payloadBase, text: segment }
+      let result = await bridgePost('/send', { ...payload, active: preferActive })
+      if (result?.ok === false && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
+        result = await bridgePost('/send', { ...payload, msgId: '', active: true })
       }
-      const segments = splitForQQ(buildOutboundText(item))
-      for (const segment of segments) {
-        if (!segment) continue
-        const payload = { ...payloadBase, text: segment }
-        let result = await bridgePost('/send', { ...payload, active: permissions.active === true })
-        if (result?.ok === false && permissions.active === true && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
-          result = await bridgePost('/send', { ...payload, msgId: '', active: true })
-        }
-        if (result?.ok === false) {
-          toast.warn(`QQ 回复发送失败：${result.error || '未知错误'}`)
-          continue
-        }
-        messages?.update?.(conv.id, item.id, {
-          source: 'qqbot',
-          meta: {
-            ...(item.meta || {}),
-            via: 'qqbot',
-            direction: 'outbound',
-            sessionType: message.sessionType,
-            peerId: message.peerId,
-            qqMessageId: message.qqMessageId,
-            msgSeq: result?.msgSeq || 0,
-            outboundMode: result?.mode || 'passive',
-          },
-        })
+      if (result?.ok === false) {
+        errors.push(result.error || '文本发送失败')
+        continue
       }
-      const images = Array.isArray(item.meta?.images) ? item.meta.images.slice(0, 4) : []
-      if (images.length) {
-        const payload = { ...payloadBase, text: '', images }
-        let result = await bridgePost('/send', { ...payload, active: permissions.active === true })
-        if (result?.ok === false && permissions.active === true && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
-          result = await bridgePost('/send', { ...payload, msgId: '', active: true })
-        }
-        if (result?.ok === false) {
-          toast.warn(`QQ 图片发送失败：${result.error || '未知错误'}`)
-        } else {
-          messages?.update?.(conv.id, item.id, {
-            source: 'qqbot',
-            meta: {
-              ...(item.meta || {}),
-              via: 'qqbot',
-              direction: 'outbound',
-              sessionType: message.sessionType,
-              peerId: message.peerId,
-              qqMessageId: message.qqMessageId,
-              msgSeq: result?.msgSeq || 0,
-              outboundMode: result?.mode || 'passive',
-              imagesSent: true,
-            },
-          })
-        }
+      sent = true
+      lastResult = result
+    }
+    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+    if (images.length) {
+      const payload = { ...payloadBase, text: '', images }
+      let result = await bridgePost('/send', { ...payload, active: preferActive })
+      if (result?.ok === false && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
+        result = await bridgePost('/send', { ...payload, msgId: '', active: true })
       }
+      if (result?.ok === false) errors.push(result.error || '图片发送失败')
+      else {
+        sent = true
+        lastResult = result
+      }
+    }
+    if (!sent && errors.length) return { ok: false, error: errors.join('；') }
+    messages?.update?.(conversationId, message.id, {
+      source: 'qqbot',
+      meta: {
+        ...(message.meta || {}),
+        via: 'qqbot',
+        direction: 'outbound',
+        sessionType: target.sessionType,
+        peerId: target.peerId,
+        qqMessageId: target.msgId,
+        msgSeq: lastResult?.msgSeq || 0,
+        outboundMode: lastResult?.mode || 'passive',
+        ...(images.length && sent ? { imagesSent: true } : {}),
+        ...(errors.length ? { outboundError: errors.join('；') } : { outboundError: '' }),
+      },
+    })
+    return errors.length ? { ok: true, warning: errors.join('；') } : { ok: true }
+  }
+
+  async function runInboundTurn(channel, conv, message, binding, permissions) {
+    activeTurns.set(conv.id, { channel, message, binding, permissions })
+    try {
+      await new Promise(resolve => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
+          resolve()
+        }
+        const timer = setTimeout(finish, 10 * 60 * 1000)
+        pendingTurns.set(conv.id, finish)
+        try {
+          if (!ctx.registry.get('chat-flow')) finish()
+          else events.emit('message:send', { conversationId: conv.id, text: message.text, skipUserAppend: true })
+        } catch (_) {
+          finish()
+        }
+      })
+      await base.outboundIdle?.(conv.id)
+    } finally {
+      const current = activeTurns.get(conv.id)
+      if (!current || String(current.channel?.id || '') === String(channel.id)) activeTurns.delete(conv.id)
     }
   }
 
@@ -885,7 +920,7 @@ export function apply(ctx) {
               </label>`).join('')}
           </div>
         </div>
-        <div class="wc-note">${PASSIVE_HINT}主动消息默认关闭，因为 QQ 官方对主动消息配额限制很严。</div>
+        <div class="wc-note">${PASSIVE_HINT}主动消息配额由 QQ 官方限制，失败会回写错误提示。</div>
         <div class="wc-error" data-wc-error hidden></div>
         <div class="wc-actions">
           <button class="outline-btn" data-wc-cancel>取消</button>
@@ -1637,7 +1672,7 @@ export function apply(ctx) {
         <div class="settings-section">
           <div class="settings-note">
             入站消息会写入当前渠道记录并触发所选角色；模型整轮调用结束后，回复作为被动消息按 <code>msg_seq</code> 发回 QQ。
-            ${PASSIVE_HINT}超过被动额度时可开启「允许主动消息」，但会消耗 QQ 每月极少的主动消息配额。
+            ${PASSIVE_HINT}窗口失效时自动改发主动消息（受 QQ 官方配额限制），无需额外开关。
           </div>
         </div>
       </div>`
@@ -1836,6 +1871,7 @@ export function apply(ctx) {
     description: 'QQ 官方机器人渠道：扫码 / AppID 接入，支持私聊绑定、被动回复与完整聊天记录（暂不支持群聊）。',
     create: options => openSettings({ mode: 'create', ...(options || {}) }),
     detail: options => mountDetail(options),
+    outbound: deliverOutbound,
   })
   ctx.effect(() => () => registration.dispose?.())
 

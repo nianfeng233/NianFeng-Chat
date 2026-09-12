@@ -40,7 +40,7 @@ export function apply(ctx) {
       const localePacks = i18n.locales()
       container.innerHTML = page('通用', '应用行为、启动方式以及基础偏好设置。', `
         ${section('应用', card(
-          row('启动时恢复上次状态', '重新打开应用时恢复上次激活的会话', switchBtn('general.restore', true)) +
+          row('启动时恢复上次状态', '重新打开应用时恢复上次激活的网页会话；渠道记录会话始终不会自动恢复（默认关闭）', switchBtn('general.restore', false)) +
           row(
             '关闭窗口时最小化',
             hasWindowHost ? '关闭窗口后继续在后台运行（由桌面端宿主接管）' : '仅桌面端宿主支持；当前是浏览器环境，此选项暂不生效',
@@ -67,6 +67,8 @@ export function apply(ctx) {
           row('严格工具模式', '模型直接输出正文时丢弃并按纠错提示重试；多次未调用工具则终止本轮，而不是把正文当成回复', switchBtn('chat.requireToolCall', true)) +
           row('工具纠错次数', '严格模式下最多纠正几次（0 = 不纠正，直接按普通文本降级）',
             input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 2), { type: 'number', width: 70 })) +
+          row('空回复纠正次数', '模型既没输出正文也没调用工具时，最多纠正几次；仍为空则明确报错并停止本轮',
+            input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +
           row('最大工具轮次', '一轮回复内最多执行多少次“模型 → 工具 → 模型”循环（1-20）',
             input('chat.maxToolRounds', config.get('chat.maxToolRounds', 10), { type: 'number', width: 90 })) +
           row('上下文 token 预算', '工作记忆 + 渠道记忆的粗略 token 上限，超出时整轮丢弃最旧内容',
@@ -78,7 +80,7 @@ export function apply(ctx) {
           row('单次读取上限', 'read_messages / read_document 单次返回的 token 上限',
             input('chat.readTokens', config.get('chat.readTokens', 1500), { type: 'number', width: 100 })) +
           row('敏感操作确认', '跨渠道读写等敏感操作需要在输入框输入“确认”', switchBtn('chat.confirmSensitive', true)) +
-          row('模拟真人打字', '工具发送消息前按内容长度模拟打字延迟；首条消息不延迟', switchBtn('chat.simulateTyping', true)) +
+          row('模拟真人打字', '工具发送消息前按内容长度模拟打字延迟；每轮首条不延迟，网页与外部渠道一致', switchBtn('chat.simulateTyping', true)) +
           row('打字最小延迟（毫秒）', '后续消息的动态延迟下限，默认 500ms',
             input('chat.typingMinMs', config.get('chat.typingMinMs', 500), { type: 'number', width: 90 })) +
           row('打字最大延迟（毫秒）', '后续消息的动态延迟上限，默认 5000ms',

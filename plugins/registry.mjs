@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 90 个插件，按目录名排序；真正的加载顺序由
+ * 共 93 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -516,6 +516,29 @@ export const plugins = [
     "dir": "plugins/extras/markdown-enhancer"
   },
   {
+    "id": "napcat-input-state",
+    "version": "1.0.0",
+    "displayName": "NapCat 输入状态",
+    "description": "扩展 · NapCat 私聊在模型调用期间持续显示“正在输入中”（定时刷新，整轮结束停止）。",
+    "core": false,
+    "enabled": true,
+    "icon": "⌨️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "channel-registry": "^1.0.0",
+      "napcat": "^1.0.0",
+      "config": "^1.0.0"
+    },
+    "optionalDepends": {},
+    "provides": [],
+    "permissions": [
+      "network"
+    ],
+    "path": "./plugins/extras/napcat-input-state/index.mjs",
+    "dir": "plugins/extras/napcat-input-state"
+  },
+  {
     "id": "channel-base",
     "version": "1.0.0",
     "displayName": "渠道基座",
@@ -692,32 +715,6 @@ export const plugins = [
     "permissions": [],
     "path": "./plugins/features/model-adapter-backend/index.mjs",
     "dir": "plugins/features/model-adapter-backend"
-  },
-  {
-    "id": "official-service",
-    "version": "1.0.0",
-    "displayName": "念风官方服务",
-    "description": "功能插件 · 账号 / 登录 / 官方内置模型（官方服务端尚未制作，暂不可用）。",
-    "core": false,
-    "enabled": true,
-    "icon": "☁️",
-    "unavailable": true,
-    "unavailableReason": "官方服务端尚未制作：登录 / 官方内置模型 / 计费暂不可用。",
-    "depends": {
-      "settings-container": "^1.0.0"
-    },
-    "optionalDepends": {},
-    "provides": [
-      {
-        "name": "official-service",
-        "type": "singleton"
-      }
-    ],
-    "permissions": [
-      "network"
-    ],
-    "path": "./plugins/features/official-service/index.mjs",
-    "dir": "plugins/features/official-service"
   },
   {
     "id": "plugin-health-guard",
@@ -1323,6 +1320,27 @@ export const plugins = [
     "dir": "plugins/shell/left-list-panel"
   },
   {
+    "id": "mobile-shell",
+    "version": "1.0.0",
+    "displayName": "手机界面",
+    "description": "视觉框架 · 手机访问自动切换到单栏界面、底部导航与全屏设置。",
+    "core": true,
+    "enabled": true,
+    "icon": "📱",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "app-shell": "^1.0.0",
+      "view-router": "^1.0.0",
+      "session-service": "^2.0.0"
+    },
+    "optionalDepends": {},
+    "provides": [],
+    "permissions": [],
+    "path": "./plugins/shell/mobile-shell/index.mjs",
+    "dir": "plugins/shell/mobile-shell"
+  },
+  {
     "id": "rail",
     "version": "1.0.0",
     "displayName": "侧边栏",
@@ -1757,6 +1775,27 @@ export const plugins = [
     "dir": "plugins/views/settings-item-bubble"
   },
   {
+    "id": "settings-item-chat-auth",
+    "version": "1.0.0",
+    "displayName": "设置项 · 渠道授权",
+    "description": "设置页 · 跨渠道读取 / 发送策略、授权记录与审计日志。",
+    "core": false,
+    "enabled": true,
+    "icon": "🔐",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "settings-container": "^1.0.0",
+      "chat-permissions": "^1.0.0",
+      "chat-store": "^1.0.0"
+    },
+    "optionalDepends": {},
+    "provides": [],
+    "permissions": [],
+    "path": "./plugins/views/settings-item-chat-auth/index.mjs",
+    "dir": "plugins/views/settings-item-chat-auth"
+  },
+  {
     "id": "settings-item-chat-records",
     "version": "2.0.0",
     "displayName": "设置项 · 聊天记录",
@@ -1837,6 +1876,26 @@ export const plugins = [
     "permissions": [],
     "path": "./plugins/views/settings-item-general/index.mjs",
     "dir": "plugins/views/settings-item-general"
+  },
+  {
+    "id": "settings-item-logs",
+    "version": "1.0.0",
+    "displayName": "设置项 · 运行日志",
+    "description": "设置页 · 模型调用阶段、工具 / 外发 / 权限确认与后端请求日志。",
+    "core": false,
+    "enabled": true,
+    "icon": "📝",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "settings-container": "^1.0.0",
+      "logger": "^1.0.0"
+    },
+    "optionalDepends": {},
+    "provides": [],
+    "permissions": [],
+    "path": "./plugins/views/settings-item-logs/index.mjs",
+    "dir": "plugins/views/settings-item-logs"
   },
   {
     "id": "settings-item-model",

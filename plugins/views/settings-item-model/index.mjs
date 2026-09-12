@@ -561,6 +561,14 @@ export function apply(ctx) {
               )
               .join('')}</select>`
           : '<span class="text-warn">● 没有可用模型</span>'
+        const failoverOptions =
+          `<option value="">（不启用备用模型）</option>` +
+          modelList
+            .map(
+              item =>
+                `<option value="${escapeHtml(item.key)}" ${String(config.get('model.failoverKey', '')) === item.key ? 'selected' : ''}>${escapeHtml(item.name || item.id)}（${escapeHtml(item.providerName || item.provider)}）</option>`,
+            )
+            .join('')
         const reasoningLevel = REASONING_LEVELS[reasoningIndexFor(config.get('chat.reasoningEffort', 'off'))]
         return section(
           '当前生效',
@@ -580,7 +588,18 @@ export function apply(ctx) {
                  </div>
                  <div class="setting-control">${temperatureSliderHtml()}</div>
                </div>` +
-              row('流式输出', '实时显示模型输出', switchBtn('chat.stream', true)),
+              row('流式输出', '实时显示模型输出', switchBtn('chat.stream', true)) +
+              row('失败自动切换模型', '当前模型在输出任何内容前报错时，自动尝试备用模型；已输出内容不重试，避免重复气泡', switchBtn('model.failoverEnabled', false)) +
+              row(
+                '备用模型',
+                '失败时按此模型重试；建议选择另一个提供商或另一个可用模型',
+                `<select class="setting-select" data-config-select="model.failoverKey" style="min-width:230px">${failoverOptions}</select>`,
+              ) +
+              row(
+                '备用模型重试次数',
+                '0 = 不重试；默认 1 次',
+                `<input class="setting-input" type="number" min="0" max="3" style="width:70px" data-config-input="model.failoverRetries" value="${escapeHtml(String(config.get('model.failoverRetries', 1)))}" />`,
+              ),
           ),
         )
       }

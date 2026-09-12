@@ -47,14 +47,9 @@ wechat-clawbot/
 
 ## 单独分发
 
-仓库根目录执行：
-
-```bash
-npm run build:clawbot-plugin
-```
-
-会在 `release/plugins/wechat-clawbot/` 生成独立目录，并尽量生成
-`release/plugins/wechat-clawbot-plugin-v1.0.0.zip` 压缩包。
+独立分发脚本已移除（`extensions/wechat-clawbot` 是早期测试目录，已不再随仓库维护）。
+如需单独分发，请手动把本目录（含 `index.mjs` / `bridge.mjs` / `style.mjs` / `vendor/`）复制到外部插件目录，
+并确保宿主包含所需的 `/api/clawbot/*` 后端桥与 `image-service/store.mjs`。
 
 ## 协议参考
 

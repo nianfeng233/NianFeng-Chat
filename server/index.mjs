@@ -23,6 +23,7 @@ import * as modelsPlugin from './plugins/models.mjs'
 import * as instancePlugin from './plugins/instance.mjs'
 import * as pluginRegistryPlugin from './plugins/plugin-registry.mjs'
 import * as httpPlugin from './plugins/http.mjs'
+import * as logsPlugin from './plugins/logs.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -117,6 +118,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
     [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
+    [logsPlugin, {}],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)
 

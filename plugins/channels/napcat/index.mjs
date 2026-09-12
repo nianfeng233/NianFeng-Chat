@@ -62,12 +62,27 @@ const DEFAULT_PERMISSIONS = {
 }
 const PERMISSION_META = [
   ['read', '接收消息', '把 NapCat 消息写入角色上下文'],
-  ['reply', '自动回复', '模型整轮完成后回复到 QQ'],
-  ['context', '参与工作记忆', '私聊渠道消息参与角色级工作记忆（群聊始终只使用本群 20 轮）'],
-  ['crossRead', '跨渠道读取', '允许该角色读取其它渠道记录'],
-  ['crossSend', '跨渠道发送', '允许向其它渠道发送消息'],
+  ['reply', '自动回复', '助手消息生成后立即外发到 QQ'],
+  ['context', '参与工作记忆', '私聊消息参与角色级工作记忆；群聊 / 隐私固定只用自己的记录'],
+  ['crossRead', '跨渠道读取', '允许该角色的模型读取其它渠道记录'],
+  ['crossSend', '跨渠道发送', '允许该角色的模型向其它渠道发送消息'],
   ['confirm', '敏感操作确认', '跨渠道等敏感操作需要二次确认'],
 ]
+/** 按渠道分类决定哪些权限真正有意义，避免把无关选项全堆给用户。 */
+const PERMISSION_SCOPES = {
+  read: ['private', 'group', 'privacy'],
+  reply: ['private', 'group', 'privacy'],
+  context: ['private'],
+  crossRead: ['private', 'group'],
+  crossSend: ['private', 'group'],
+  confirm: ['private', 'group'],
+}
+const permissionMetaFor = category => PERMISSION_META.filter(([key]) => (PERMISSION_SCOPES[key] || ['private', 'group', 'privacy']).includes(category))
+const CATEGORY_HELP = {
+  private: '私聊：目标 QQ 的消息进入所选角色的角色级工作记忆，可参与跨渠道协作。',
+  group: '群聊：只使用本群最近 20 轮上下文；使用独立的群聊触发与回复规则。',
+  privacy: '隐私：独立单会话，不与其它渠道互读 / 互发；适合不希望消息进入角色工作记忆的用途。',
+}
 const DEFAULT_GROUP_RULES = {
   blacklist: [],
   whitelist: [],
@@ -109,6 +124,8 @@ export function apply(ctx) {
 
   /** conversationId -> resolve，等 chat-flow 整轮完成 */
   const pendingTurns = new Map()
+  /** conversationId -> 本轮入站上下文（外发时用于引用 / 艾特 / 目标解析） */
+  const activeTurns = new Map()
   /** conversationId -> 串行 Promise，保证同一渠道消息按顺序处理 */
   const busyChains = new Map()
   /** channelId -> Set(messageId)，页面内去重（SSE 与 inbox 可能同时到达） */
@@ -621,83 +638,86 @@ export function apply(ctx) {
 
   /* ---------------- NapCat 消息 -> 角色模型 -> NapCat ---------------- */
 
-  async function runInboundTurn(channel, conv, message, permissions) {
-    const beforeIds = new Set((sessions.messages(conv.id) || []).map(item => item.id))
+  /**
+   * 即时外发：助手消息写入渠道会话后立刻发给 NapCat。
+   * 整轮期间的正常回复会带上当前入站消息的引用 / 艾特；
+   * 其它渠道 chat_send 跨渠道写进来的消息没有当前入站消息，则不引用、不艾特，直接发送。
+   */
+  async function deliverOutbound({ channel, conversationId, message }) {
     const targetType = targetTypeOf(channel)
     const targetId = targetIdOf(channel)
-    const rules = groupRulesOf(channel)
-    await new Promise(resolve => {
-      let settled = false
-      const finish = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
-        resolve()
-      }
-      const timer = setTimeout(finish, 10 * 60 * 1000)
-      pendingTurns.set(conv.id, finish)
-      try {
-        if (!ctx.registry.get('chat-flow')) finish()
-        else events.emit('message:send', {
-          conversationId: conv.id,
-          text: message.text || (Array.isArray(message.images) && message.images.length ? '[图片]' : ''),
-          images: Array.isArray(message.images) ? message.images : [],
-          skipUserAppend: true,
-        })
-      } catch (_) {
-        finish()
-      }
-    })
+    const instanceId = instanceIdOf(channel)
+    if (!instanceId) return { ok: false, error: 'NapCat 渠道未绑定连接' }
+    if (!targetId) return { ok: false, error: 'NapCat 渠道未配置目标 QQ / 群号' }
 
-    const fresh = (sessions.messages(conv.id) || []).filter(
-      item =>
-        !beforeIds.has(item.id) &&
-        item.role === 'assistant' &&
-        !item.streaming &&
-        !item.error &&
-        (String(item.content || '').trim() || (Array.isArray(item.meta?.images) && item.meta.images.length > 0)),
-    )
-    for (const item of fresh) {
-      const text = buildOutboundText(item)
-      const images = Array.isArray(item.meta?.images) ? item.meta.images.slice(0, 4) : []
-      if (!text && !images.length) continue
-      const body = {
-        channelId: channel.id,
-        instanceId: instanceIdOf(channel),
+    const active = activeTurns.get(conversationId)
+    const inbound = active && String(active.channel?.id || '') === String(channel.id) ? active.message : null
+    const rules = groupRulesOf(channel)
+    const text = buildOutboundText(message)
+    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+
+    const body = {
+      channelId: channel.id,
+      instanceId,
+      targetType,
+      targetId,
+      text,
+      images,
+      quoteMsgId: targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
+      mentionUserId: targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
+    }
+    const result = await bridgePost('/send', body)
+    if (result?.ok === false) return { ok: false, error: result.error || 'NapCat 返回发送失败' }
+    messages?.update?.(conversationId, message.id, {
+      source: TYPE_ID,
+      meta: {
+        ...(message.meta || {}),
+        via: TYPE_ID,
+        direction: 'outbound',
+        instanceId,
         targetType,
         targetId,
-        text,
-        images,
-        quoteMsgId: targetType === 'group' && rules.quote ? String(message.messageId || '') : '',
-        mentionUserId: targetType === 'group' && rules.mention ? String(message.senderId || '') : '',
-      }
-      let result = null
-      try {
-        result = await bridgePost('/send', body)
-      } catch (err) {
-        toast.warn(`NapCat 回复发送失败：${err.message}`)
-        continue
-      }
-      if (result?.ok === false) {
-        toast.warn(`NapCat 回复发送失败：${result.error || '未知错误'}`)
-        continue
-      }
-      messages?.update?.(conv.id, item.id, {
-        source: TYPE_ID,
-        meta: {
-          ...(item.meta || {}),
-          via: TYPE_ID,
-          direction: 'outbound',
-          instanceId: instanceIdOf(channel),
-          targetType,
-          targetId,
-          napcatMessageId: result?.messageId || '',
-          quoteMessageId: body.quoteMsgId || '',
-          mentionUserId: body.mentionUserId || '',
-          imagesSent: images.length > 0,
-        },
+        napcatMessageId: result?.messageId || '',
+        quoteMessageId: body.quoteMsgId || '',
+        mentionUserId: body.mentionUserId || '',
+        imagesSent: images.length > 0,
+        outboundError: '',
+      },
+    })
+    return { ok: true, messageId: result?.messageId || '' }
+  }
+
+  async function runInboundTurn(channel, conv, message, permissions) {
+    activeTurns.set(conv.id, { channel, message, permissions })
+    try {
+      await new Promise(resolve => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
+          resolve()
+        }
+        const timer = setTimeout(finish, 10 * 60 * 1000)
+        pendingTurns.set(conv.id, finish)
+        try {
+          if (!ctx.registry.get('chat-flow')) finish()
+          else events.emit('message:send', {
+            conversationId: conv.id,
+            text: message.text || (Array.isArray(message.images) && message.images.length ? '[图片]' : ''),
+            images: Array.isArray(message.images) ? message.images : [],
+            skipUserAppend: true,
+          })
+        } catch (_) {
+          finish()
+        }
       })
+      // 等当前会话排队的外发全部完成，保证下一轮入站不会插到未发完的消息前面。
+      await base.outboundIdle?.(conv.id)
+    } finally {
+      const current = activeTurns.get(conv.id)
+      if (!current || String(current.channel?.id || '') === String(channel.id)) activeTurns.delete(conv.id)
     }
   }
 
@@ -1057,11 +1077,19 @@ export function apply(ctx) {
         <div class="nc-grid">
           <label class="nc-field">
             <span>渠道分类</span>
-            <select data-nc-category>
-              <option value="private" ${category === 'private' ? 'selected' : ''}>私聊（参与角色工作记忆）</option>
-              <option value="group" ${category === 'group' ? 'selected' : ''}>群聊（本群独立上下文，保留最近 20 轮）</option>
-              <option value="privacy" ${category === 'privacy' ? 'selected' : ''}>隐私（独立单会话，不与其他渠道交互）</option>
+            <div class="nc-mode-tabs" data-nc-category-tabs>
+              ${TAB_ORDER.map(value => `
+                <button type="button" class="nc-mode-tab" data-nc-category-tab="${value}">
+                  <b>${TAB_LABELS[value]}</b>
+                  <small>${value === 'private' ? '角色工作记忆' : value === 'group' ? '本群独立 20 轮' : '单会话隔离'}</small>
+                </button>`).join('')}
+            </div>
+            <select data-nc-category style="display:none" aria-hidden="true">
+              <option value="private" ${category === 'private' ? 'selected' : ''}>私聊</option>
+              <option value="group" ${category === 'group' ? 'selected' : ''}>群聊</option>
+              <option value="privacy" ${category === 'privacy' ? 'selected' : ''}>隐私</option>
             </select>
+            <div class="nc-field-help" data-nc-category-help>${CATEGORY_HELP[category] || CATEGORY_HELP.private}</div>
           </label>
           <label class="nc-field">
             <span data-nc-target-label>${targetType === 'group' ? '群聊目标群号' : '私聊目标 QQ 号'}</span>
@@ -1181,11 +1209,12 @@ export function apply(ctx) {
           <span>权限设置</span>
           <div class="nc-perms">
             ${PERMISSION_META.map(([key, label, help]) => `
-              <label class="nc-perm">
+              <label class="nc-perm" data-nc-perm-row="${key}" data-nc-perm-scope="${(PERMISSION_SCOPES[key] || []).join(',')}">
                 <input type="checkbox" data-nc-perm="${key}" ${permissions[key] !== false ? 'checked' : ''} />
                 <span>${label}<small>${help}</small></span>
               </label>`).join('')}
           </div>
+          <div class="nc-field-help" data-nc-perm-note></div>
         </div>
         <div class="nc-error" data-nc-error hidden></div>
         <div class="nc-actions">
@@ -1197,6 +1226,10 @@ export function apply(ctx) {
     const nameInput = overlay.querySelector('[data-nc-name]')
     const roleSelect = overlay.querySelector('[data-nc-role]')
     const categorySelect = overlay.querySelector('[data-nc-category]')
+    const categoryTabs = [...overlay.querySelectorAll('[data-nc-category-tab]')]
+    const categoryHelp = overlay.querySelector('[data-nc-category-help]')
+    const permRows = [...overlay.querySelectorAll('[data-nc-perm-row]')]
+    const permNote = overlay.querySelector('[data-nc-perm-note]')
     const targetInput = overlay.querySelector('[data-nc-target]')
     const targetLabel = overlay.querySelector('[data-nc-target-label]')
     const targetNameInput = overlay.querySelector('[data-nc-target-name]')
@@ -1276,14 +1309,32 @@ export function apply(ctx) {
     const syncCategory = () => {
       const value = categorySelect.value
       const isGroup = value === 'group'
+      const isPrivacy = value === 'privacy'
+      const activeCategory = isGroup ? 'group' : isPrivacy ? 'privacy' : 'private'
       groupRulesPanel.hidden = !isGroup
       identityRow.hidden = isGroup
-      targetLabel.textContent = isGroup ? '群聊目标群号' : '私聊目标 QQ 号'
+      targetLabel.textContent = isGroup ? '群聊目标群号' : isPrivacy ? '隐私目标 QQ 号' : '私聊目标 QQ 号'
       targetInput.placeholder = isGroup ? '例如：123456789' : '例如：10001'
+      if (categoryHelp) categoryHelp.textContent = CATEGORY_HELP[activeCategory] || CATEGORY_HELP.private
+      for (const tab of categoryTabs) tab.classList.toggle('active', tab.dataset.ncCategoryTab === activeCategory)
+      // 按分类隐藏无意义的权限项，但保留在 DOM 里，保存时仍能保留原有的勾选状态。
+      for (const row of permRows) {
+        const scopes = String(row.dataset.ncPermScope || '').split(',').filter(Boolean)
+        row.hidden = scopes.length > 0 && !scopes.includes(activeCategory)
+      }
+      if (permNote) {
+        permNote.textContent = isPrivacy
+          ? '隐私渠道按设计不能与其它渠道互读 / 互发，因此跨渠道相关权限已隐藏。'
+          : isGroup
+            ? '群聊只使用本群记录，因此「参与工作记忆」已隐藏。'
+            : '私聊可使用全部权限；跨渠道操作仍可能要求二次确认。'
+      }
       if (targetHelp) {
         targetHelp.innerHTML = isGroup
           ? '这里填<b>要接入聊天的群号</b>；只有这个群的消息会进入本渠道，其它群不会触发模型。'
-          : '这里填<b>要接入聊天的对方 QQ 号</b>；只有这个 QQ 的私聊消息会进入本渠道。'
+          : isPrivacy
+            ? '这里填<b>隐私会话对应的 QQ 号</b>；该渠道有独立记录，不会参与角色工作记忆，也不能和其它渠道互读 / 互发。'
+            : '这里填<b>要接入聊天的对方 QQ 号</b>；只有这个 QQ 的私聊消息会进入本渠道。'
       }
       if (isGroup) targetNameInput.value = ''
     }
@@ -1316,6 +1367,14 @@ export function apply(ctx) {
     }
 
     categorySelect.addEventListener('change', syncCategory)
+    for (const tab of categoryTabs) {
+      tab.addEventListener('click', () => {
+        const next = TAB_ORDER.includes(tab.dataset.ncCategoryTab) ? tab.dataset.ncCategoryTab : 'private'
+        if (categorySelect.value === next) return
+        categorySelect.value = next
+        syncCategory()
+      })
+    }
     requireAtInput.addEventListener('change', syncProbability)
     probabilityInput.addEventListener('input', syncProbability)
     probabilityNumberInput.addEventListener('input', onProbabilityNumber)
@@ -1658,7 +1717,9 @@ export function apply(ctx) {
     const instance = findInstance(instanceIdOf(channel))
     const status = instance?.status || channel.meta?.napcatStatus || 'offline'
     const statusLabel = STATUS_LABEL[status] || status
-    const enabled = PERMISSION_META.filter(([key]) => permissions[key] !== false).map(([, label]) => label)
+    const enabled = permissionMetaFor(category)
+      .filter(([key]) => permissions[key] !== false)
+      .map(([, label]) => label)
     const count = conv ? (sessions.messages(conv.id) || []).filter(m => m.kind !== 'divider').length : 0
     const peers = Array.isArray(live.peers) ? live.peers : []
     const shared = Number(instance?.channelIds?.length) || 0
@@ -2133,6 +2194,7 @@ export function apply(ctx) {
     description: 'NapCatQQ / OneBot 11 渠道：私聊、群聊、隐私、多 QQ 连接复用与群聊规则。',
     create: options => openSettings({ mode: 'create', ...(options || {}) }),
     detail: options => mountDetail(options),
+    outbound: deliverOutbound,
   })
   ctx.effect(() => () => registration.dispose?.())
 

@@ -200,6 +200,31 @@ export function apply(ctx) {
       toast.success('已导出全部会话（JSON）')
       return true
     },
+    exportMany(ids = [], format = 'json') {
+      const conversations = (Array.isArray(ids) ? ids : []).map(id => sessions.get(id)).filter(Boolean)
+      if (!conversations.length) return false
+      const stamp = Date.now()
+      if (format === 'txt') {
+        const text = conversations.map(c => `${'='.repeat(20)}\n${c.name}\n${'='.repeat(20)}\n\n${toText(c)}`).join('\n\n')
+        download(`念风-选中会话-${stamp}.txt`, text, 'text/plain;charset=utf-8')
+        toast.success(`已导出 ${conversations.length} 个会话（TXT）`)
+        return true
+      }
+      if (format === 'html') {
+        download(`念风-选中会话-${stamp}.html`, toAllHtml(conversations), 'text/html;charset=utf-8')
+        toast.success(`已导出 ${conversations.length} 个会话（HTML）`)
+        return true
+      }
+      const payload = {
+        version: ctx.inject('app')?.version || '',
+        app: '念风chat',
+        exportedAt: new Date().toISOString(),
+        conversations,
+      }
+      download(`念风-选中会话-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json')
+      toast.success(`已导出 ${conversations.length} 个会话（JSON）`)
+      return true
+    },
     toMarkdown,
     toText,
     toCsv,

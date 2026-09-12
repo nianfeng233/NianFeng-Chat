@@ -26,6 +26,125 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   const toast = ctx.inject('toast')
 
+  /** channelType -> (payload) => Promise<{ok:boolean,error?:string}> */
+  const outboundHandlers = new Map()
+  /** conversationId -> 串行外发链，保证同一渠道的消息严格按入库顺序发送 */
+  const outboundChains = new Map()
+  /** conversationId:messageId -> true，避免 added / done 双事件重复发送同一条消息 */
+  const outboundSeen = new Set()
+
+  /** 通过 meta.conversationId 反查渠道记录；渠道插件创建会话时都会写入这个字段。 */
+  const channelForConversation = conversationId => {
+    const wanted = String(conversationId || '')
+    if (!wanted) return null
+    for (const tab of registry.tabs()) {
+      for (const channel of registry.channels(tab)) {
+        if (String(channel?.meta?.conversationId || '') === wanted) return { tab, channel }
+      }
+    }
+    return null
+  }
+
+  const outboundIdle = conversationId => outboundChains.get(conversationId) || Promise.resolve()
+
+  const enqueueOutbound = (conversationId, task) => {
+    const previous = outboundChains.get(conversationId) || Promise.resolve()
+    const next = previous.catch(() => {}).then(task)
+    outboundChains.set(conversationId, next)
+    Promise.resolve(next)
+      .catch(() => {})
+      .finally(() => {
+        if (outboundChains.get(conversationId) === next) outboundChains.delete(conversationId)
+      })
+    return next
+  }
+
+  const deliverable = message => {
+    if (!message || message.role !== 'assistant') return false
+    if (message.streaming || message.error) return false
+    if (message.meta?.direction === 'outbound') return false
+    if (!String(message.content || '').trim() && !(Array.isArray(message.meta?.images) && message.meta.images.length)) return false
+    return true
+  }
+
+  /**
+   * 助手消息一旦写入某个渠道会话，就立即按入库顺序外发，而不是等整轮模型结束。
+   * 跨渠道 chat_send / send_document 也会走到这里，因此目标渠道会真正收到消息。
+   */
+  const dispatchOutbound = (conversationId, message) => {
+    if (!deliverable(message)) return false
+    const found = channelForConversation(conversationId)
+    if (!found?.channel) return false
+    const channel = found.channel
+    const handler = outboundHandlers.get(channel.type)
+    if (typeof handler !== 'function') return false
+    const messageId = String(message.id || message.message_id || '')
+    const seenKey = `${conversationId}:${messageId}`
+    if (outboundSeen.has(seenKey)) return false
+    outboundSeen.add(seenKey)
+    const base = {
+      conversationId,
+      channelId: channel.id,
+      channelType: channel.type,
+      messageId,
+    }
+    events.emit('channel:outbound', { ...base, status: 'pending' })
+    Promise.resolve(
+      enqueueOutbound(conversationId, async () => {
+        const startedAt = Date.now()
+        try {
+          const result = await handler({ channel, conversationId, message })
+          if (result?.ok === false) throw new Error(result.error || '外发失败')
+          events.emit('channel:outbound', { ...base, status: 'sent', ms: Date.now() - startedAt })
+          ctx.logger.debug(`[channel] ${channel.type} 外发成功：${String(message.content || '').slice(0, 40)}`)
+          return result
+        } catch (err) {
+          const error = err?.message || String(err)
+          events.emit('channel:outbound', { ...base, status: 'failed', error, ms: Date.now() - startedAt })
+          ctx.logger.warn(`[channel] ${channel.type} 外发失败：${error}`)
+          try {
+            toast?.warn?.(`${channel.name || channel.type} 外发失败：${error}`)
+          } catch (_) {
+            /* toast 服务不可用时忽略 */
+          }
+          // 失败标记写在消息 meta 上：聊天记录 UI / 日志页能看到，后续可手动重试，
+          // 同时避免同一条消息被事件重复外发。
+          try {
+            const current = sessions.message(conversationId, messageId)
+            if (current && current.meta?.direction !== 'outbound') {
+              messages.update(conversationId, current.id, {
+                meta: { ...(current.meta || {}), outboundError: error, outboundFailedAt: Date.now() },
+              })
+            }
+          } catch (_) {
+            /* 消息可能已被删除 */
+          }
+          // 系统级失败提示回写到会话里：用户下次打开记录 / 对应渠道都能看到真实原因。
+          try {
+            messages.add(conversationId, {
+              role: 'assistant',
+              content: `【外发失败】${channel.name || channel.type}：${error}`,
+              meta: { via: channel.type, direction: 'outbound', outboundError: error, errorNotice: true },
+            })
+          } catch (_) {
+            /* ignore */
+          }
+          return { ok: false, error }
+        }
+      }),
+    )
+      .catch(() => {})
+      .finally(() => outboundSeen.delete(seenKey))
+    return true
+  }
+
+  const onOutboundMessage = payload => {
+    const conversationId = payload?.conversationId
+    const message = payload?.message
+    if (!conversationId || !message) return
+    dispatchOutbound(conversationId, message)
+  }
+
   const service = {
     name: 'channel-base',
     version: '1.0.0',
@@ -65,8 +184,14 @@ export function apply(ctx) {
         },
       })
 
-      ctx.effect(dispose)
-      ctx.logger.debug(`渠道类型 ${def.type} 已注册`)
+      const outbound = typeof def.outbound === 'function' ? def.outbound : null
+      if (outbound) outboundHandlers.set(def.type, outbound)
+      const disposeAll = () => {
+        if (outbound && outboundHandlers.get(def.type) === outbound) outboundHandlers.delete(def.type)
+        dispose()
+      }
+      ctx.effect(disposeAll)
+      ctx.logger.debug(`渠道类型 ${def.type} 已注册${outbound ? '（支持即时外发）' : ''}`)
 
       return {
         type: def.type,
@@ -75,7 +200,7 @@ export function apply(ctx) {
           const channel = findChannel(registry, channelId)
           events.emit('channel:message', { channelId, channelType: def.type, message: payload, channel })
         },
-        dispose,
+        dispose: disposeAll,
       }
     },
 
@@ -97,6 +222,11 @@ export function apply(ctx) {
       })
       return conv.id
     },
+
+    /** 渠道插件注册 / 检查外发实现；外发由 message:added / message:done 自动触发。 */
+    hasOutbound: type => typeof outboundHandlers.get(type) === 'function',
+    /** 等待某个会话当前排队的外发全部结算（渠道插件在整轮结束时使用）。 */
+    outboundIdle,
   }
 
   /* 入站消息 → 会话消息 */
@@ -113,8 +243,16 @@ export function apply(ctx) {
     ctx.logger.info(`[channel] ${target.name}: ${text.slice(0, 40)}`)
   })
 
+  // 助手消息一写入渠道会话就尝试外发：流式消息在 done 时触发，工具消息在 added 时触发。
+  const offOutboundAdded = events.on('message:added', onOutboundMessage)
+  const offOutboundDone = events.on('message:done', onOutboundMessage)
+
   ctx.provide('channel-base', service, { type: 'singleton' })
-  ctx.effect(offIncoming)
+  ctx.effect(() => {
+    offIncoming()
+    offOutboundAdded()
+    offOutboundDone()
+  })
   ctx.logger.debug('渠道基座就绪')
 }
 

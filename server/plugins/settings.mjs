@@ -68,6 +68,8 @@ const DEFAULTS = {
   network: {
     timeoutMs: 60000,
     proxy: '',
+    // 模型返回空回复（既没有正文也没有工具调用）时自动重试次数；默认只重试一次，避免让外部渠道用户久等
+    emptyResponseRetries: 1,
     // WebUI 对外监听：host 可为 127.0.0.1 / 0.0.0.0；port 为 0 表示使用启动默认端口；token 为空则不校验。
     webuiHost: '127.0.0.1',
     webuiPort: 0,

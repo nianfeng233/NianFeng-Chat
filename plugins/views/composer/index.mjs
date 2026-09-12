@@ -37,6 +37,9 @@ export function apply(ctx) {
 
   useStyle(ctx, COMPOSER_CSS)
 
+  /** conversationId -> 输入框草稿（文本 + 图片附件），切换会话时互不影响 */
+  const drafts = new Map()
+
   ctx.slots.register('chat:composer', container => {
     container.innerHTML = `
       <div class="h-resizer" id="hResizer"></div>
@@ -157,6 +160,7 @@ export function apply(ctx) {
       }))
       input.value = ''
       clearImages()
+      drafts.delete(convId)
       messages.requestSend(convId, text, images.length ? { images } : undefined) // 广播 message:send（拦截型事件）
     }
 
@@ -397,9 +401,24 @@ export function apply(ctx) {
       if (sendText) sendText.textContent = t?.t('chat.send', '发送') || '发送'
     })
 
-    const onConversationSwitch = () => {
+    let currentConvId = sessions.activeId()
+    const saveDraft = conversationId => {
+      if (!conversationId) return
+      drafts.set(conversationId, { text: input.value, images: pendingImages.slice() })
+    }
+    const loadDraft = conversationId => {
+      const draft = conversationId ? drafts.get(conversationId) : null
+      input.value = draft?.text || ''
+      pendingImages = Array.isArray(draft?.images) ? draft.images.slice() : []
+      renderAttachments()
+    }
+    loadDraft(currentConvId)
+
+    const onConversationSwitch = (payload = {}) => {
+      saveDraft(currentConvId)
+      currentConvId = payload?.id ?? sessions.activeId()
       input.disabled = false
-      clearImages()
+      loadDraft(currentConvId)
       showTyping(false)
       syncStop()
       setTimeout(() => input.focus(), 10)

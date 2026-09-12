@@ -91,6 +91,10 @@ export function apply(ctx) {
 
   /** conversationId -> resolve，等 chat-flow 整轮完成 */
   const pendingTurns = new Map()
+  /** conversationId -> 本轮入站上下文（外发时用于 toUserId / contextToken 解析） */
+  const activeTurns = new Map()
+  /** conversationId -> 微信 typing 会话；发送动作会清掉输入中，发送后补报，整轮结束才 stop */
+  const typingSessions = new Map()
   /** conversationId -> 串行 Promise，保证同一渠道消息按顺序处理 */
   const busyChains = new Map()
   /** channelId -> Set(messageId)，页面内去重（SSE 与 inbox 可能同时到达） */
@@ -788,87 +792,141 @@ export function apply(ctx) {
     }
   }
 
+  /** 解析外发需要的微信用户 ID / contextToken。 */
+  function resolveOutboundTarget(channel, conversationId) {
+    const active = activeTurns.get(conversationId)
+    if (active && String(active.channel?.id || '') === String(channel.id)) {
+      return {
+        toUserId: active.message.fromUserId,
+        contextToken: active.message.contextToken || channel.meta?.lastContextToken || '',
+      }
+    }
+    const lastInbound = [...(sessions.messages(conversationId) || [])]
+      .reverse()
+      .find(item => item.meta?.direction === 'inbound' && item.meta?.fromUserId)
+    if (lastInbound) {
+      return {
+        toUserId: lastInbound.meta.fromUserId,
+        contextToken: lastInbound.meta.contextToken || channel.meta?.lastContextToken || '',
+      }
+    }
+    return null
+  }
+
+  async function sendTypingStart(channel, toUserId, contextToken) {
+    if (!api || !channel?.id || !toUserId) return false
+    try {
+      const result = await api.post('/clawbot/typing/start', { channelId: channel.id, toUserId, contextToken })
+      return result?.ok !== false
+    } catch (_) {
+      return false
+    }
+  }
+
+  /** 微信原生输入状态可以持续显示，不需要定时刷新；这里只在整轮开始时发一次。 */
+  function startTypingSession(conversationId, channel, toUserId, contextToken) {
+    if (!api || !channel?.id || !toUserId) return
+    typingSessions.set(conversationId, { channel, toUserId, contextToken })
+    sendTypingStart(channel, toUserId, contextToken).catch(() => {})
+  }
+
+  /** 发送消息 / 授权提示后立刻补报一次输入中，避免微信侧状态被发送动作清掉。 */
+  function refreshTyping(conversationId) {
+    const entry = typingSessions.get(conversationId)
+    if (!entry) return
+    sendTypingStart(entry.channel, entry.toUserId, entry.contextToken).catch(() => {})
+  }
+
+  /** 整轮彻底结束（chat:request-done + 外发队列结算完）才停止输入中。 */
+  function stopTypingSession(conversationId, { sendStop = true } = {}) {
+    const entry = typingSessions.get(conversationId)
+    if (!entry) return
+    typingSessions.delete(conversationId)
+    if (sendStop && api && entry.channel?.id && entry.toUserId) {
+      api
+        .post('/clawbot/typing/stop', {
+          channelId: entry.channel.id,
+          toUserId: entry.toUserId,
+          contextToken: entry.contextToken,
+        })
+        .catch(() => {})
+    }
+  }
+
+  /**
+   * 即时外发：助手消息写入渠道会话后立刻发微信。
+   * 正常入站回复用当前消息的 contextToken；跨渠道 chat_send 使用最近一次入站上下文。
+   */
+  async function deliverOutbound({ channel, conversationId, message }) {
+    if (!api) return { ok: false, error: '本地后端未连接，微信clawbot 无法外发' }
+    const target = resolveOutboundTarget(channel, conversationId)
+    if (!target?.toUserId) return { ok: false, error: '微信clawbot 渠道还没有可回复的微信用户' }
+    const { toUserId, contextToken } = target
+    for (const segment of splitForWechat(buildOutboundText(message))) {
+      if (!segment) continue
+      await api.post('/clawbot/send', { channelId: channel.id, toUserId, text: segment, contextToken })
+      refreshTyping(conversationId)
+    }
+    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+    for (const image of images) {
+      if (!image?.id && !image?.dataUrl && !image?.url) continue
+      await api.post('/clawbot/send-media', {
+        channelId: channel.id,
+        toUserId,
+        contextToken,
+        image: { id: image.id || '', dataUrl: image.dataUrl || '', url: image.url || '', mime: image.mime || '' },
+      })
+      refreshTyping(conversationId)
+    }
+    messages?.update?.(conversationId, message.id, {
+      source: 'wechat-clawbot',
+      meta: {
+        ...(message.meta || {}),
+        via: 'wechat-clawbot',
+        direction: 'outbound',
+        toUserId,
+        contextToken,
+        ...(images.length ? { imagesSent: true } : {}),
+        outboundError: '',
+      },
+    })
+    return { ok: true }
+  }
+
   async function runInboundTurn(channel, conv, message, permissions) {
     const toUserId = message.fromUserId
     const contextToken = message.contextToken || channel.meta?.lastContextToken || ''
-    const beforeIds = new Set((sessions.messages(conv.id) || []).map(item => item.id))
-    let typingStarted = false
 
-    if (permissions.typing !== false) {
-      try {
-        const result = await api.post('/clawbot/typing/start', { channelId: channel.id, toUserId, contextToken })
-        typingStarted = result?.ok !== false
-      } catch (_) {
-        typingStarted = false
-      }
-    }
+    // 整轮保持“输入中”：发送动作 / 授权提示会清掉微信侧状态，用保活定时器持续补报，
+    // 直到 chat:request-done 且当前会话外发队列结算完才停止。
+    if (permissions.typing !== false) startTypingSession(conv.id, channel, toUserId, contextToken)
 
-    await new Promise(resolve => {
-      let settled = false
-      const finish = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
-        resolve()
-      }
-      const timer = setTimeout(finish, 10 * 60 * 1000)
-      pendingTurns.set(conv.id, finish)
-      try {
-        // chat-flow 是模型调用链路的唯一入口；插件未启用时立即结束，避免 typing 悬挂。
-        if (!ctx.registry.get('chat-flow')) finish()
-        else events.emit('message:send', { conversationId: conv.id, text: message.text, skipUserAppend: true })
-      } catch (_) {
-        finish()
-      }
-    })
-
-    const fresh = (sessions.messages(conv.id) || []).filter(
-      item =>
-        !beforeIds.has(item.id) &&
-        item.role === 'assistant' &&
-        !item.streaming &&
-        !item.error &&
-        (String(item.content || '').trim() || (Array.isArray(item.meta?.images) && item.meta.images.length > 0)),
-    )
-    for (const item of fresh) {
-      const text = buildOutboundText(item)
-      try {
-        for (const segment of splitForWechat(text)) {
-          await api.post('/clawbot/send', { channelId: channel.id, toUserId, text: segment, contextToken })
+    activeTurns.set(conv.id, { channel, message, permissions })
+    try {
+      await new Promise(resolve => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (pendingTurns.get(conv.id) === finish) pendingTurns.delete(conv.id)
+          resolve()
         }
-        const images = Array.isArray(item.meta?.images) ? item.meta.images.slice(0, 4) : []
-        for (const image of images) {
-          if (!image?.id && !image?.dataUrl && !image?.url) continue
-          await api.post('/clawbot/send-media', {
-            channelId: channel.id,
-            toUserId,
-            contextToken,
-            image: { id: image.id || '', dataUrl: image.dataUrl || '', url: image.url || '', mime: image.mime || '' },
-          })
+        const timer = setTimeout(finish, 10 * 60 * 1000)
+        pendingTurns.set(conv.id, finish)
+        try {
+          // chat-flow 是模型调用链路的唯一入口；插件未启用时立即结束，避免 typing 悬挂。
+          if (!ctx.registry.get('chat-flow')) finish()
+          else events.emit('message:send', { conversationId: conv.id, text: message.text, skipUserAppend: true })
+        } catch (_) {
+          finish()
         }
-        messages?.update?.(conv.id, item.id, {
-          source: 'wechat-clawbot',
-          meta: {
-            ...(item.meta || {}),
-            via: 'wechat-clawbot',
-            direction: 'outbound',
-            toUserId,
-            contextToken,
-            ...(images.length ? { imagesSent: true } : {}),
-          },
-        })
-      } catch (err) {
-        toast.warn(`微信回复发送失败：${err.message}`)
-      }
-    }
-
-    if (typingStarted) {
-      try {
-        await api.post('/clawbot/typing/stop', { channelId: channel.id, toUserId, contextToken })
-      } catch (_) {
-        /* typing 取消失败不影响消息本身 */
-      }
+      })
+      await base.outboundIdle?.(conv.id)
+    } finally {
+      const current = activeTurns.get(conv.id)
+      if (!current || String(current.channel?.id || '') === String(channel.id)) activeTurns.delete(conv.id)
+      stopTypingSession(conv.id)
     }
   }
 
@@ -963,6 +1021,7 @@ export function apply(ctx) {
     description: '微信 Clawbot 渠道：扫码接入后收发微信消息，支持 typing 状态与完整聊天记录。',
     create: options => openSettings({ mode: 'create', ...(options || {}) }),
     detail: options => mountDetail(options),
+    outbound: deliverOutbound,
   })
   ctx.effect(() => () => registration.dispose?.())
 
@@ -1089,6 +1148,10 @@ export function apply(ctx) {
         contextToken: lastInbound.meta.contextToken || '',
         text: `检测到敏感跨渠道操作（${actionText}：${targetName}）。如果同意，请直接回复“确认”；回复其它内容将视为拒绝。`,
       })
+      .then(() => {
+        // 微信发送消息会清掉输入中状态；整轮尚未结束，立刻补报一次。
+        refreshTyping(payload.conversationId)
+      })
       .catch(() => {
         /* 提示发送失败不影响原确认流程（网页端仍可输入确认） */
       })
@@ -1162,6 +1225,10 @@ export function apply(ctx) {
     boot().catch(() => {})
   }, 600)
   ctx.effect(() => () => clearTimeout(bootTimer))
+
+  ctx.effect(() => () => {
+    for (const conversationId of [...typingSessions.keys()]) stopTypingSession(conversationId, { sendStop: false })
+  })
 
   ctx.logger?.debug?.('微信clawbot 渠道插件就绪')
 }

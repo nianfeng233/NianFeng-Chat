@@ -109,6 +109,7 @@ export function apply(ctx) {
   const requestConfirm = ({ action, confirmTarget, allowedUserIds = null }) =>
     new Promise(resolve => {
       const id = `confirm_${Date.now().toString(36)}${(++confirmSeq).toString(36)}`
+      const startedAt = Date.now()
       const payload = {
         id,
         action,
@@ -126,27 +127,62 @@ export function apply(ctx) {
           : Array.isArray(allowedUserIds)
             ? allowedUserIds.map(item => String(item || '').trim()).filter(Boolean)
             : null
-      const finish = approved => {
+      const finish = (approved, { timedOut = false } = {}) => {
         const record = pending.get(id)
         if (!record) return
         clearTimeout(record.timer)
         pending.delete(id)
         recordAudit({
-          result: approved ? 'confirmed' : 'rejected-or-timeout',
+          result: approved ? 'confirmed' : timedOut ? 'timeout' : 'rejected',
           action,
           userId: confirmTarget.userId,
           sourceChannel: confirmTarget.channelId,
           targetChannel: confirmTarget.targetChannelId,
+          ...(timedOut ? { reason: 'confirm-timeout' } : {}),
         })
-        events.emit('chat:confirm-resolved', { id, approved })
+        events.emit('chat:confirm-resolved', {
+          id,
+          approved,
+          timedOut,
+          action,
+          conversationId: confirmTarget.conversationId,
+          sourceChannel: confirmTarget.channelId,
+          targetChannel: confirmTarget.targetChannelId,
+          targetName: payload.targetName,
+        })
+        ctx.logger[approved ? 'info' : 'warn'](
+          `[chat-permissions] ${approved ? '已确认' : timedOut ? '确认超时，已自动拒绝' : '已拒绝'}：${action} → ${payload.targetName}（等待 ${Date.now() - startedAt}ms）`,
+        )
+        if (timedOut) {
+          const notice = '敏感操作确认已超时，已自动拒绝。'
+          toast?.warn?.(notice)
+          // 超时提示写入来源会话：网页端直接看到；外部渠道由 channel-base 的即时外发送回去。
+          try {
+            const conv = sessions.get(confirmTarget.conversationId)
+            if (conv && typeof store?.append === 'function') {
+              store.append(confirmTarget.conversationId, {
+                role: 'assistant',
+                content: notice,
+                sender_name: conv.name,
+                is_bot: true,
+                source: 'nova',
+                visibility: 'shareable',
+                meta: { fallback: 'confirm-timeout' },
+              })
+            }
+          } catch (err) {
+            ctx.logger?.warn?.('[chat-permissions] 写入确认超时提示失败', err)
+          }
+        }
         resolve(approved)
       }
-      const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT)
+      const timer = setTimeout(() => finish(false, { timedOut: true }), CONFIRM_TIMEOUT)
       pending.set(id, { id, timer, finish, conversationId: confirmTarget.conversationId, allowedUserIds: allowed })
       toast?.warn?.(
         `敏感操作需要确认：${action === 'read' ? '读取' : '向'} ${payload.targetName} ${action === 'read' ? '的聊天记录' : '发送消息'}。` +
           `请在输入框输入“确认”同意，输入其它内容视为拒绝。`,
       )
+      ctx.logger.info(`[chat-permissions] 等待确认：${action} → ${payload.targetName}`)
       events.emit('chat:confirm-request', payload)
     })
 
