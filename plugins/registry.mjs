@@ -23,8 +23,8 @@ export const plugins = [
     "depends": {
       "channel-base": "^1.0.0",
       "channel-list": "^1.0.0",
-      "channel-detail-host": "^1.0.0",
-      "session-service": "^1.0.0"
+      "channel-detail-host": "^3.0.0",
+      "session-service": "^2.0.0"
     },
     "provides": [],
     "permissions": [
@@ -115,7 +115,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "session-service": "^1.0.0",
+      "session-service": "^2.0.0",
       "message-service": "^1.0.0"
     },
     "provides": [
@@ -183,7 +183,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "session-service": "^1.0.0",
+      "session-service": "^2.0.0",
       "config": "^1.0.0"
     },
     "provides": [
@@ -278,7 +278,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "session-service": "^1.0.0"
+      "session-service": "^2.0.0"
     },
     "provides": [
       {
@@ -394,7 +394,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "i18n": "^1.0.0"
+      "i18n": "^2.0.0"
     },
     "provides": [],
     "permissions": [],
@@ -434,7 +434,7 @@ export const plugins = [
     "unavailableReason": "",
     "depends": {
       "channel-registry": "^1.0.0",
-      "session-service": "^1.0.0",
+      "session-service": "^2.0.0",
       "message-service": "^1.0.0"
     },
     "provides": [
@@ -458,7 +458,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "session-service": "^1.0.0",
+      "session-service": "^2.0.0",
       "model-registry": "^1.0.0"
     },
     "provides": [
@@ -482,7 +482,7 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
-      "session-service": "^1.0.0",
+      "session-service": "^2.0.0",
       "message-service": "^1.0.0",
       "model-service": "^1.0.0",
       "chat-store": "^1.0.0",
@@ -513,8 +513,8 @@ export const plugins = [
     "unavailableReason": "",
     "depends": {
       "message-service": "^1.0.0",
-      "session-service": "^1.0.0",
-      "notification": "^1.0.0",
+      "session-service": "^2.0.0",
+      "notification": "^2.1.0",
       "config": "^1.0.0"
     },
     "provides": [],
@@ -1541,7 +1541,7 @@ export const plugins = [
     "unavailableReason": "",
     "depends": {
       "left-list-panel": "^1.0.0",
-      "session-service": "^1.0.0"
+      "session-service": "^2.0.0"
     },
     "provides": [],
     "permissions": [],
@@ -1622,7 +1622,7 @@ export const plugins = [
     "depends": {
       "settings-container": "^1.0.0",
       "chat-store": "^1.0.0",
-      "session-service": "^1.0.0"
+      "session-service": "^2.0.0"
     },
     "provides": [],
     "permissions": [],
@@ -1742,7 +1742,7 @@ export const plugins = [
     "unavailableReason": "",
     "depends": {
       "settings-container": "^1.0.0",
-      "notification": "^1.0.0",
+      "notification": "^2.1.0",
       "permissions": "^1.0.0"
     },
     "provides": [],

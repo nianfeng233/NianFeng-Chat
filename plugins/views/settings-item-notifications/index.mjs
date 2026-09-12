@@ -13,7 +13,7 @@ export const description = '设置页 · 消息提醒、系统通知权限、提
 export const author = '念风内核'
 export const icon = '🔔'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', notification: '^1.0.0', permissions: '^1.0.0' }
+export const depends = { 'settings-container': '^1.0.0', notification: '^2.1.0', permissions: '^1.0.0' }
 export const inject = ['settings-container', 'notification', 'config', 'toast', 'event-bus']
 export const permissions = ["notify"]
 

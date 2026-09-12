@@ -20,7 +20,7 @@ export const description = '功能插件 · 新建 / 编辑会话角色（人格
 export const author = '念风内核'
 export const icon = '🎭'
 export const core = true
-export const depends = { 'session-service': '^1.0.0', 'model-registry': '^1.0.0' }
+export const depends = { 'session-service': '^2.0.0', 'model-registry': '^1.0.0' }
 export const inject = ['session-service', 'model-registry', 'toast']
 export const provides = [{ name: 'character-editor', type: 'singleton' }]
 

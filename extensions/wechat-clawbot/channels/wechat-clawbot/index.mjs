@@ -28,8 +28,8 @@ export const core = false
 export const depends = {
   'channel-base': '^1.0.0',
   'channel-list': '^1.0.0',
-  'channel-detail-host': '^1.0.0',
-  'session-service': '^1.0.0',
+  'channel-detail-host': '^3.0.0',
+  'session-service': '^2.0.0',
 }
 export const inject = [
   'channel-base',

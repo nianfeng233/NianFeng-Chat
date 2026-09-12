@@ -28,7 +28,7 @@ export const description = '业务服务 · 渠道消息元数据、序号、工
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'session-service': '^1.0.0', 'message-service': '^1.0.0' }
+export const depends = { 'session-service': '^2.0.0', 'message-service': '^1.0.0' }
 export const inject = ['session-service', 'message-service', 'storage', 'event-bus', 'config', 'user-identity?']
 export const provides = [{ name: 'chat-store', type: 'singleton' }]
 

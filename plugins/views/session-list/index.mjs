@@ -14,7 +14,7 @@ export const description = '视觉内容 · 会话列表与搜索。'
 export const author = '念风内核'
 export const icon = '📋'
 export const core = true
-export const depends = { 'left-list-panel': '^1.0.0', 'session-service': '^1.0.0' }
+export const depends = { 'left-list-panel': '^1.0.0', 'session-service': '^2.0.0' }
 export const inject = ['slots', 'session-service', 'event-bus', 'modal', 'context-menu', 'toast', 'i18n']
 
 import { useStyle } from '../../../src/util/style.mjs'

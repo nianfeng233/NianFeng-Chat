@@ -28,7 +28,7 @@ export const author = '念风内核'
 export const icon = '🔀'
 export const core = true
 export const depends = {
-  'session-service': '^1.0.0',
+  'session-service': '^2.0.0',
   'message-service': '^1.0.0',
   'model-service': '^1.0.0',
   'chat-store': '^1.0.0',

@@ -15,7 +15,7 @@ export const description = '业务服务 · 消息增删改与流式状态管理
 export const author = '念风内核'
 export const icon = '✉️'
 export const core = true
-export const depends = { 'session-service': '^1.0.0', config: '^1.0.0' }
+export const depends = { 'session-service': '^2.0.0', config: '^1.0.0' }
 export const inject = ['session-service', 'event-bus', 'config']
 export const provides = [{ name: 'message-service', type: 'singleton' }]
 

@@ -24,8 +24,8 @@ export const icon = '🔔'
 export const core = false
 export const depends = {
   'message-service': '^1.0.0',
-  'session-service': '^1.0.0',
-  notification: '^1.0.0',
+  'session-service': '^2.0.0',
+  notification: '^2.1.0',
   config: '^1.0.0',
 }
 export const inject = ['message-service', 'session-service', 'config', 'event-bus', 'notification?']
