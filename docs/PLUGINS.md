@@ -209,9 +209,13 @@ export function apply(ctx) { /* ... */ }
 | `sessions` | `server/plugins/sessions.mjs` | `user_data/sessions.json` 持久化、防抖落盘、渠道会话复用 | `sessions`；`/api/sessions*` |
 | `models` | `server/plugins/models.mjs` | OpenAI 兼容 / DeepSeek 官方 / Anthropic Claude / Google Gemini / Ollama 真实接入；各厂商原生工具调用与 reasoning 转换；`registerProvider()` 预留托管扩展点 | `models`；`/api/providers*`、`/api/chat` |
 | `hub` | `server/plugins/hub.mjs` | SSE 客户端管理与广播 | `hub`；`/api/events` |
-| `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管 | `http` |
-| `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；`/api/clawbot/*` |
+| `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管；提供 `httpApi` 路由 / 能力扩展点 | `http`、`httpApi` |
+| `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
 | （已移除）`telegram` | — | 随 `channel-telegram` 一起移除 | — |
+
+> 后端会在 HTTP 服务就绪后自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录里的
+> `bridge.mjs` 并加载；渠道插件通过 `httpApi.route()` 注册自己的接口，不需要修改
+> `server/index.mjs` 或 `server/plugins/http.mjs`。外部 bridge 是 Node 代码，只应安装可信插件。
 
 保留但暂无前端调用：`GET /api/rss`、`POST /api/translate`（供未来的扩展插件使用，均为真实实现）。
 
