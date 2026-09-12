@@ -81,6 +81,11 @@ $env:WEB_PORT=8080; $env:BACKEND_PORT=9000; node start.mjs
 
 ## 四、常见问题
 
+**双击 `念风Chat.exe` 没反应**
+先看 `%LOCALAPPDATA%\NianFengChat\error.log`；新版桌面壳会在启动失败时弹窗并写这个日志。
+桌面版运行时目录现在按构建号隔离（`runtime-<BUILD_ID>`），升级时旧版本 `node.exe` 仍在运行也不会再因为“文件被占用(os error 32)”导致打不开。
+如果仍然打不开，可以在任务管理器结束旧的 `念风Chat` / 由它启动的 `node.exe`，或删除 `%LOCALAPPDATA%\NianFengChat\runtime*` 后重试。
+
 **双击后一闪而过 / 提示缺少 Node.js**
 说明 Node 未安装或未加入 PATH。重新安装 Node.js 后重试；也可以先跑 `start.ps1` 看具体错误。
 
