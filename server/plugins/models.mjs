@@ -341,6 +341,10 @@ function toAnthropicMessages(messages = []) {
       continue
     }
     const role = message.role === 'assistant' ? 'assistant' : 'user'
+    if (role === 'user' && Array.isArray(message.content)) {
+      push(role, toAnthropicBlocks(message.content))
+      continue
+    }
     const text = stringifyContent(message.content)
     if (text || role === 'assistant') push(role, [{ type: 'text', text }])
   }
@@ -407,7 +411,11 @@ function toGeminiContents(messages = []) {
       push('model', parts)
       continue
     }
-    push(message.role === 'assistant' ? 'model' : 'user', [{ text: stringifyContent(message.content) }])
+    if (message.role !== 'assistant' && Array.isArray(message.content)) {
+      push('user', toGeminiParts(message.content))
+    } else {
+      push(message.role === 'assistant' ? 'model' : 'user', [{ text: stringifyContent(message.content) }])
+    }
   }
 
   return { contents, systemInstruction: systemText ? { parts: [{ text: systemText }] } : undefined }
@@ -1370,7 +1378,109 @@ function sanitizeHeaders(headers) {
 
 function stringifyContent(content) {
   if (content === null || content === undefined) return ''
-  return typeof content === 'string' ? content : JSON.stringify(content)
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    // 多模态 content：任何不支持图片的旧路径统一降级为 [图片] 占位，
+    // 避免把 base64 原样卷进 prompt 或日志里。
+    const text = content
+      .map(part => {
+        if (typeof part === 'string') return part
+        if (part?.type === 'text') return String(part.text ?? '')
+        if (part?.type === 'image_url' || part?.type === 'image' || part?.inlineData || part?.image) return '[图片]'
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+    return text || '[图片]'
+  }
+  return JSON.stringify(content)
+}
+
+/** 把前端多模态 content 转成 OpenAI 兼容格式（text / image_url）。 */
+function toOpenAIContent(content) {
+  if (!Array.isArray(content)) return stringifyContent(content)
+  const parts = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      if (part) parts.push({ type: 'text', text: part })
+      continue
+    }
+    if (part?.type === 'text') {
+      parts.push({ type: 'text', text: String(part.text ?? '') })
+      continue
+    }
+    const imageUrl = part?.image_url?.url || part?.url || ''
+    if (imageUrl) parts.push({ type: 'image_url', image_url: { url: String(imageUrl) } })
+    else if (part?.type === 'image_url' || part?.type === 'image') parts.push({ type: 'text', text: '[图片]' })
+  }
+  return parts.length ? parts : stringifyContent(content)
+}
+
+/** 把前端多模态 content 转成 Anthropic blocks；外链图片无法直接给 Claude，降级为文本。 */
+function toAnthropicBlocks(content) {
+  if (!Array.isArray(content)) return [{ type: 'text', text: stringifyContent(content) }]
+  const blocks = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      if (part) blocks.push({ type: 'text', text: part })
+      continue
+    }
+    if (part?.type === 'text') {
+      blocks.push({ type: 'text', text: String(part.text ?? '') })
+      continue
+    }
+    const url = String(part?.image_url?.url || part?.url || '')
+    const match = /^data:([^;,]+);base64,([\s\S]+)$/.exec(url)
+    if (match) {
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: match[1], data: match[2].replace(/\s+/g, '') } })
+    } else if (url) {
+      blocks.push({ type: 'text', text: '[图片：该模型不支持直接读取外链图片]' })
+    }
+  }
+  return blocks.length ? blocks : [{ type: 'text', text: '[图片]' }]
+}
+
+/** 把前端多模态 content 转成 Gemini parts。 */
+function toGeminiParts(content) {
+  if (!Array.isArray(content)) return [{ text: stringifyContent(content) }]
+  const parts = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      if (part) parts.push({ text: part })
+      continue
+    }
+    if (part?.type === 'text') {
+      parts.push({ text: String(part.text ?? '') })
+      continue
+    }
+    const url = String(part?.image_url?.url || part?.url || '')
+    const match = /^data:([^;,]+);base64,([\s\S]+)$/.exec(url)
+    if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2].replace(/\s+/g, '') } })
+    else if (url) parts.push({ text: '[图片：该模型不支持直接读取外链图片]' })
+  }
+  return parts.length ? parts : [{ text: '[图片]' }]
+}
+
+/** Ollama 的图片放在单独的 images 数组里（base64）。 */
+function toOllamaContent(content) {
+  if (!Array.isArray(content)) return { content: stringifyContent(content), images: [] }
+  const texts = []
+  const images = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      texts.push(part)
+      continue
+    }
+    if (part?.type === 'text') {
+      texts.push(String(part.text ?? ''))
+      continue
+    }
+    const url = String(part?.image_url?.url || part?.url || '')
+    const match = /^data:[^;,]+;base64,([\s\S]+)$/.exec(url)
+    if (match) images.push(match[1].replace(/\s+/g, ''))
+    else if (url) texts.push('[图片]')
+  }
+  return { content: texts.filter(Boolean).join('\n') || '[图片]', images }
 }
 
 function normalizeArguments(args) {
@@ -1412,7 +1522,8 @@ function toOpenAIMessages(messages = [], { keepReasoning = false } = {}) {
       if (keepReasoning && reasoning) out.reasoning_content = String(reasoning)
       return out
     }
-    return { role: message.role || 'user', content: stringifyContent(message.content) }
+    const role = message.role || 'user'
+    return { role, content: role === 'user' ? toOpenAIContent(message.content) : stringifyContent(message.content) }
   })
 }
 
@@ -1443,6 +1554,10 @@ function toOllamaMessages(messages = []) {
           return { function: { name: call.function?.name || call.name || '', arguments: args } }
         }),
       }
+    }
+    if ((message.role || 'user') === 'user' && Array.isArray(message.content)) {
+      const { content, images } = toOllamaContent(message.content)
+      return { role: 'user', content, ...(images.length ? { images } : {}) }
     }
     return { role: message.role || 'user', content: stringifyContent(message.content) }
   })

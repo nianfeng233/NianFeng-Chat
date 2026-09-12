@@ -15,7 +15,8 @@
  */
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createCipheriv, createDecipheriv, randomBytes, randomInt } from 'node:crypto'
+import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto'
 
 export const name = 'wechat-clawbot-bridge'
 export const version = '1.0.0'
@@ -115,14 +116,19 @@ function normalizeIncoming(raw) {
   const msg = raw?.msg || raw || {}
   const items = Array.isArray(msg.item_list) ? msg.item_list : Array.isArray(raw?.item_list) ? raw.item_list : []
   const texts = []
+  const imageItems = []
   let hasMedia = false
   for (const item of items) {
     const type = Number(item?.type)
     if (type === 1 && item?.text_item?.text) texts.push(String(item.text_item.text))
-    else if ([2, 3, 4, 5].includes(type)) hasMedia = true
+    else if (type === 2) {
+      hasMedia = true
+      // 图片在 item.image_item：先带原始结构，pollLoop 里再下载 + AES 解密成 data URL。
+      if (item.image_item) imageItems.push(item.image_item)
+    } else if ([3, 4, 5].includes(type)) hasMedia = true
   }
   let text = texts.join('').trim()
-  if (!text && hasMedia) text = '[微信侧媒体消息]'
+  if (!text && hasMedia) text = imageItems.length ? '[图片]' : '[微信侧媒体消息]'
   const fromUserId = String(msg.from_user_id || msg.fromUserId || raw?.from_user_id || raw?.sender || '')
   if (!fromUserId || !text) return null
   const contextToken = String(msg.context_token || raw?.context_token || '')
@@ -137,6 +143,8 @@ function normalizeIncoming(raw) {
     contextToken,
     text,
     timestamp,
+    images: [],
+    _imageItems: imageItems,
     kind: hasMedia && !texts.length ? 'media' : 'text',
     raw: {
       message_id: messageId,
@@ -146,6 +154,84 @@ function normalizeIncoming(raw) {
       create_time_ms: timestamp,
     },
   }
+}
+
+/** 从图片 item 的 aeskey / media.aes_key 里解析 16 字节 AES-128 key（兼容 hex / base64）。 */
+function parseWxAesKey(raw) {
+  const value = String(raw || '').trim()
+  if (!value) return null
+  try {
+    const hex = Buffer.from(value, 'hex')
+    if (hex.length === 16) return hex
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    const decoded = Buffer.from(value, 'base64')
+    if (decoded.length === 16) return decoded
+    if (decoded.length === 32) {
+      const hex = Buffer.from(decoded.toString('ascii'), 'hex')
+      if (hex.length === 16) return hex
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null
+}
+
+function detectImageMime(buffer) {
+  if (!buffer || buffer.length < 4) return 'image/jpeg'
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg'
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png'
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) return 'image/gif'
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp'
+  if (buffer.length > 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+  return 'image/jpeg'
+}
+
+/** 下载微信 CDN 图片并 AES-128-ECB 解密，返回 data URL（供前端/模型直接使用）。 */
+async function downloadWxImage(imageItem) {
+  const media = imageItem?.media || {}
+  const fullUrl =
+    media.full_url ||
+    imageItem.url ||
+    (media.encrypt_query_param
+      ? `https://weixin.qq.com/cgi-bin/mmwebwx-bin/webwxgetmsgimg?encrypted_query_param=${encodeURIComponent(media.encrypt_query_param)}`
+      : '')
+  const key = parseWxAesKey(imageItem.aeskey || media.aes_key)
+  if (!fullUrl || !key) return null
+  const response = await fetch(fullUrl, { signal: AbortSignal.timeout(25000) })
+  if (!response.ok) return null
+  const encrypted = Buffer.from(await response.arrayBuffer())
+  if (!encrypted.length || encrypted.length > 3 * 1024 * 1024) return null
+  const decipher = createDecipheriv('aes-128-ecb', key, null)
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
+  if (!decrypted.length || decrypted.length > 2 * 1024 * 1024) return null
+  const mime = detectImageMime(decrypted)
+  return { buffer: decrypted, mime, width: 0, height: 0, size: decrypted.length }
+}
+
+/** 给一条入站消息补上图片 data URL；单条最多 4 张、总量 3MB，失败的静默跳过。 */
+async function hydrateIncomingImages(message, dataDir) {
+  const items = Array.isArray(message?._imageItems) ? message._imageItems.slice(0, 4) : []
+  delete message?._imageItems
+  if (!items.length) return message
+  const images = []
+  let totalBytes = 0
+  for (const item of items) {
+    try {
+      const image = await downloadWxImage(item)
+      if (!image) continue
+      if (totalBytes + (image.size || 0) > 3 * 1024 * 1024) break
+      totalBytes += image.size || 0
+      const record = await saveImageBuffer(dataDir, image.buffer, { mime: image.mime })
+      images.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
+    } catch (_) {
+      /* 单张失败不影响消息本身 */
+    }
+  }
+  message.images = images
+  return message
 }
 
 export function apply(ctx) {
@@ -418,7 +504,7 @@ export function apply(ctx) {
         }
         for (const raw of extractMessages(response)) {
           if (isOwnMessage(raw)) continue
-          const message = normalizeIncoming(raw)
+          const message = await hydrateIncomingImages(normalizeIncoming(raw), settings.dataDir)
           if (!message) continue
           if (message.contextToken) {
             session.contextTokens[message.fromUserId] = message.contextToken
@@ -753,6 +839,120 @@ export function apply(ctx) {
       return { ok: true, response }
     },
 
+    /**
+     * 发送图片（对标 openclaw-weixin / FengYu clawbot-manager）：
+     * 原图 -> getuploadurl -> AES-128-ECB 加密 -> POST CDN（读 x-encrypted-param）
+     * -> sendmessage image_item。
+     */
+    async sendImage({ channelId, toUserId, image, contextToken } = {}) {
+      await ready
+      const session = getSession(channelId)
+      if (!session?.account?.token) throw Object.assign(new Error('微信 Clawbot 尚未登录'), { status: 409 })
+      if (!toUserId) throw Object.assign(new Error('缺少发送目标'), { status: 400 })
+      let bytes = null
+      if (typeof image === 'object' && image?.id) {
+        const found = await readImageBuffer(settings.dataDir, image.id)
+        if (found) bytes = found.buffer
+      }
+      if (!bytes) {
+        const source = typeof image === 'string' ? image : image?.dataUrl || image?.url || image?.base64 || ''
+        if (!source) throw Object.assign(new Error('缺少图片内容'), { status: 400 })
+        if (/^data:/i.test(source)) {
+          const match = /^data:[^;,]+;base64,([\s\S]+)$/.exec(source)
+          if (match) bytes = Buffer.from(match[1].replace(/\s+/g, ''), 'base64')
+        } else if (/^https?:/i.test(source)) {
+          const response = await fetch(source, { signal: AbortSignal.timeout(30000) })
+          if (!response.ok) throw Object.assign(new Error(`下载图片失败：HTTP ${response.status}`), { status: 502 })
+          bytes = Buffer.from(await response.arrayBuffer())
+        } else {
+          bytes = Buffer.from(String(source).replace(/\s+/g, ''), 'base64')
+        }
+      }
+      if (!bytes?.length) throw Object.assign(new Error('图片内容为空'), { status: 400 })
+      if (bytes.length > 8 * 1024 * 1024) throw Object.assign(new Error('图片超过 8MB 限制'), { status: 413 })
+
+      const rawsize = bytes.length
+      const filesize = (Math.floor(rawsize / 16) + 1) * 16
+      const rawfilemd5 = createHash('md5').update(bytes).digest('hex')
+      const filekey = randomBytes(16).toString('hex')
+      const aeskey = randomBytes(16)
+      const upload = await requestApi(session, '/ilink/bot/getuploadurl', {
+        method: 'POST',
+        token: session.account.token,
+        body: {
+          filekey,
+          media_type: 1,
+          to_user_id: String(toUserId),
+          rawsize,
+          rawfilemd5,
+          filesize,
+          no_need_thumb: true,
+          aeskey: aeskey.toString('hex'),
+          base_info: BASE_INFO,
+        },
+        timeoutMs: 25000,
+      })
+      if (isSessionExpired(upload)) {
+        session.account = null
+        saveSession(session)
+        broadcastStatus(session, 'expired', { error: '微信登录已过期，请重新扫码接入' })
+        throw Object.assign(new Error('微信登录已过期，请重新扫码接入'), { status: 401 })
+      }
+      if (isApiError(upload)) throw Object.assign(new Error(`获取图片上传地址失败：${apiErrorText(upload)}`), { status: 502 })
+
+      const uploadUrl =
+        String(upload.upload_full_url || '').trim() ||
+        `https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=${encodeURIComponent(upload.upload_param || '')}&filekey=${encodeURIComponent(filekey)}`
+      const padLength = 16 - (rawsize % 16)
+      const padded = Buffer.concat([bytes, Buffer.alloc(padLength, padLength)])
+      const cipher = createCipheriv('aes-128-ecb', aeskey, null)
+      cipher.setAutoPadding(false)
+      const ciphertext = Buffer.concat([cipher.update(padded), cipher.final()])
+      const cdnResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: ciphertext,
+        signal: AbortSignal.timeout(45000),
+      })
+      if (!cdnResponse.ok) throw Object.assign(new Error(`图片 CDN 上传失败：HTTP ${cdnResponse.status}`), { status: 502 })
+      const encryptedParam = cdnResponse.headers.get('x-encrypted-param') || ''
+      if (!encryptedParam) throw Object.assign(new Error('图片 CDN 没有返回 x-encrypted-param'), { status: 502 })
+      const aesKeyBase64 = Buffer.from(aeskey.toString('hex'), 'utf8').toString('base64')
+      const response = await requestApi(session, '/ilink/bot/sendmessage', {
+        method: 'POST',
+        token: session.account.token,
+        body: {
+          msg: {
+            from_user_id: '',
+            to_user_id: String(toUserId),
+            client_id: `nianfeng-wechat-clawbot-img-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            message_type: 2,
+            message_state: 2,
+            item_list: [
+              {
+                type: 2,
+                image_item: {
+                  media: { encrypt_query_param: encryptedParam, aes_key: aesKeyBase64, encrypt_type: 1 },
+                  mid_size: filesize,
+                },
+              },
+            ],
+            context_token: contextToken || undefined,
+          },
+          base_info: BASE_INFO,
+        },
+        timeoutMs: 25000,
+      })
+      if (isSessionExpired(response)) {
+        session.account = null
+        saveSession(session)
+        broadcastStatus(session, 'expired', { error: '微信登录已过期，请重新扫码接入' })
+        throw Object.assign(new Error('微信登录已过期，请重新扫码接入'), { status: 401 })
+      }
+      if (isApiError(response)) throw Object.assign(new Error(`微信图片发送失败：${apiErrorText(response)}`), { status: 502 })
+      return { ok: true, size: rawsize, response }
+    },
+
     async startTyping({ channelId, toUserId, contextToken } = {}) {
       await ready
       const session = getSession(channelId)
@@ -880,6 +1080,19 @@ export function apply(ctx) {
           channelId: body.channelId,
           toUserId: body.toUserId,
           text: body.text,
+          contextToken: body.contextToken,
+        }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/send-media',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.sendImage({
+          channelId: body.channelId,
+          toUserId: body.toUserId,
+          image: body.image,
           contextToken: body.contextToken,
         }))
       }),

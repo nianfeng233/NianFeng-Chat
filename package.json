@@ -1,6 +1,6 @@
 {
   "name": "nianfeng-chat",
-  "version": "0.42.0",
+  "version": "0.43.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -26,8 +26,10 @@
     "test:chat-tools": "node scripts/test-chat-tools.mjs",
     "test:vendors": "node scripts/test-vendors.mjs",
     "test:clawbot": "node scripts/test-clawbot.mjs",
+    "test:qqbot": "node scripts/test-qqbot.mjs",
+    "test:images": "node scripts/test-images.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",
-    "test": "npm run check:kernels && npm run test:backend && npm run test:clawbot && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors"
+    "test": "npm run check:kernels && npm run test:backend && npm run test:images && npm run test:clawbot && npm run test:qqbot && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors"
   },
   "engines": {
     "node": ">=20"

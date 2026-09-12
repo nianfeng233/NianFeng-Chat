@@ -6,10 +6,33 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 87 个插件，按目录名排序；真正的加载顺序由
+ * 共 89 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
+  {
+    "id": "qqbot",
+    "version": "1.2.1",
+    "displayName": "QQ官方机器人",
+    "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊绑定与被动回复。",
+    "core": false,
+    "enabled": true,
+    "icon": "🐧",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "channel-base": "^1.1.0",
+      "channel-list": "^1.1.0",
+      "channel-detail-host": "^3.0.0",
+      "session-service": "^2.0.0"
+    },
+    "provides": [],
+    "permissions": [
+      "network"
+    ],
+    "path": "./plugins/channels/qqbot/index.mjs",
+    "dir": "plugins/channels/qqbot"
+  },
   {
     "id": "wechat-clawbot",
     "version": "1.0.0",
@@ -171,6 +194,27 @@ export const plugins = [
     "permissions": [],
     "path": "./plugins/domain/export-service/index.mjs",
     "dir": "plugins/domain/export-service"
+  },
+  {
+    "id": "image-service",
+    "version": "1.0.0",
+    "displayName": "图片服务",
+    "description": "基础服务 · 图片文件存储（消息只存 imageId）、压缩与按需转 data URL。",
+    "core": false,
+    "enabled": true,
+    "icon": "🖼️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {},
+    "provides": [
+      {
+        "name": "image-service",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "path": "./plugins/domain/image-service/index.mjs",
+    "dir": "plugins/domain/image-service"
   },
   {
     "id": "message-service",

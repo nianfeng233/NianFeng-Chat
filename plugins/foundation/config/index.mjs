@@ -72,6 +72,10 @@ const DEFAULTS = {
   'chat.memoryRounds': 5,
   'chat.channelRounds': 5,
   'chat.readTokens': 1500,
+  // 图片策略：自动上下文最多带几张、单条消息最多带几张、每张图按固定 token 估算
+  'chat.imagesPerRequest': 2,
+  'chat.imagesPerMessage': 2,
+  'chat.imageTokens': 800,
   'chat.confirmSensitive': true,
   'chat.simulateTyping': true,
   'chat.typingMinMs': 500,

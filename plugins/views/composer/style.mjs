@@ -48,6 +48,12 @@ export const COMPOSER_CSS = `
   .tool-btn.active{background:var(--accent-soft);color:var(--accent);}
   .tool-btn svg{width:17px;height:17px;}
 
+  .composer-attachments{display:flex;gap:8px;flex-wrap:wrap;padding:2px 0 4px;}
+  .composer-attachment{position:relative;margin:0;width:58px;height:58px;border-radius:11px;overflow:hidden;border:1px solid var(--border);background:rgba(255,255,255,.7);}
+  .composer-attachment img{width:100%;height:100%;object-fit:cover;display:block;}
+  .composer-attachment button{position:absolute;top:2px;right:2px;width:18px;height:18px;border:none;border-radius:50%;background:rgba(20,30,40,.62);color:#fff;font-size:13px;line-height:16px;cursor:pointer;padding:0;}
+  .composer-attachment button:hover{background:rgba(200,60,60,.85);}
+
   .composer-body{ flex:1;min-height:0;display:flex;align-items:flex-end;gap:10px; }
 
   .composer-input{

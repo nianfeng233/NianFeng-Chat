@@ -6,7 +6,7 @@
 # 念风插件目录 · 开发定位手册
 
 > 用途：新会话/新工作区里直接按插件定位到具体文件与职责。
-> 当前共 **87 个前端内置插件 + 9 个后端插件**（另有微信clawbot 渠道前端 + 后端桥的独立分发目录）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
+> 当前共 **89 个前端内置插件 + 9 个后端插件**（另有微信clawbot / QQ官方机器人渠道前端 + 图片服务等后端桥）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
 
 ---
 
@@ -19,11 +19,13 @@
 | `src/runtime/compat.mjs` | 插件 ctx 兼容层：`inject/provide/emit/on/effect/registry/events/logger` | 改插件 API 约定（慎改） |
 | `src/runtime/semver.mjs` | `depends` 版本判断 | 改依赖版本规则 |
 | `scripts/sync-plugins.mjs` | 扫描 `plugins/**/index.mjs` 生成 `plugins/registry.mjs` | 增删插件后必须跑 `npm run sync-plugins` |
-| `scripts/smoke.mjs` | 前端端到端测试（189 项，会启动真实后端） | 加插件后补测试 |
+| `scripts/smoke.mjs` | 前端端到端测试（221 项，会启动真实后端） | 加插件后补测试 |
 | `scripts/test-backend.mjs` | 后端 API 测试（63 项） | 改后端接口后补测试 |
-| `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，15 项） | 改 Clawbot 协议后补测试 |
+| `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
+| `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
+| `scripts/test-images.mjs` | 图片文件服务测试（保存 / 读取 / 索引无 base64 / 裁剪，8 项） | 改图片存储或 /api/images 路由后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
-| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（101 项，真实 Mock function calling + DeepSeek reasoning 回传） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
+| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（113 项，真实 Mock function calling + DeepSeek reasoning 回传） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
 | `scripts/test-vendors.mjs` | 厂商协议测试（30 项：DeepSeek / Anthropic / Gemini / OpenAI 参数降级） | 改厂商适配后补测试 |
 
 插件模块格式（cordis 原生）：
@@ -72,7 +74,7 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## L2 · 业务服务层（`plugins/domain/`，14 个）
+## L2 · 业务服务层（`plugins/domain/`，15 个）
 
 | 插件 | 路径 | 职责 | 对外服务 | 修改指引 |
 |---|---|---|---|---|
@@ -91,6 +93,7 @@ export function apply(ctx) { /* ... */ }
 | `chat-queue` | `domain/chat-queue/index.mjs` | 角色级 FIFO 串行队列 | `chat-queue` | 并发与排队策略 |
 | `user-identity` | `domain/user-identity/index.mjs` | 统一用户标识：本机配置默认值 + 联网账号插件 `registerProvider()` | `user-identity` | 身份来源与隐私 |
 | `tool-registry` | `domain/tool-registry/index.mjs` | OpenAI function-calling 工具注册 / 编目 / 执行 | `tool-registry` | 新增领域工具 |
+| `image-service` | `domain/image-service/index.mjs` + `bridge.mjs` + `store.mjs` | 图片文件存储（消息只存 imageId）、压缩、按需转 data URL、/api/images 路由与裁剪 | `image-service`、`imageStore` | 图片存储 / 压缩 / 上下文取图 |
 
 ---
 
@@ -190,15 +193,22 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## 渠道插件（`plugins/channels/`，1 个）
+## 渠道插件（`plugins/channels/`，2 个）
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
 | `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
+| `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` 自动绑定、WebSocket / Webhook、**仅私聊**、图片收发、被动回复与聊天记录 | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md` |
 
 微信入站消息由插件写入角色对应的 `wechat-clawbot:<channelId>` 渠道记录，再以
 `skipUserAppend` 触发 `chat-flow`；等 `chat:request-done`（整轮工具调用彻底结束）后，
 才把模型消息发回微信并关闭 typing 状态。
+
+QQ 官方机器人按事件类型区分会话：`C2C_MESSAGE_CREATE`（私聊）/ `GROUP_AT_MESSAGE_CREATE`
+（群聊 @）/ `AT_MESSAGE_CREATE`（频道）。桥按 `(sessionType, openid)` 路由到唯一渠道，
+每个渠道只订阅一个私聊 openid 或一个群 openid，避免同一机器人被拉群后与私聊串线；
+入站消息同样写入 `qqbot:<channelId>` 记录并以 `skipUserAppend` 触发 `chat-flow`，
+整轮结束后作为被动消息（带 `msg_id` + `msg_seq`）发回 QQ。
 
 ---
 ## 后端插件（`server/plugins/`，8 个 + 渠道桥 1 个）
@@ -213,6 +223,8 @@ export function apply(ctx) { /* ... */ }
 | `hub` | `server/plugins/hub.mjs` | SSE 客户端管理与广播 | `hub`；`/api/events` |
 | `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管；提供 `httpApi` 路由 / 能力扩展点 | `http`、`httpApi` |
 | `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
+| `qqbot-bridge` | `channels/qqbot/bridge.mjs` | QQ 官方机器人 access_token / WebSocket 网关 / Webhook 回调 / 扫码适配器；按 `(sessionType, openid)` 路由与绑定过滤；被动回复 `msg_seq` 管理；账号状态写入 `<数据目录>/qqbot.json`（AppSecret / token AES-GCM 加密） | `qqbot`；自行通过 `httpApi` 注册 `/api/qqbot/*` |
+| `image-service-bridge` | `domain/image-service/bridge.mjs` | 图片文件存储与 `/api/images` / `/api/images/:id` / `/api/images/prune` 路由；索引写入 `<数据目录>/images.json`（不含 base64） | `imageStore`；通过 `httpApi` 注册 `/api/images*` |
 | （已移除）`telegram` | — | 随 `channel-telegram` 一起移除 | — |
 
 > 后端会在 HTTP 服务就绪后自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录里的

@@ -77,6 +77,7 @@ export function apply(ctx) {
       userName,
       identitySource: identity.source || 'local',
       channel,
+      channelGroup: channel.group || 'private',
       // 渠道插件在会话 meta 上声明的策略（clawbot 的“跨渠道读取 / 发送”开关）。
       // 这些是真正随会话持久化的来源侧授权，不再依赖另外手工写入 grants 表。
       crossReadable: conv.meta?.crossReadable === true,
@@ -105,7 +106,7 @@ export function apply(ctx) {
     return `${kindLabel}渠道「${name}」（${channelId || 'unknown'}）`
   }
 
-  const requestConfirm = ({ action, confirmTarget }) =>
+  const requestConfirm = ({ action, confirmTarget, allowedUserIds = null }) =>
     new Promise(resolve => {
       const id = `confirm_${Date.now().toString(36)}${(++confirmSeq).toString(36)}`
       const payload = {
@@ -117,6 +118,14 @@ export function apply(ctx) {
         targetName: confirmTarget.targetName || confirmTarget.targetChannelId,
         createdAt: Date.now(),
       }
+      // 允许确认的主体：默认是网页端主人（userId / identityUserId）；群聊等多人渠道
+      // 可以由渠道插件显式传入 trusted openid 列表；空数组表示“谁都不能确认”。
+      const allowed =
+        allowedUserIds === null
+          ? [confirmTarget.userId, confirmTarget.identityUserId].map(item => String(item || '').trim()).filter(Boolean)
+          : Array.isArray(allowedUserIds)
+            ? allowedUserIds.map(item => String(item || '').trim()).filter(Boolean)
+            : null
       const finish = approved => {
         const record = pending.get(id)
         if (!record) return
@@ -133,7 +142,7 @@ export function apply(ctx) {
         resolve(approved)
       }
       const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT)
-      pending.set(id, { id, timer, finish, conversationId: confirmTarget.conversationId })
+      pending.set(id, { id, timer, finish, conversationId: confirmTarget.conversationId, allowedUserIds: allowed })
       toast?.warn?.(
         `敏感操作需要确认：${action === 'read' ? '读取' : '向'} ${payload.targetName} ${action === 'read' ? '的聊天记录' : '发送消息'}。` +
           `请在输入框输入“确认”同意，输入其它内容视为拒绝。`,
@@ -156,6 +165,20 @@ export function apply(ctx) {
       return { ok: false, code: 'CHANNEL_UNAVAILABLE', error: '目标渠道不可用' }
     }
     if (target.channelId === current.channelId) return { ok: true, channelId: target.channelId, confirmed: true }
+
+    // 隐私渠道完全隔离：既不能读/发其它渠道，其它渠道也不能读/发它。
+    if (target.channelId !== current.channelId && (current.channelGroup === 'privacy' || target.group === 'privacy')) {
+      return deny(
+        {
+          action,
+          userId: current.userId,
+          sourceChannel: current.channelId,
+          targetChannel: target.channelId,
+          reason: 'privacy-isolated',
+        },
+        '隐私渠道只能单会话交互，不能与其他渠道互读 / 互发',
+      )
+    }
 
     const crossFlag = action === 'read' ? 'canCrossRead' : 'canCrossSend'
     const grant = findGrant({
@@ -247,18 +270,34 @@ export function apply(ctx) {
     grants: () => structuredClone(data.grants),
     audit: (limit = 50) => structuredClone(data.audit.slice(-Math.max(1, Number(limit) || 50))),
 
-    /** 用户输入“确认”/其它内容时由拦截器调用；返回是否消费了这条输入 */
-    resolvePending(conversationId, text) {
+    /**
+     * 用户输入“确认”/其它内容时由拦截器或渠道插件调用；返回是否消费了这条输入。
+     * options.senderId：消息发送者标识（群聊里是成员 openid / 渠道内稳定 ID）。
+     * options.allowedUserIds：显式覆盖待确认请求允许的 senderId 列表；
+     *   不传时使用请求创建时的默认列表（网页端主人）。
+     * 非授权发送者的“确认”会被无视（handled=false），既不消耗请求也不改变状态。
+     */
+    resolvePending(conversationId, text, options = {}) {
       const item = [...pending.values()].find(record => record.conversationId === conversationId)
       if (!item) return { handled: false }
+      const senderId = String(options.senderId || '').trim()
+      const allowed = Array.isArray(options.allowedUserIds)
+        ? options.allowedUserIds.map(value => String(value || '').trim()).filter(Boolean)
+        : item.allowedUserIds
+      if (senderId && Array.isArray(allowed) && !allowed.includes(senderId)) {
+        return { handled: false, ignored: true }
+      }
       const approved = String(text ?? '').trim() === '确认'
       item.finish(approved)
-      return { handled: approved, approved }
+      // handled=true 表示这条输入已被确认流程消费（无论同意还是拒绝）；
+      // approved 才表示是否放行。非授权发送者在上面的分支里返回 ignored。
+      return { handled: true, approved }
     },
   }
 
   // 敏感确认通过输入框完成：输入“确认”同意，输入其它内容统一视为拒绝；
-  // 两种情况下这条输入都会被消费，不会进入聊天记录。
+  // 两种情况下这条输入都会被消费，不会进入聊天记录。多人渠道的授权由渠道插件
+  // 通过 payload.senderId / allowedUserIds 传入。
   const offConfirm = events.on(
     'message:send',
     payload => {
@@ -266,7 +305,11 @@ export function apply(ctx) {
       if (!text || !pending.size) return payload
       const item = [...pending.values()].find(record => record.conversationId === payload.conversationId)
       if (!item) return payload
-      const result = service.resolvePending(payload.conversationId, text)
+      const result = service.resolvePending(payload.conversationId, text, {
+        senderId: payload.senderId || payload.sender_id || '',
+        allowedUserIds: payload.allowedUserIds,
+      })
+      if (!result.handled) return payload
       return { ...payload, confirmHandled: true, confirmApproved: result.approved }
     },
     { owner: 'chat-permissions', interceptor: true },

@@ -66,7 +66,19 @@ export function nowTime(date = new Date()) {
 function sanitizeProtocolMessage(message) {
   if (!message || typeof message !== 'object') return null
   const role = message.role === 'assistant' ? 'assistant' : message.role === 'tool' ? 'tool' : 'user'
-  const out = { role, content: String(message.content ?? '').slice(0, MAX_PROTOCOL_CONTENT) }
+  // 多模态 content 不能直接 String()：图片 base64 会以字符串形式进入轨迹并撑爆存储。
+  const rawContent = Array.isArray(message.content)
+    ? message.content
+        .map(part => {
+          if (typeof part === 'string') return part
+          if (part?.type === 'text') return String(part.text ?? '')
+          if (part?.type === 'image_url' || part?.type === 'image' || part?.inlineData) return '[图片]'
+          return ''
+        })
+        .filter(Boolean)
+        .join('\n')
+    : message.content
+  const out = { role, content: String(rawContent ?? '').slice(0, MAX_PROTOCOL_CONTENT) }
   if (message.reasoning_content) out.reasoning_content = String(message.reasoning_content).slice(0, MAX_PROTOCOL_CONTENT)
   if (role === 'tool') {
     out.tool_call_id = String(message.tool_call_id || message.toolCallId || '').slice(0, 200)

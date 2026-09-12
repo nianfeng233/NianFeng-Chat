@@ -127,6 +127,12 @@ export const BUBBLE_DEFAULT_CSS = `
   .bubble-doc-summary{margin-top:5px;font-size:12.5px;line-height:1.6;opacity:.82;white-space:pre-wrap;word-break:break-word;}
   .bubble-doc-id{margin-top:4px;font-size:10.5px;opacity:.55;font-family:ui-monospace,Menlo,Consolas,monospace;}
 
+  /* 图片消息：网格展示，点击可放大（浏览器默认行为） */
+  .bubble-image{display:inline-block;margin:0 6px 6px 0;vertical-align:top;}
+  .bubble-image img{max-width:220px;max-height:220px;border-radius:10px;display:block;border:1px solid var(--border);background:rgba(255,255,255,.6);cursor:zoom-in;}
+  .bubble-image-more{margin-top:2px;font-size:11px;opacity:.6;}
+  .msg-row.right .bubble-image img{max-width:260px;}
+
   /* 历史脏数据兜底：隐藏误存进正文的工具标记 */
   .bubble-tool-hidden{
     display:inline-flex;align-items:center;gap:5px;

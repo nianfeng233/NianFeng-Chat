@@ -205,6 +205,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return;
                 }
+                if let Some(window) = window.as_ref() { window.set_visible(false); }
                 stop_child(&mut child);
                 let _ = webview.take();
                 *control_flow = ControlFlow::Exit;
@@ -216,6 +217,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return;
                 }
+                if let Some(window) = window.as_ref() { window.set_visible(false); }
                 stop_child(&mut child);
                 let _ = webview.take();
                 *control_flow = ControlFlow::Exit;
@@ -224,6 +226,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 minimize_on_close = value;
             }
             Event::UserEvent(UserEvent::Restart) => {
+                if let Some(window) = window.as_ref() { window.set_visible(false); }
                 stop_child(&mut child);
                 let _ = webview.take();
                 if let Ok(exe) = std::env::current_exe() {
@@ -593,18 +596,28 @@ fn health_ok(port: u16) -> bool {
 
 fn stop_child(child: &mut Option<Child>) {
     if let Some(mut child) = child.take() {
-        // Windows 下 Node 可能还会拉起子进程；先按进程树结束，避免关闭 exe 后
-        // 后台仍有 node/模型进程占用端口，导致下次启动或迁移数据异常。
+        // Windows 下 Node 可能还会拉起子进程；用进程树结束避免留下占用端口的孤儿进程。
+        // 旧实现会同步等待 taskkill 并闪出黑色控制台窗口，这里改为异步 + CREATE_NO_WINDOW。
+        let pid = child.id();
         #[cfg(target_os = "windows")]
         {
-            let pid = child.id().to_string();
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let pid_text = pid.to_string();
             let _ = Command::new("taskkill")
-                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .args(["/PID", pid_text.as_str(), "/T", "/F"])
+                .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let pid_text = pid.to_string();
+            let _ = Command::new("kill").args(["-9", pid_text.as_str()]).status();
+        }
+        // 不 wait()：让 taskkill 在后台清理整棵进程树，关闭按钮立即响应。
         let _ = child.kill();
-        let _ = child.wait();
     }
 }

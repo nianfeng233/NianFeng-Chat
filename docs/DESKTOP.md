@@ -34,6 +34,9 @@ npm run build:release -- --web-only   # 只生成 Web 版
 - **外部插件**：后端 `plugin-registry` 会扫描数据目录下的 `plugins/`（桌面版为 `%LOCALAPPDATA%\NianFengChat\user_data\plugins`），也可在「设置 → 插件 → 插件目录」指定任意目录；插件放在 `<目录>/<分层>/<插件id>/index.mjs`，重新扫描/刷新即可加载，升级 exe 不删除外部插件。
 - **图标**：`scripts/desktop-wrapper/app.ico` 由 `scripts/generate-icon.ps1` 从 `logo.png` 生成圆角矩形多尺寸图标，构建时嵌入 Windows 资源；`app.rgba` 同时作为窗口 / 任务栏缩略图图标。
 - **官方服务**：桌面版会在打包时移除 `plugins/features/official-service` 并重写 `plugins/registry.mjs`，因此账号页与「使用念风内置模型」入口不会出现在打包版本中。
+- **快速关闭**：点击关闭按钮时先 `set_visible(false)` 隐藏窗口，再用 `CREATE_NO_WINDOW` 异步启动
+  `taskkill /PID <node> /T /F` 清理进程树，**不再同步等待** taskkill，也不会闪出黑色控制台窗口；
+  用户感知是“点一下就关”，后台进程树仍会被清理（避免残留 node 占用端口 / 影响下次启动）。
 
 ## 环境要求
 

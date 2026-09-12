@@ -45,6 +45,7 @@ export function apply(ctx) {
         params: model.params && typeof model.params === 'object' ? model.params : {},
       }))
 
+    let changed = false
     if (!registered.has(provider.id)) {
       const dispose = registry.registerProvider(provider.id, {
         name: provider.name,
@@ -75,11 +76,12 @@ export function apply(ctx) {
       })
       providerDisposers.set(provider.id, dispose)
       registered.add(provider.id)
+      changed = true
     } else {
-      registry.replaceModels(provider.id, models)
+      changed = registry.replaceModels(provider.id, models) === true
     }
 
-    return models.length
+    return { count: models.length, changed }
   }
 
   const sync = async ({ silent = false } = {}) => {
@@ -87,6 +89,7 @@ export function apply(ctx) {
       const payload = await api.providers()
       const providers = (payload.providers || []).filter(p => p.enabled !== false)
       const ids = new Set(providers.map(p => p.id))
+      let changed = false
       // 后端删除 / 停用的提供商从前端注册表撤下
       for (const id of [...registered]) {
         if (!ids.has(id)) {
@@ -95,19 +98,26 @@ export function apply(ctx) {
           else registry.unregisterProvider(id)
           providerDisposers.delete(id)
           registered.delete(id)
+          changed = true
         }
       }
       const persistedKey = String(config.get('selectable.model.activeId', '') || '')
       let total = 0
-      for (const provider of providers) total += ensureProvider(provider, payload)
+      for (const provider of providers) {
+        const result = ensureProvider(provider, payload)
+        total += result.count
+        changed = changed || result.changed
+      }
 
       // model-registry 在注册第一个模型时会自动选中它，这可能覆盖用户上次的选择。
       // 同步完成后按优先级恢复：用户持久化的模型（如果仍存在）→ 后端默认模型。
       const available = registry.list()
       const trySelect = key => {
         if (!key || !available.some(item => item.key === key)) return false
+        if (typeof registry.activeKey === 'function' && registry.activeKey() === key) return true
         try {
           registry.select(key)
+          changed = true
           return true
         } catch (_) {
           return false
@@ -122,7 +132,7 @@ export function apply(ctx) {
             : ''
         trySelect(desired)
       }
-      ctx.emit('models:synced', { providers: providers.length, models: total })
+      if (changed) ctx.emit('models:synced', { providers: providers.length, models: total })
       if (!silent && total === 0) {
         ctx.logger.info('后端已连接，但还没有可用模型：请在设置 → 模型中拉取模型列表')
       }

@@ -127,8 +127,8 @@ export function apply(ctx) {
     },
 
     /** 用户消息：带 demo 的 已发送 → 已送达 → 已读 状态机 */
-    send(convId, content, { scheduleStatus = true } = {}) {
-      const message = service.add(convId, { role: 'user', content, status: 'sent' })
+    send(convId, content, { scheduleStatus = true, meta = undefined } = {}) {
+      const message = service.add(convId, { role: 'user', content, status: 'sent', meta })
       if (!message) return null
       if (scheduleStatus) {
         ctx.setTimeout(() => {
@@ -191,10 +191,10 @@ export function apply(ctx) {
     },
 
     /** 请求发送（供 composer 等 UI 调用；chat-flow 监听）
-     *  payload: { conversationId, text }
+     *  payload: { conversationId, text, images? }
      */
-    requestSend(conversationId, text) {
-      const payload = { conversationId, text }
+    requestSend(conversationId, text, extras = {}) {
+      const payload = { conversationId, text, ...(extras || {}) }
       const result = events.emit('message:send', payload, {
         owner: 'message-service',
         interceptor: true,
