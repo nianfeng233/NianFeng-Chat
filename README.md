@@ -170,7 +170,7 @@ npm run test:smoke    # 前端端到端（真实后端与 SSE）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 ```
 
-当前 `npm test` 通过；`scripts/smoke.mjs` 共 211 项通过。
+当前 `npm test` 通过；`scripts/smoke.mjs` 共 212 项通过。
 
 ## 版本管理与发布
 

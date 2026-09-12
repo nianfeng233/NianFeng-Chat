@@ -45,6 +45,7 @@ export const inject = [
   'config',
   'toast',
   'api?',
+  'user-identity?',
   'chat-store?',
   'chat-tools?',
   'context-builder?',
@@ -435,9 +436,11 @@ export function apply(ctx) {
     entry.usage = null
     entry.thinkingMs = 0
     entry.lastRound = null
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
     const who = permissions?.contextFor(conversationId) || {
-      userId: config.get('chat.userId', 'web-user'),
-      userName: resolveUserNickname(config),
+      userId: identity.userId || config.get('chat.userId', 'web-user'),
+      userName: identity.userName || resolveUserNickname(config),
+      identitySource: identity.source || 'local',
     }
 
     try {
@@ -687,9 +690,11 @@ export function apply(ctx) {
     entry.suppressStream = false
     const startedAt = Date.now()
     try {
+      const identity = ctx.registry.get('user-identity')?.get?.() || {}
       const who = permissions?.contextFor(conversationId) || {
-        userId: config.get('chat.userId', 'web-user'),
-        userName: resolveUserNickname(config),
+        userId: identity.userId || config.get('chat.userId', 'web-user'),
+        userName: identity.userName || resolveUserNickname(config),
+        identitySource: identity.source || 'local',
       }
       let userMessage = null
       if (!skipUserAppend && store) {

@@ -172,7 +172,7 @@ npm test              # module checks + backend API + end-to-end + chat / tools 
 npm run test:smoke    # frontend end-to-end against the real backend and SSE
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 211 checks.
+`npm test` currently passes; `scripts/smoke.mjs` passes 212 checks.
 
 ## Versioning and Releases
 

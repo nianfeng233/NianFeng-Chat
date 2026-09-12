@@ -64,14 +64,20 @@
 - 用户头像、消息头像、通知图标、顶栏品牌、网页 favicon 均引用该常量
 - 修复 `cssUrl()` 使用双引号导致 `style="background-image:url("..."")"` 被截断、消息头像空白的问题；现在统一输出单引号 `url('...')`
 
+## 5.1 扫码与连接状态修复
+
+- `get_qrcode_status` 实际是约 30s 的长轮询接口；此前前端每次查询都同步请求，12s 超时后统一显示“接口未返回有效数据”。现在后台维护一条 45s 超时的扫码长轮询，前端 `/login/status` 立即返回后台最新状态；网络错误会显示真实原因并自动重试。
+- token 使用 `.secret-key` AES-GCM 加密写入 `<数据目录>/clawbot.json`；后端重启后加载状态并自动重连，`test:clawbot` 增加了“重启后自动登录并恢复在线”断言。
+- “已接入”状态现在等 `notifystart` 或首次 `getupdates` 成功后才亮，不再是拿到 token 就显示在线；网络/会话过期会更新为错误或已过期。
+
 ## 6. 验证与构建
 
 ```bash
-npm run check:kernels     # 155 个模块语法 / 导入检查
+npm run check:kernels     # 157 个模块语法 / 导入检查
 npm test                  # 全量测试，包含 test:clawbot（本地 mock iLink）
 npm run build:release     # 同时生成 Web 与桌面版；exe 内含 wechat-clawbot 内置插件
 npm run build:clawbot-plugin
 ```
 
-当前测试结果：`npm test` 全部通过；`test:clawbot` 15/15，`smoke` 211/211，
+当前测试结果：`npm test` 全部通过；`test:clawbot` 18/18，`smoke` 212/212，
 `test-backend` 63/63，其余测试均通过。

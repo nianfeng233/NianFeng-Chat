@@ -167,6 +167,24 @@ export function apply(ctx) {
 }
 ```
 
+### 4.3 用户身份接口
+
+Nova 会话、渠道消息的 `sender_id / sender_name` 统一从 `user-identity` 服务读取。
+默认值来自 `config` 的 `chat.userId` 与昵称；未来联网账号 / 渠道插件可以注册真实用户：
+
+```js
+export function apply(ctx) {
+  const identity = ctx.inject('user-identity')
+  ctx.effect(() => identity.registerProvider(() => ({
+    userId: 'account-12345',
+    userName: '念风的主人',
+    source: 'my-network-plugin',
+  })))
+}
+```
+
+`user-identity.get()` 会按注册顺序返回第一个有效 provider；不会联网时保留本机默认值。
+
 ## 5. 样式
 
 ```js

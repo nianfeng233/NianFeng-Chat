@@ -117,7 +117,7 @@ export function apply(ctx) {
     <h1>${esc(title)}</h1>
     <div class="sub">${esc(subtitle)}</div>
     ${body}
-    <div class="foot">由念风Chat 导出</div>
+    <div class="foot">由念风chat 导出</div>
   </div>
 </body>
 </html>`
@@ -186,7 +186,7 @@ export function apply(ctx) {
       }
       const payload = {
         version: ctx.inject('app').version,
-        app: '念风Chat',
+        app: '念风chat',
         exportedAt: new Date().toISOString(),
         conversations,
       }

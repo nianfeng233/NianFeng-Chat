@@ -25,7 +25,7 @@ use tao::{
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use wry::{http::Request, WebViewBuilder};
 
-const APP_TITLE: &str = "念风Chat";
+const APP_TITLE: &str = "念风chat";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const WINDOW_ICON_RGBA: &[u8] = include_bytes!("../app.rgba");
 const WINDOW_ICON_SIZE: u32 = 64;
@@ -455,7 +455,7 @@ fn show_windows_notification(hwnd: isize, title: &str, body: &str, icon_base64: 
     data.uCallbackMessage = WM_APP + 1;
     data.hIcon = app_icon;
     data.hBalloonIcon = avatar_icon;
-    data.szTip = fixed::<TEXT_LIMIT_TIP>("念风Chat");
+    data.szTip = fixed::<TEXT_LIMIT_TIP>("念风chat");
     data.szInfoTitle = fixed::<TEXT_LIMIT_TITLE>(title);
     data.szInfo = fixed::<TEXT_LIMIT_BODY>(body);
     // 提示音由前端的「声音提示」开关统一控制，系统气泡本身静音，避免双重响声。

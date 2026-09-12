@@ -2,7 +2,7 @@
 # 项目全称：念风 Chat（NianFeng-Chat）
 # 仓库：https://github.com/nianfeng233/NianFeng-Chat
 <#
-    念风Chat — PowerShell 启动脚本
+    念风chat — PowerShell 启动脚本
 
     用法：
       .\start.ps1                     启动 后端 + WebUI（自动打开浏览器）
@@ -40,7 +40,7 @@ function Fail([string]$Message) {
 
 Write-Host ""
 Write-Host "  ============================================"
-Write-Host "   念风Chat  (后端 + WebUI)"
+Write-Host "   念风chat  (后端 + WebUI)"
 Write-Host "  ============================================"
 Write-Host ""
 

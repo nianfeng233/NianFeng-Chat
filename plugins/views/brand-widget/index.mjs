@@ -24,8 +24,8 @@ export function apply(ctx) {
   ctx.slots.register('titlebar:left', container => {
     container.innerHTML = `
       <div class="tb-brand">
-        <img class="tb-logo" src="${BRAND_LOGO}" alt="念风" onerror="this.style.display='none'" />
-        <span class="tb-name">念风</span>
+        <img class="tb-logo" src="${BRAND_LOGO}" alt="念风chat" onerror="this.style.display='none'" />
+        <span class="tb-name">念风chat</span>
       </div>`
     return () => {
       container.innerHTML = ''

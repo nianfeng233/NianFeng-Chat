@@ -118,7 +118,7 @@ export function apply(ctx) {
         { className: 'notify-avatar', title: options.title },
       )
     } else if (kind === 'system') {
-      iconHtml = `<div class="notify-logo"><img src="${BRAND_LOGO}" alt="念风" /></div>`
+      iconHtml = `<div class="notify-logo"><img src="${BRAND_LOGO}" alt="念风chat" /></div>`
     } else {
       iconHtml = `<div class="notify-emoji">${BELL_ICON}</div>`
     }
@@ -130,7 +130,7 @@ export function apply(ctx) {
         <div class="notify-desc"></div>
       </div>
       <button class="notify-close" type="button" title="关闭" aria-label="关闭">×</button>`
-    el.querySelector('.notify-title').textContent = String(options.title || '念风')
+    el.querySelector('.notify-title').textContent = String(options.title || '念风chat')
     el.querySelector('.notify-desc').textContent = String(options.body || '')
     el.querySelector('.notify-close').addEventListener('click', event => {
       event.stopPropagation()
@@ -386,7 +386,7 @@ export function apply(ctx) {
     notify(options = {}) {
       const {
         kind = 'system',
-        title = '念风',
+        title = '念风chat',
         body = '',
         level = 'info',
         system = true,

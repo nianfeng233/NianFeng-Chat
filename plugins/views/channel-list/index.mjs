@@ -343,6 +343,7 @@ export function apply(ctx) {
       events.on('channel:group-added', render),
       events.on('channel:group-removed', render),
       events.on('channel:add', render),
+      events.on('channel:updated', render),
       events.on('channel:removed', render),
       events.on('channel:moved', render),
       events.on('channel:activated', render),

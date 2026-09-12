@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 85 个插件，按目录名排序；真正的加载顺序由
+ * 共 87 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -338,6 +338,29 @@ export const plugins = [
     "dir": "plugins/domain/tool-registry"
   },
   {
+    "id": "user-identity",
+    "version": "1.0.0",
+    "displayName": "用户身份",
+    "description": "业务服务 · 统一用户标识（本地配置默认值 + 未来联网账号提供者接口）。",
+    "core": true,
+    "enabled": true,
+    "icon": "🪪",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "config": "^1.1.0"
+    },
+    "provides": [
+      {
+        "name": "user-identity",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "path": "./plugins/domain/user-identity/index.mjs",
+    "dir": "plugins/domain/user-identity"
+  },
+  {
     "id": "view-router",
     "version": "1.0.0",
     "displayName": "视图路由",
@@ -594,6 +617,24 @@ export const plugins = [
     ],
     "path": "./plugins/features/official-service/index.mjs",
     "dir": "plugins/features/official-service"
+  },
+  {
+    "id": "plugin-health-guard",
+    "version": "1.0.0",
+    "displayName": "插件健康守卫",
+    "description": "启动检查 · 发现插件错误时弹窗提醒，并引导到插件设置。",
+    "core": false,
+    "enabled": true,
+    "icon": "🩺",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "plugin-manager": "^1.0.0"
+    },
+    "provides": [],
+    "permissions": [],
+    "path": "./plugins/features/plugin-health-guard/index.mjs",
+    "dir": "plugins/features/plugin-health-guard"
   },
   {
     "id": "backend-client",

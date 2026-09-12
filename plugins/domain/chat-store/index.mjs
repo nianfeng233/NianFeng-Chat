@@ -29,7 +29,7 @@ export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
 export const depends = { 'session-service': '^1.0.0', 'message-service': '^1.0.0' }
-export const inject = ['session-service', 'message-service', 'storage', 'event-bus', 'config']
+export const inject = ['session-service', 'message-service', 'storage', 'event-bus', 'config', 'user-identity?']
 export const provides = [{ name: 'chat-store', type: 'singleton' }]
 
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
@@ -93,6 +93,16 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   const config = ctx.inject('config')
 
+  /** 当前用户标识：优先 user-identity 服务，未来联网账号插件注册后自动生效。 */
+  const currentUser = () => {
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
+    return {
+      userId: String(identity.userId || config.get('chat.userId', 'web-user') || 'web-user'),
+      userName: String(identity.userName || resolveUserNickname(config)),
+      source: identity.source || 'local',
+    }
+  }
+
   let data = storage.get(NS, KEY, null)
   if (!data || typeof data !== 'object' || typeof data.channels !== 'object') data = { channels: {} }
   const persist = () => storage.set(NS, KEY, data)
@@ -118,8 +128,8 @@ export function apply(ctx) {
       seq,
       channel_id: channelId,
       timestamp,
-      sender_id: message.sender_id || (role === 'user' ? config.get('chat.userId', 'web-user') : `role_${conv.id}`),
-      sender_name: message.sender_name || (role === 'user' ? resolveUserNickname(config) : conv.name),
+      sender_id: message.sender_id || (role === 'user' ? currentUser().userId : `role_${conv.id}`),
+      sender_name: message.sender_name || (role === 'user' ? currentUser().userName : conv.name),
       role,
       content_type: message.content_type || (message.kind === 'document' ? 'document' : 'text'),
       visibility: message.visibility || 'shareable',
@@ -278,8 +288,9 @@ export function apply(ctx) {
       const id = input.id || `m_${conv.id}_${seq}`
       const role = input.role === 'assistant' ? 'assistant' : input.role === 'system' ? 'system' : 'user'
       const channelId = record.channelId
-      const userId = config.get('chat.userId', 'web-user')
-      const userName = resolveUserNickname(config)
+      const identity = currentUser()
+      const userId = identity.userId
+      const userName = identity.userName
       const extra = {
         id,
         message_id: id,
@@ -414,8 +425,9 @@ export function apply(ctx) {
       const conv = sessions.get(record.conversationId)
       if (!conv) throw new Error('渠道对应的会话不存在')
       if (!Array.isArray(list)) throw new Error('聊天记录必须是 JSON 数组')
-      const userId = config.get('chat.userId', 'web-user')
-      const userName = resolveUserNickname(config)
+      const identity = currentUser()
+      const userId = identity.userId
+      const userName = identity.userName
       const usedSeqs = new Set()
       const usedIds = new Set()
       let nextSeq = 0

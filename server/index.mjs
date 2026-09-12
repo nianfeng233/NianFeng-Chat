@@ -74,7 +74,7 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
   const ctx = new Context()
 
   ctx.provide('info', {
-    name: '念风后端',
+    name: '念风chat 后端',
     version: pkg.version,
     node: process.version,
     startedAt: Date.now(),
@@ -204,7 +204,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)
-  console.log(`  │  念风后端 · cordis v4                        │`)
+  console.log(`  │  念风chat 后端 · cordis v4                        │`)
   console.log(`  │  ${backend.url.padEnd(44, ' ')} │`)
   console.log(`  └──────────────────────────────────────────────┘`)
   console.log(`  数据目录：${backend.dataDir}`)

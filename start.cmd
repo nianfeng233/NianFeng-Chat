@@ -5,11 +5,11 @@ rem 仓库：https://github.com/nianfeng233/NianFeng-Chat
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
-title 念风Chat
+title 念风chat
 
 echo.
 echo   ============================================
-echo    念风Chat  （后端 + WebUI 一键启动）
+echo    念风chat  （后端 + WebUI 一键启动）
 echo   ============================================
 echo.
 

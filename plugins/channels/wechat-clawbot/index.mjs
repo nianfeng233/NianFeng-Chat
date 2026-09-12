@@ -115,12 +115,17 @@ export function apply(ctx) {
    * 手动填写「用户显示名 / 唯一标识」，模型才能把它识别成网页端同一位用户。
    * 默认跟随念风网页端用户标识，保证开箱即用。
    */
-  const channelIdentity = channel => ({
-    userId: String(channel?.meta?.identity?.userId || channel?.meta?.identityUserId || config.get('chat.userId', 'web-user') || 'web-user').trim() || 'web-user',
-    userName:
-      String(channel?.meta?.identity?.userName || channel?.meta?.identityUserName || resolveUserNickname(config)).trim() ||
-      resolveUserNickname(config),
-  })
+  const channelIdentity = channel => {
+    // 默认身份跟随统一的 user-identity 服务：未来联网账号插件注册 provider 后，
+    // 新添加的 clawbot 渠道会自动使用真实用户名 / 用户 ID，旧渠道仍保留手动配置。
+    const shared = ctx.registry.get('user-identity')?.get?.() || {}
+    const fallbackUserId = String(shared.userId || config.get('chat.userId', 'web-user') || 'web-user').trim() || 'web-user'
+    const fallbackUserName = String(shared.userName || resolveUserNickname(config)).trim() || resolveUserNickname(config)
+    return {
+      userId: String(channel?.meta?.identity?.userId || channel?.meta?.identityUserId || fallbackUserId).trim() || fallbackUserId,
+      userName: String(channel?.meta?.identity?.userName || channel?.meta?.identityUserName || fallbackUserName).trim() || fallbackUserName,
+    }
+  }
   const roleOf = channel => sessions.get(channel?.meta?.roleId) || null
   const isClawbotChannel = channel => channel?.type === TYPE_ID
   const statusClickColor = status => STATUS_COLOR[status] || STATUS_COLOR.offline
@@ -325,9 +330,17 @@ export function apply(ctx) {
       const nextCategory = TAB_ORDER.includes(categorySelect.value) ? categorySelect.value : 'private'
       const nextPermissions = {}
       for (const [key] of PERMISSION_META) nextPermissions[key] = !!overlay.querySelector(`[data-wc-perm="${key}"]`)?.checked
+      const sharedIdentity = ctx.registry.get('user-identity')?.get?.() || {}
       const nextIdentity = {
-        userId: String(identityIdInput.value || '').trim() || config.get('chat.userId', 'web-user') || 'web-user',
-        userName: String(identityNameInput.value || '').trim() || resolveUserNickname(config),
+        userId:
+          String(identityIdInput.value || '').trim() ||
+          sharedIdentity.userId ||
+          config.get('chat.userId', 'web-user') ||
+          'web-user',
+        userName:
+          String(identityNameInput.value || '').trim() ||
+          sharedIdentity.userName ||
+          resolveUserNickname(config),
       }
       const meta = {
         ...(source?.meta || {}),
@@ -457,25 +470,33 @@ export function apply(ctx) {
 
     const succeed = () => {
       stopTimers()
-      updateChannelFromStatus({ channelId: channel.id, status: 'online' })
-      setStatus('已登录，微信clawbot 渠道可以使用了。', '#70a15a')
-      toast.success('微信clawbot 已接入')
+      // 登录成功只代表拿到 token；真实“已接入”状态等后端 notifystart / getupdates 成功事件。
+      updateChannelFromStatus({ channelId: channel.id, status: 'connecting' })
+      setStatus('已登录，正在建立微信消息链路…', '#70a15a')
+      toast.success('微信clawbot 登录成功，正在连接')
       closeTimer = setTimeout(close, 900)
     }
 
     const paint = data => {
       const qr = data?.qr || null
       qrEl.innerHTML = qrMarkup(qr)
-      const status = data?.status || qr?.status || 'wait_scan'
+      const qrState = qr?.status || ''
+      const status =
+        data?.loggedIn || data?.status === 'logged_in'
+          ? 'logged_in'
+          : ['scanned', 'expired', 'error', 'verify_code_blocked'].includes(qrState)
+            ? qrState
+            : data?.status || qrState || 'wait_scan'
       if (data?.loggedIn || status === 'logged_in') {
         succeed()
         return
       }
+      const qrError = data?.error || qr?.error || ''
       if (status === 'scanned') setStatus('已扫码，请在手机上确认授权…', '#c9a227')
       else if (status === 'expired') setStatus('二维码已过期，请重新获取。', '#c65b5b')
-      else if (status === 'error') setStatus(data?.error || '登录失败，请重试。', '#c65b5b')
+      else if (status === 'error' || (qrError && status === 'wait_scan')) setStatus(qrError || '登录失败，请重试。', '#c65b5b')
       else setStatus('请使用手机微信扫码，并在手机上确认授权。', '#c9a227')
-      if (data?.error) setError(data.error)
+      if (qrError) setError(qrError)
     }
 
     const poll = async () => {
@@ -483,7 +504,8 @@ export function apply(ctx) {
       try {
         const data = await api.get(`/clawbot/login/status?channelId=${encodeURIComponent(channel.id)}`)
         paint(data)
-        if (!data?.loggedIn && data?.status !== 'logged_in' && data?.status !== 'expired' && data?.status !== 'error') {
+        const state = data?.loggedIn ? 'logged_in' : data?.qr?.status || data?.status || 'wait_scan'
+        if (!['logged_in', 'expired', 'error', 'verify_code_blocked'].includes(state)) {
           pollTimer = setTimeout(poll, 2000)
         }
       } catch (err) {

@@ -19,7 +19,7 @@ export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
 export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0', 'event-bus': '^1.0.0' }
-export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?']
+export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?', 'user-identity?']
 export const provides = [{ name: 'chat-permissions', type: 'singleton' }]
 
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
@@ -62,14 +62,16 @@ export function apply(ctx) {
     const conv = sessions.get(conversationId)
     const channel = store.channelForConversation(conversationId)
     if (!conv || !channel) return null
-    const userId = String(config.get('chat.userId', 'web-user') || 'web-user')
-    const userName = resolveUserNickname(config)
+    const identity = ctx.registry.get('user-identity')?.get?.() || {}
+    const userId = String(identity.userId || config.get('chat.userId', 'web-user') || 'web-user')
+    const userName = String(identity.userName || resolveUserNickname(config))
     return {
       conversationId,
       roleId: conv.meta?.roleId || conv.id,
       channelId: channel.channelId,
       userId,
       userName,
+      identitySource: identity.source || 'local',
       channel,
     }
   }

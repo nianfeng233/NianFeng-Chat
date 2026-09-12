@@ -40,8 +40,21 @@ const CSS = `
   .record-list-head strong{font-size:13px}
   .record-group{margin-bottom:10px}
   .record-group-title{padding:4px 6px;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .record-search-wrap{margin-bottom:8px}
+  .record-search{width:100%;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.55);color:var(--text);font-size:12px;outline:none;box-sizing:border-box}
+  .record-search:focus{border-color:var(--accent)}
+  .record-role{margin-bottom:6px;border-radius:10px;border:1px solid transparent;overflow:hidden}
+  .record-role.expanded{border-color:var(--border);background:rgba(255,255,255,.35)}
+  .record-role-head{display:flex;align-items:center;gap:7px;width:100%;padding:7px 8px;border:none;background:transparent;color:var(--text);font-size:12.5px;cursor:pointer;text-align:left}
+  .record-role-head:hover{background:rgba(255,255,255,.55)}
+  .record-role .chev{width:12px;flex:0 0 auto;color:var(--text-4)}
+  .record-role-name{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .record-role-count{flex:0 0 auto;font-size:10.5px;color:var(--text-4)}
+  .record-role-body{padding:0 6px 6px 22px}
   .record-channel{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:7px 9px;margin-bottom:3px;border:none;border-radius:9px;background:transparent;color:var(--text);font-size:12px;cursor:pointer;text-align:left}
-  .record-channel span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .record-channel span{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .record-channel b{font-size:11.5px;color:var(--text-2);font-weight:600}
+  .record-channel em{font-style:normal;font-size:10.5px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .record-channel small{flex:0 0 auto;color:var(--text-4);font-size:10.5px}
   .record-channel:hover{background:rgba(255,255,255,.55)}
   .record-channel.active{background:var(--accent-soft);color:var(--accent)}
@@ -112,6 +125,9 @@ export function apply(ctx) {
         <div class="record-page">
           <aside class="record-list">
             <div class="record-list-head"><strong>角色 / 渠道</strong><button class="record-btn" data-record-refresh-list>刷新</button></div>
+              <div class="record-search-wrap">
+                <input class="record-search" data-record-search placeholder="搜索角色名或渠道 ID" autocomplete="off" spellcheck="false" />
+              </div>
             <div data-record-list></div>
           </aside>
           <section class="record-main">
@@ -157,6 +173,7 @@ export function apply(ctx) {
       )
 
       const listEl = container.querySelector('[data-record-list]')
+      const listSearchEl = container.querySelector('[data-record-search]')
       const pathEl = container.querySelector('[data-record-path]')
       const dirtyEl = container.querySelector('[data-record-dirty]')
       const errorEl = container.querySelector('[data-record-error]')
@@ -175,6 +192,9 @@ export function apply(ctx) {
       let dirty = false
       let mode = 'cards'
       let editingIndex = -1
+      let listKeyword = ''
+      let listInitialized = false
+      const expandedRoles = new Set()
 
       const setError = message => {
         if (!message) {
@@ -256,6 +276,11 @@ export function apply(ctx) {
         }
       }
 
+      const channelKindLabel = channelId => {
+        const kind = String(channelId || '').split(':')[0]
+        return { nova: 'Nova 网页', 'wechat-clawbot': '微信clawbot' }[kind] || kind || '渠道'
+      }
+
       const renderList = () => {
         const records = store.listChannels()
         if (!records.length) {
@@ -268,21 +293,61 @@ export function apply(ctx) {
           if (!groups.has(key)) groups.set(key, [])
           groups.get(key).push(record)
         }
-        listEl.innerHTML = [...groups.entries()]
-          .map(([roleId, items]) => {
-            const title = sessions.get(items[0].conversationId)?.name || roleId
-            const buttons = items
+
+        const keyword = listKeyword.trim().toLowerCase()
+        const visible = []
+        for (const [roleId, allItems] of groups) {
+          const roleName = sessions.get(allItems[0]?.conversationId)?.name || roleId
+          const roleHit = keyword && String(roleName).toLowerCase().includes(keyword)
+          const matched = keyword
+            ? (roleHit ? allItems : allItems.filter(record => String(record.channelId).toLowerCase().includes(keyword)))
+            : allItems
+          if (!matched.length) continue
+          visible.push({ roleId, roleName, items: matched, allItems })
+        }
+        if (!visible.length) {
+          listEl.innerHTML = '<div class="record-empty">没有匹配的角色或渠道</div>'
+          return
+        }
+
+        if (!listInitialized) {
+          listInitialized = true
+          const activeOwner = visible.find(group => group.allItems.some(record => record.channelId === activeChannel))
+          if (activeOwner) expandedRoles.add(activeOwner.roleId)
+        }
+
+        listEl.innerHTML = visible
+          .map(({ roleId, roleName, items, allItems }) => {
+            const expanded = keyword ? true : expandedRoles.has(roleId)
+            const channels = items
               .map(record => {
                 const count = store.messagesOf(record.channelId).length
+                const label = channelKindLabel(record.channelId)
                 return `<button class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}">
-                  <span title="${escapeHtml(record.channelId)}">${escapeHtml(record.channelId)}</span>
+                  <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(label)}</b><em>${escapeHtml(record.channelId)}</em></span>
                   <small>${count} 条</small>
                 </button>`
               })
               .join('')
-            return `<div class="record-group"><div class="record-group-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>${buttons}</div>`
+            return `<div class="record-role ${expanded ? 'expanded' : ''}">
+              <button class="record-role-head" data-role-toggle="${escapeHtml(roleId)}">
+                <span class="chev">${expanded ? '▾' : '▸'}</span>
+                <span class="record-role-name" title="${escapeHtml(roleName)}">${escapeHtml(roleName)}</span>
+                <span class="record-role-count">${allItems.length} 个渠道</span>
+              </button>
+              <div class="record-role-body" ${expanded ? '' : 'hidden'}>${channels}</div>
+            </div>`
           })
           .join('')
+
+        for (const button of listEl.querySelectorAll('[data-role-toggle]')) {
+          button.addEventListener('click', () => {
+            const id = button.dataset.roleToggle
+            if (expandedRoles.has(id)) expandedRoles.delete(id)
+            else expandedRoles.add(id)
+            renderList()
+          })
+        }
         for (const button of listEl.querySelectorAll('[data-channel]')) {
           button.addEventListener('click', () => switchChannel(button.dataset.channel))
         }
@@ -432,8 +497,13 @@ export function apply(ctx) {
       container.querySelector('[data-record-reload]').addEventListener('click', reloadDraft)
       container.querySelector('[data-record-add]').addEventListener('click', () => openEditor(-1))
       container.querySelector('[data-record-refresh-list]').addEventListener('click', () => {
+        listInitialized = false
         renderList()
         if (activeChannel) loadChannel(activeChannel)
+      })
+      listSearchEl?.addEventListener('input', () => {
+        listKeyword = listSearchEl.value || ''
+        renderList()
       })
       sourceEl.addEventListener('input', () => {
         try {

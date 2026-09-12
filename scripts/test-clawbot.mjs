@@ -95,7 +95,7 @@ async function main() {
   process.env.NIANFENG_CLAWBOT_BASE_URL = base
   const { startBackend } = await import('../server/index.mjs')
   console.log('\n② 启动念风后端')
-  const backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
+  let backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
   check('后端已启动', backend.port > 0, backend.url)
 
   try {
@@ -104,8 +104,13 @@ async function main() {
     check('返回二维码内容', start.qr?.content === 'https://weixin.qq.com/mock-login?t=1', JSON.stringify(start))
     check('二维码 ticket 已保存', !!start.qr?.status)
 
-    const login = await (await api(backend.url, '/api/clawbot/login/status?channelId=test-clawbot')).json()
-    check('扫码确认后进入已登录', login.loggedIn === true && login.accountId === 'mock-bot-1', JSON.stringify(login))
+    let login = null
+    for (let i = 0; i < 30; i++) {
+      login = await (await api(backend.url, '/api/clawbot/login/status?channelId=test-clawbot')).json()
+      if (login?.loggedIn) break
+      await sleep(120)
+    }
+    check('扫码确认后进入已登录', login?.loggedIn === true && login?.accountId === 'mock-bot-1', JSON.stringify(login))
 
     console.log('\n④ getupdates 入站消息')
     let inbox = { messages: [] }
@@ -131,6 +136,19 @@ async function main() {
     check('typing 状态按 1 → 2 顺序发送', typingCalls.length >= 2 && typingCalls[0].body.status === 1 && typingCalls[1].body.status === 2, JSON.stringify(typingCalls.map(c => c.body.status)))
     const sendCall = calls.find(call => call.path === '/ilink/bot/sendmessage')
     check('sendmessage 携带正确文本与目标', sendCall?.body?.msg?.to_user_id === 'mock-user-1' && sendCall?.body?.msg?.item_list?.[0]?.text_item?.text === '念风回复', JSON.stringify(sendCall?.body))
+
+    console.log('\n⑤b 重启后端：token 持久化与自动重连')
+    await backend.close()
+    backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
+    check('重启后后端已启动', backend.port > 0, backend.url)
+    let restartedStatus = null
+    for (let i = 0; i < 40; i++) {
+      restartedStatus = await (await api(backend.url, '/api/clawbot/status?channelId=test-clawbot')).json()
+      if (restartedStatus?.loggedIn && restartedStatus?.status === 'online') break
+      await sleep(120)
+    }
+    check('重启后保留 token 并自动登录', restartedStatus?.loggedIn === true, JSON.stringify(restartedStatus))
+    check('重启后消息链路恢复在线', restartedStatus?.status === 'online', JSON.stringify(restartedStatus))
 
     console.log('\n⑥ 凭据落盘与退出')
     const stateFile = join(dataDir, 'clawbot.json')

@@ -191,7 +191,7 @@ async function main() {
   const webPort = Number(process.env.WEB_PORT || network.webuiPort || (singlePort ? 5173 : 5173))
   const accessToken = String(network.webuiToken || '').trim()
 
-  banner(singlePort ? ['念风 · 单端口模式', '后端同时托管 WebUI 与 API'] : ['念风 · 开发模式', '后端 + WebUI 一起启动'])
+  banner(singlePort ? ['念风chat · 单端口模式', '后端同时托管 WebUI 与 API'] : ['念风chat · 开发模式', '后端 + WebUI 一起启动'])
 
   // 重复双击启动时：如果端口上是旧的念风实例，自动关掉再启动；是别的程序则明确报错
   await ensurePortsFree(singlePort ? [webPort] : [backendPort, webPort], { autoStop: true, log: console })

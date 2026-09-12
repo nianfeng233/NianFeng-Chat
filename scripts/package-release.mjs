@@ -170,7 +170,7 @@ async function buildWebRelease() {
   await writeFile(
     join(deployDir, '部署说明.txt'),
     [
-      '念风Chat · Web 可部署版',
+      '念风chat · Web 可部署版',
       '',
       '1. 双击「启动念风.cmd」即可运行，程序会启动本地服务并自动打开默认浏览器。',
       '2. 首次启动会读取本机 AppData 的数据目录指针，自动恢复上次使用的数据；之后固定使用当前目录 user_data 下的指针，不会反复覆盖数据目录。删除 user_data 可恢复全新状态。',
@@ -274,7 +274,7 @@ async function buildDesktopRelease() {
   await writeFile(
     join(deployDir, '使用说明.txt'),
     [
-      '念风Chat · 无边框桌面版',
+      '念风chat · 无边框桌面版',
       '',
       '1. 双击「念风Chat.exe」启动，首次运行会自动释放资源（约 1~3 秒）。',
       '2. 无边框窗口，可以直接拖动顶部栏；右上角有最小化 / 最大化 / 关闭按钮。',
@@ -323,7 +323,7 @@ async function main() {
   await writeFile(
     join(RELEASE, 'README.md'),
     [
-      '# 念风Chat 分发目录',
+      '# 念风chat 分发目录',
       '',
       '由 `scripts/package-release.mjs` 自动生成，不含个人数据（user_data / data / .tmp / 本地配置）。',
       '',

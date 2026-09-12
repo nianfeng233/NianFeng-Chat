@@ -4,7 +4,7 @@ rem 项目全称：念风 Chat（NianFeng-Chat）
 rem 仓库：https://github.com/nianfeng233/NianFeng-Chat
 chcp 65001 >nul
 cd /d "%~dp0"
-title 念风 · 关闭旧实例
+title 念风chat · 关闭旧实例
 echo 正在查找并关闭占用 5173 / 8788 的念风实例...
 echo.
 node scripts\stop.mjs %*

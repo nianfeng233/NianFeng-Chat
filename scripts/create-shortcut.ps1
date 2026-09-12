@@ -2,14 +2,14 @@
 # 项目全称：念风 Chat（NianFeng-Chat）
 # 仓库：https://github.com/nianfeng233/NianFeng-Chat
 <#
-    在桌面创建“念风Chat”快捷方式。
+    在桌面创建“念风chat”快捷方式。
     用法（在项目根目录执行）：
         powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1
         pwsh -File scripts\create-shortcut.ps1 -Name "念风"
 #>
 [CmdletBinding()]
 param(
-    [string]$Name = '念风Chat'
+    [string]$Name = '念风chat'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,7 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($lnk)
 $shortcut.TargetPath = $Target
 $shortcut.WorkingDirectory = $Root
-$shortcut.Description = '念风Chat（本地 AI 聊天客户端）'
+$shortcut.Description = '念风chat（本地 AI 聊天客户端）'
 $shortcut.WindowStyle = 1
 if (Test-Path $Logo) { $shortcut.IconLocation = $Logo }
 $shortcut.Save()

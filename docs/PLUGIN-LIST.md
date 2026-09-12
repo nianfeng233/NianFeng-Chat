@@ -5,7 +5,7 @@
 -->
 # 插件清单与实现状态
 
-> 共 **85 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 19）。微信clawbot 渠道插件同时包含前端插件、Node 后端桥与独立分发目录。
+> 共 **87 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 19）。微信clawbot 渠道插件同时包含前端插件、Node 后端桥与独立分发目录。
 > 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**。
 
 ---
@@ -23,7 +23,7 @@
 | L5 业务功能 | `plugins/features/` | 8 | chat-flow / channel-base / **model-adapter-backend / chat-tools / context-builder** / character-editor / **chat-notify** / official-service |
 | L6 可选扩展 | `plugins/extras/` | 2 | markdown-enhancer / **lang-zh-cn（语言包示例）** |
 | 后端 | `server/plugins/` | 9 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/wechat-clawbot/bridge.mjs` 渠道后端桥 |
-| **合计** | | **94** | 前端 85 + 后端 9（含 Clawbot 前后端） |
+| **合计** | | **96** | 前端 87 + 后端 9（含 Clawbot 前后端、用户身份、插件健康守卫） |
 
 ---
 
@@ -51,6 +51,8 @@
 | `document-service` | L2 | ✅ | 资料原文入库与按 token 分段读取 |
 | `chat-permissions` | L2 | ✅ | 渠道权限表、跨渠道校验、敏感确认、审计 |
 | `chat-queue` | L2 | ✅ | 角色级 FIFO 串行队列 |
+| `user-identity` | L2 | ✅ | 统一用户标识：默认本机配置，联网账号插件可注册 provider |
+| `plugin-health-guard` | L5 | ✅ | 启动插件自检，发现红色错误时弹窗引导到插件设置 |
 | `tool-registry` | L2 | ✅ | 通用 function-calling 工具注册表 |
 | `chat-tools` | L5 | ✅ | read_messages / chat_send / send_document / read_document |
 | `context-builder` | L5 | ✅ | 工作记忆 + 渠道记忆合并、去重、token 预算截断 |

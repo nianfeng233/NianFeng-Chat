@@ -218,6 +218,54 @@ async function main() {
   )
   const removeRes = await fetch(`${backend.url}/api/plugins/external/smoke-external`, { method: 'DELETE' })
   check('外部插件删除接口生效', removeRes.ok, `HTTP ${removeRes.status}`)
+
+  // depends 版本不匹配：加载前标记未激活并进入 selfCheck 警告，而不是悄悄按旧版本启动。
+  const providerDir = join(externalRoot, 'views', 'smoke-dep-provider')
+  const versionDir = join(externalRoot, 'views', 'smoke-version')
+  await mkdir(providerDir, { recursive: true })
+  await mkdir(versionDir, { recursive: true })
+  const providerFile = join(providerDir, 'index.mjs')
+  const versionFile = join(versionDir, 'index.mjs')
+  await writeFile(
+    providerFile,
+    [
+      "export const name = 'smoke-dep-provider'",
+      "export const version = '1.0.0'",
+      "export const displayName = '版本依赖提供者'",
+      "export const provides = [{ name: 'bubble-default', type: 'singleton' }]",
+      'export function apply(ctx) { ctx.provide("bubble-default", { name: "smoke-dep-provider" }) }',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  await writeFile(
+    versionFile,
+    [
+      "export const name = 'smoke-version'",
+      "export const version = '1.0.0'",
+      "export const displayName = '版本不匹配插件'",
+      "export const depends = { 'smoke-dep-provider': '^99.0.0' }",
+      'export function apply() {}',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  const versionApp = new App({ baseUrl: new URL('../', import.meta.url) })
+  await versionApp.loadAll(
+    [
+      { id: 'smoke-dep-provider', version: '1.0.0', displayName: '版本依赖提供者', path: pathToFileURL(providerFile).href, external: true },
+      { id: 'smoke-version', version: '1.0.0', displayName: '版本不匹配插件', path: pathToFileURL(versionFile).href, external: true },
+    ],
+    {},
+  )
+  const versionRecord = versionApp.records.get('smoke-version')
+  const versionIssues = versionApp.selfCheck()
+  check(
+    '插件 depends 版本不匹配被标记警告',
+    versionRecord?.status === 'active' &&
+      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
+    `${versionRecord?.status} · ${(versionIssues.find(issue => issue.id === 'smoke-version')?.message || '')}`,
+  )
   await fetch(`${backend.url}/api/plugins/dirs`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

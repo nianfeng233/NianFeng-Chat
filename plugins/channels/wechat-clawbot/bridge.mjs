@@ -60,9 +60,15 @@ function authHeaders(token) {
 
 function apiErrorText(response) {
   if (!response || typeof response !== 'object') return String(response || '未知错误')
+  if (response._error) return String(response._error).slice(0, 300)
+  const httpStatus = Number(response._httpStatus)
   const code = response.errcode ?? response.ret
+  const parts = []
+  if (Number.isFinite(httpStatus) && httpStatus > 0) parts.push(`HTTP ${httpStatus}`)
+  if (code !== undefined && code !== 0) parts.push(`code=${code}`)
   const message = response.errmsg || response.message || response.error || response.raw || ''
-  return [code !== undefined && code !== 0 ? `code=${code}` : '', message ? String(message).slice(0, 300) : ''].filter(Boolean).join(' ') || '接口未返回有效数据'
+  if (message) parts.push(String(message).slice(0, 300))
+  return parts.join(' ') || '接口返回了空数据（可能是网络超时或服务端未响应）'
 }
 
 function isSessionExpired(response) {
@@ -192,8 +198,8 @@ export function apply(ctx) {
     }
   }
 
-  const persist = async () => {
-    if (closed) return
+  const persist = async ({ force = false } = {}) => {
+    if (closed && !force) return
     try {
       await mkdir(settings.dataDir, { recursive: true })
       const tmp = `${statePath()}.${process.pid}.tmp`
@@ -237,6 +243,7 @@ export function apply(ctx) {
       contextTokens: saved.contextTokens && typeof saved.contextTokens === 'object' ? { ...saved.contextTokens } : {},
       typingTickets: new Map(),
       qr: null,
+      qrPolling: null,
       status: saved.account?.token ? 'offline' : 'idle',
       error: '',
       loop: null,
@@ -283,6 +290,7 @@ export function apply(ctx) {
           content: session.qr.content || '',
           imageUrl: session.qr.imageUrl || '',
           status: session.qr.status || 'wait_scan',
+          error: session.qr.error || '',
           startedAt: session.qr.startedAt || 0,
           expiresAt: session.qr.expiresAt || 0,
         }
@@ -324,14 +332,17 @@ export function apply(ctx) {
   }
 
   async function notifyStart(session) {
-    if (!session?.account?.token || session.startedNotified) return
+    if (!session?.account?.token) return false
+    if (session.startedNotified) return true
     const response = await requestApi(session, '/ilink/bot/msg/notifystart', {
       method: 'POST',
       token: session.account.token,
       body: { base_info: BASE_INFO },
       timeoutMs: 12000,
     })
-    if (!response?._error && !response?._httpStatus) session.startedNotified = true
+    const ok = !response?._error && !response?._httpStatus
+    if (ok) session.startedNotified = true
+    return ok
   }
 
   function markSeen(session, id) {
@@ -351,8 +362,15 @@ export function apply(ctx) {
   }
 
   async function pollLoop(session) {
-    await notifyStart(session)
-    broadcastStatus(session, session.account?.token ? 'online' : 'offline')
+    if (!session.account?.token) {
+      broadcastStatus(session, 'offline')
+      return
+    }
+    // 有 token 只代表登录凭据存在，先标记“连接中”；notifystart 或首次 getupdates
+    // 成功后才标记“已接入”，这样刷新状态显示的是真实链路结果而不是乐观值。
+    broadcastStatus(session, 'connecting')
+    const notifyOk = await notifyStart(session)
+    if (notifyOk) broadcastStatus(session, 'online')
     while (!closed && !session.closed && session.account?.token) {
       try {
         const response = await requestApi(session, '/ilink/bot/getupdates', {
@@ -408,6 +426,102 @@ export function apply(ctx) {
       .finally(() => {
         session.loop = null
       })
+  }
+
+  /**
+   * 扫码状态轮询。
+   * 微信 get_qrcode_status 是长轮询接口（无变化时约 30s 才返回 wait）；
+   * 因此不能在每次前端轮询时同步调用，否则前端会等超时。
+   * 这里在后台维护一条长轮询，前端 /login/status 只读取后台最新状态。
+   */
+  function ensureQrPoll(session) {
+    if (!session?.qr?.ticket || session.qrPolling || closed || session.closed) return
+    session.qrPolling = qrPollLoop(session)
+      .catch(err => ctx.logger.warn(`[clawbot] 二维码轮询异常：${err?.message || err}`))
+      .finally(() => {
+        session.qrPolling = null
+      })
+  }
+
+  function handleQrConfirmed(session, response) {
+    const token = String(response.bot_token || response.token || response.access_token || response.ilink_bot_token || '')
+    const accountId = String(response.ilink_bot_id || response.bot_id || response.account_id || '')
+    if (!token) {
+      session.qr.status = 'error'
+      session.qr.error = '扫码已确认，但微信未返回登录 token'
+      broadcastStatus(session, 'error', { error: session.qr.error })
+      return false
+    }
+    session.account = {
+      token,
+      accountId,
+      userId: String(response.ilink_user_id || response.user_id || response.wxid || ''),
+      nickname: String(response.nickname || response.ilink_nickname || response.wx_nickname || accountId.slice(0, 8) || '微信用户'),
+      baseUrl: String(response.base_url || response.api_base_url || DEFAULT_BASE_URL),
+      cdnBaseUrl: String(response.cdn_base_url || response.cdnBaseUrl || DEFAULT_CDN_BASE_URL),
+    }
+    session.buf = ''
+    session.inbox = []
+    session.seen = []
+    session.startedNotified = false
+    session.qr = null
+    session.error = ''
+    saveSession(session)
+    ensureLoop(session)
+    // 扫码确认拿到 token 是真实登录结果，但“已接入”等 notifystart / 首次 getupdates 成功再亮；
+    // ensureLoop 会先广播 connecting，成功后再广播 online。
+    broadcastStatus(session, 'connecting', { message: '微信 Clawbot 已登录，正在建立消息链路', error: '' })
+    return true
+  }
+
+  async function qrPollLoop(session) {
+    while (!closed && !session.closed && session.qr?.ticket) {
+      if (session.qr.expiresAt && Date.now() > session.qr.expiresAt) {
+        session.qr.status = 'expired'
+        broadcastStatus(session, 'expired', { error: '二维码已过期，请重新获取' })
+        return
+      }
+      let response
+      try {
+        response = await requestApi(session, `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(session.qr.ticket)}`, {
+          method: 'GET',
+          timeoutMs: 45000,
+        })
+      } catch (_) {
+        response = { _error: '请求超时' }
+      }
+      if (closed || session.closed || !session.qr?.ticket) return
+      if (isApiError(response)) {
+        session.qr.status = 'wait_scan'
+        session.qr.error = apiErrorText(response)
+        broadcastStatus(session, 'connecting', { error: `查询二维码状态失败：${session.qr.error}` })
+        await sleep(3000)
+        continue
+      }
+      session.qr.error = ''
+      const code = String(response.status || response.state || '').toLowerCase()
+      if (code === 'confirmed') {
+        if (handleQrConfirmed(session, response)) return
+        await sleep(3000)
+        continue
+      }
+      if (code === 'expired' || code === 'verify_code_blocked') {
+        session.qr.status = code
+        const expired = code === 'expired'
+        broadcastStatus(session, expired ? 'expired' : 'error', {
+          error: expired ? '二维码已过期，请重新获取' : '验证失败次数过多，请稍后再试',
+        })
+        return
+      }
+      if (code === 'scaned' || code === 'scaned_but_redirect' || code === 'binded_redirect') {
+        session.qr.status = 'scanned'
+        broadcastStatus(session, 'connecting', { error: '' })
+        await sleep(300)
+        continue
+      }
+      session.qr.status = 'wait_scan'
+      broadcastStatus(session, 'connecting', { error: '' })
+    }
   }
 
   async function getTypingTicket(session, toUserId, contextToken) {
@@ -494,14 +608,17 @@ export function apply(ctx) {
         content,
         imageUrl: /^https?:\/\//i.test(content) && /\.(png|jpe?g|gif|webp|bmp|avif)(\?|#|$)/i.test(content) ? content : '',
         status: 'wait_scan',
+        error: '',
         startedAt: Date.now(),
         expiresAt: Date.now() + 5 * 60 * 1000,
       }
-      broadcastStatus(session, 'connecting')
+      // 后台长轮询 get_qrcode_status；前端每次轮询只读最新状态，不会卡在微信 30s 长轮询上。
+      ensureQrPoll(session)
+      broadcastStatus(session, 'connecting', { error: '' })
       return publicStatus(session)
     },
 
-    /** 查询扫码状态；确认后保存 token 并启动长轮询 */
+    /** 查询扫码状态；真实状态由后台 qrPollLoop 长轮询更新 */
     async loginStatus({ channelId } = {}) {
       await ready
       const session = getSession(channelId)
@@ -510,57 +627,7 @@ export function apply(ctx) {
         ensureLoop(session)
         return { ...publicStatus(session), status: 'logged_in' }
       }
-      if (!session.qr?.ticket) return publicStatus(session)
-      if (session.qr.expiresAt && Date.now() > session.qr.expiresAt) {
-        session.qr.status = 'expired'
-        broadcastStatus(session, 'expired', { error: '二维码已过期，请重新获取' })
-        return publicStatus(session)
-      }
-      const response = await requestApi(session, `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(session.qr.ticket)}`, {
-        method: 'GET',
-        timeoutMs: 12000,
-      })
-      if (isApiError(response)) {
-        broadcastStatus(session, 'error', { error: `查询二维码状态失败：${apiErrorText(response)}` })
-        return publicStatus(session)
-      }
-      const code = String(response.status || response.state || '').toLowerCase()
-      if (code === 'confirmed') {
-        const token = String(response.bot_token || response.token || response.access_token || response.ilink_bot_token || '')
-        const accountId = String(response.ilink_bot_id || response.bot_id || response.account_id || '')
-        if (!token) {
-          session.qr.status = 'error'
-          broadcastStatus(session, 'error', { error: '扫码已确认，但微信未返回登录 token' })
-          return publicStatus(session)
-        }
-        session.account = {
-          token,
-          accountId,
-          userId: String(response.ilink_user_id || response.user_id || response.wxid || ''),
-          nickname: String(response.nickname || response.ilink_nickname || response.wx_nickname || accountId.slice(0, 8) || '微信用户'),
-          baseUrl: String(response.base_url || response.api_base_url || DEFAULT_BASE_URL),
-          cdnBaseUrl: String(response.cdn_base_url || response.cdnBaseUrl || DEFAULT_CDN_BASE_URL),
-        }
-        session.qr = { ...(session.qr || {}), status: 'confirmed' }
-        session.buf = ''
-        session.inbox = []
-        session.seen = []
-        session.startedNotified = false
-        saveSession(session)
-        ensureLoop(session)
-        broadcastStatus(session, 'online', { message: '微信 Clawbot 已登录' })
-        return { ...publicStatus(session), status: 'logged_in' }
-      }
-      if (code === 'expired' || code === 'verify_code_blocked') {
-        session.qr.status = code
-        broadcastStatus(session, code === 'expired' ? 'expired' : 'error', { error: code === 'expired' ? '二维码已过期，请重新获取' : '验证失败次数过多，请稍后再试' })
-        return publicStatus(session)
-      }
-      if (code === 'scaned' || code === 'scaned_but_redirect' || code === 'binded_redirect') {
-        session.qr.status = 'scanned'
-        return { ...publicStatus(session), status: 'scanned' }
-      }
-      session.qr.status = 'wait_scan'
+      if (session.qr?.ticket) ensureQrPoll(session)
       return publicStatus(session)
     },
 
@@ -796,9 +863,10 @@ export function apply(ctx) {
   })
 
   ctx.effect(() => async () => {
-    closed = true
     if (persistTimer) clearTimeout(persistTimer)
     for (const session of sessions.values()) session.closed = true
-    await persist()
+    // 关闭前强制落盘一次，确保 token / 同步游标 / 待处理消息不丢。
+    await persist({ force: true })
+    closed = true
   })
 }
