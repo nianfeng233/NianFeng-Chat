@@ -39,6 +39,65 @@ export function apply(ctx) {
     target = null
   }
 
+  /* ---------------- 移动端长按 = 右键 ---------------- */
+  const isTouchLayout = () =>
+    document.documentElement?.dataset?.mobileLayout === '1' ||
+    (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)
+  let pressTimer = null
+  let pressPoint = null
+  let suppressClickUntil = 0
+
+  const cancelPress = () => {
+    if (pressTimer) clearTimeout(pressTimer)
+    pressTimer = null
+    pressPoint = null
+  }
+  const onTouchStart = event => {
+    if (!isTouchLayout()) return
+    if (!event.touches || event.touches.length !== 1) return
+    const touch = event.touches[0]
+    pressPoint = { x: touch.clientX, y: touch.clientY }
+    if (pressTimer) clearTimeout(pressTimer)
+    pressTimer = setTimeout(() => {
+      pressTimer = null
+      const x = pressPoint?.x
+      const y = pressPoint?.y
+      pressPoint = null
+      if (x === undefined || y === undefined || typeof document.elementFromPoint !== 'function') return
+      const element = document.elementFromPoint(x, y)
+      if (!element) return
+      suppressClickUntil = Date.now() + 700
+      const init = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2, buttons: 2 }
+      const synthetic = typeof MouseEvent === 'function' ? new MouseEvent('contextmenu', init) : Object.assign(new Event('contextmenu', init), init)
+      element.dispatchEvent(synthetic)
+    }, 520)
+  }
+  const onTouchMove = event => {
+    if (!pressTimer || !pressPoint || !event.touches || event.touches.length !== 1) return
+    const touch = event.touches[0]
+    if (Math.hypot(touch.clientX - pressPoint.x, touch.clientY - pressPoint.y) > 10) cancelPress()
+  }
+  const onTouchEnd = () => {
+    if (pressTimer) cancelPress()
+  }
+  const onCaptureClick = event => {
+    if (Date.now() >= suppressClickUntil) return
+    event.preventDefault?.()
+    event.stopPropagation?.()
+  }
+  document.addEventListener('touchstart', onTouchStart, { passive: true })
+  document.addEventListener('touchmove', onTouchMove, { passive: true })
+  document.addEventListener('touchend', onTouchEnd, { passive: true })
+  document.addEventListener('touchcancel', onTouchEnd, { passive: true })
+  document.addEventListener('click', onCaptureClick, true)
+  ctx.effect(() => {
+    document.removeEventListener('touchstart', onTouchStart)
+    document.removeEventListener('touchmove', onTouchMove)
+    document.removeEventListener('touchend', onTouchEnd)
+    document.removeEventListener('touchcancel', onTouchEnd)
+    document.removeEventListener('click', onCaptureClick, true)
+  })
+
   const activate = item => {
     if (!item || item.classList.contains('disabled')) return
     const index = Number(item.dataset.index)

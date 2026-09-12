@@ -1041,44 +1041,111 @@ export function apply(ctx) {
         ...(options?.extraBody === undefined && params.extraBody !== undefined ? { extraBody: params.extraBody } : {}),
       }
 
-      let text = ''
-      let adapterSummary = null
+      const emptyResponseRetries = Math.max(
+        0,
+        Math.min(5, Number(cfg.emptyResponseRetries ?? settings.get().network?.emptyResponseRetries ?? 2) || 0),
+      )
+      const totalAttempts = emptyResponseRetries + 1
+      const startedAt = Date.now()
       const controller = new AbortController()
       const timeoutMs = Number(cfg.timeoutMs) > 0 ? Number(cfg.timeoutMs) : settings.get().network.timeoutMs || 60000
       const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
       signal?.addEventListener?.('abort', () => controller.abort(new Error('已取消')), { once: true })
 
-      hub.broadcast('chat/start', { provider: providerId, model: useModel })
+      hub.broadcast('chat/start', {
+        provider: providerId,
+        model: useModel,
+        at: startedAt,
+        timeoutMs,
+        toolCount: Array.isArray(options?.tools) ? options.tools.length : 0,
+      })
       try {
-        await adapter.stream(
-          {
-            provider: cfg,
-            model: useModel,
-            messages: messages || [],
-            options: effectiveOptions,
-            signal: controller.signal,
-            onChunk: delta => {
-              text += delta
-              onChunk?.(delta)
+        for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+          let attemptText = ''
+          let attemptSummary = null
+          const reasoningBuffer = []
+          const attemptChunks = []
+          let attemptCommitted = false
+          await adapter.stream(
+            {
+              provider: cfg,
+              model: useModel,
+              messages: messages || [],
+              options: effectiveOptions,
+              signal: controller.signal,
+              onChunk: delta => {
+                attemptText += delta
+                // 空回复重试期间不要把空白 / 将被丢弃的内容流到界面；一旦出现非空白内容，
+                // 说明这次一定成功，立刻把缓冲内容 flush 出去并恢复实时流式。
+                if (attemptCommitted) {
+                  onChunk?.(delta)
+                  return
+                }
+                attemptChunks.push(delta)
+                if (String(delta).trim()) {
+                  attemptCommitted = true
+                  for (const buffered of attemptChunks.splice(0)) onChunk?.(buffered)
+                }
+              },
+              onToolCall: call => onToolCall?.(call),
+              // 先缓冲思考内容：如果这次最终是空回复，重试时不会把重复思考播给前端。
+              onReasoning: delta => reasoningBuffer.push(delta),
+              // 适配器流读完后回传完整 tool_calls / finish_reason
+              onDone: summary => {
+                if (summary) attemptSummary = summary
+              },
             },
-            onToolCall: call => onToolCall?.(call),
-            onReasoning: delta => onReasoning?.(delta),
-            // 适配器流读完后回传完整 tool_calls / finish_reason
-            onDone: summary => {
-              if (summary) adapterSummary = summary
-            },
-          },
-          ctx,
-        )
-        hub.broadcast('chat/done', { provider: providerId, model: useModel, length: text.length })
-        return {
-          text,
-          toolCalls: adapterSummary?.toolCalls || [],
-          finishReason: adapterSummary?.reason || null,
-          usage: applyUsagePricing(normalizeUsage(adapterSummary?.usage) || adapterSummary?.usage || null, params),
+            ctx,
+          )
+          const toolCalls = Array.isArray(attemptSummary?.toolCalls) ? attemptSummary.toolCalls : []
+          if (attemptText.trim() || toolCalls.length) {
+            if (!attemptCommitted && attemptChunks.length) {
+              for (const buffered of attemptChunks.splice(0)) onChunk?.(buffered)
+            }
+            for (const delta of reasoningBuffer) onReasoning?.(delta)
+            hub.broadcast('chat/done', {
+              provider: providerId,
+              model: useModel,
+              length: attemptText.length,
+              ms: Date.now() - startedAt,
+              toolCalls: toolCalls.length,
+              finishReason: attemptSummary?.reason || null,
+              attempts: attempt,
+            })
+            return {
+              text: attemptText,
+              toolCalls,
+              finishReason: attemptSummary?.reason || null,
+              usage: applyUsagePricing(normalizeUsage(attemptSummary?.usage) || attemptSummary?.usage || null, params),
+            }
+          }
+
+          // 空回复：DeepSeek 官方 harness 会把「finish=stop 且没有任何 block」视为
+          // EMPTY_RESPONSE 错误并自动重试；这里采用相同策略，避免用户一直等一个不会来的消息。
+          const finishReason = attemptSummary?.reason || 'stop'
+          const reasonText =
+            finishReason === 'length'
+              ? '模型输出达到长度上限，既没有正文也没有工具调用；可提高最大输出 token、降低推理等级或更换模型'
+              : '模型返回了空回复（既没有正文也没有工具调用）'
+          if (attempt < totalAttempts) {
+            ctx.logger?.warn?.(
+              `[models] ${useModel} 第 ${attempt}/${totalAttempts} 次返回为空，${Math.round(400 * attempt)}ms 后自动重试：${reasonText}`,
+            )
+            await abortableDelay(400 * attempt, controller.signal)
+            continue
+          }
+          const emptyError = new Error(`${reasonText}；已自动重试 ${emptyResponseRetries} 次，请更换模型或稍后重试`)
+          emptyError.code = 'EMPTY_RESPONSE'
+          throw emptyError
         }
       } catch (err) {
-        hub.broadcast('chat/error', { provider: providerId, model: useModel, detail: normalizeError(err) })
+        hub.broadcast('chat/error', {
+          provider: providerId,
+          model: useModel,
+          detail: normalizeError(err),
+          ms: Date.now() - startedAt,
+          timedOut: /timeout|超时|aborted/i.test(String(err?.message || err)),
+        })
         throw createError(502, normalizeError(err))
       } finally {
         clearTimeout(timer)
@@ -1585,6 +1652,21 @@ function createError(status, message) {
   const err = new Error(message)
   err.status = status
   return err
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason || new Error('已取消'))
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, Math.max(0, Number(ms) || 0))
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal.reason || new Error('已取消'))
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
 }
 
 function normalizeError(err) {

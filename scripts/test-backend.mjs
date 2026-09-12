@@ -158,6 +158,48 @@ async function main() {
   )
   check('模型停用状态已保存', updatedModelBody.model?.enabled === false)
 
+  console.log('\n④d 空回复自动重试并明确报错')
+  let emptyAttempts = 0
+  backend.ctx.models.registerAdapter('empty-test', {
+    label: 'Empty Test',
+    async listModels() {
+      return [{ id: 'empty-1', name: 'Empty One' }]
+    },
+    async test() {
+      return { detail: 'Empty Test 可用' }
+    },
+    async stream({ onDone }) {
+      emptyAttempts += 1
+      onDone({})
+    },
+  })
+  await backend.ctx.settings.update({
+    network: { emptyResponseRetries: 1 },
+    providers: {
+      'empty-test': {
+        type: 'empty-test',
+        name: 'Empty Test',
+        baseURL: 'empty://local',
+        enabled: true,
+        models: [{ id: 'empty-1', name: 'Empty One' }],
+        defaultModel: 'empty-1',
+      },
+    },
+  })
+  let emptyError = null
+  try {
+    await backend.ctx.models.stream({
+      provider: 'empty-test',
+      model: 'empty-1',
+      messages: [{ role: 'user', content: 'hi' }],
+      options: {},
+    })
+  } catch (err) {
+    emptyError = err
+  }
+  check('空回复会自动重试', emptyAttempts === 2, `attempts=${emptyAttempts}`)
+  check('重试仍为空后明确报错', !!emptyError && /空回复/.test(emptyError.message), emptyError?.message)
+
   // 远端拉取与已有模型合并：用户配置不能被覆盖
   backend.ctx.models.registerAdapter('merge-test', {
     label: 'Merge Test',

@@ -1,6 +1,6 @@
 {
   "name": "nianfeng-chat",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -16,8 +16,6 @@
     "release:publish": "node scripts/publish-release.mjs",
     "build:release": "node scripts/package-release.mjs",
     "build:desktop": "node scripts/package-release.mjs --desktop-only",
-    "sync:clawbot-plugin": "node scripts/sync-clawbot-standalone.mjs",
-    "build:clawbot-plugin": "node scripts/sync-clawbot-standalone.mjs && node scripts/package-clawbot-plugin.mjs",
     "audit:deps": "node scripts/audit-dependencies.mjs",
     "check:kernels": "node scripts/check-syntax.mjs",
     "test:smoke": "node scripts/smoke.mjs",

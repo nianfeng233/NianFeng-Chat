@@ -27,7 +27,7 @@ const SOURCE = resolve(ROOT, args.get('source') || 'release/web/source')
 const DEST = resolve(ROOT, args.get('dest') || 'release/publish')
 const KEEP_GIT = true
 
-const SKIP_NAMES = new Set(['.git', 'node_modules', '.tmp', 'data', 'user_data', 'release'])
+const SKIP_NAMES = new Set(['.git', 'node_modules', '.tmp', '.local', 'data', 'user_data', 'release'])
 
 async function copyTree(from, to) {
   await mkdir(to, { recursive: true })

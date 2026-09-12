@@ -17,8 +17,19 @@ export const SESSION_LIST_CSS = `
     box-shadow:0 1px 2px rgba(30,60,20,.04);
   }
   .pane-head .icon-btn:hover{background:rgba(255,255,255,.85);color:var(--accent);}
+  .pane-head .icon-btn.active{background:var(--accent-soft);color:var(--accent);}
   .pane-head .icon-btn svg{width:16px;height:16px;}
   .list-pane.compact .pane-head .icon-btn{display:none;}
+
+  .batch-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 8px 8px;padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.78);border:1px solid rgba(0,0,0,.06);font-size:11.5px;color:var(--text-3);}
+  .batch-bar span{flex:1 1 auto;min-width:60px;}
+  .batch-bar button{border:1px solid rgba(0,0,0,.09);background:#fff;border-radius:7px;padding:3px 8px;font:inherit;font-size:11.5px;color:var(--text-2);cursor:pointer;}
+  .batch-bar button:hover{background:#f7f8f6;color:var(--text);}
+  .batch-bar button.danger{color:#c65b5b;border-color:rgba(198,91,91,.25);}
+  .conv-item.batch-checked{background:rgba(112,161,90,.12);}
+  .conv-check{width:20px;height:20px;flex:0 0 20px;border-radius:50%;border:1.5px solid rgba(0,0,0,.18);display:flex;align-items:center;justify-content:center;color:#fff;background:#fff;font-size:11px;}
+  .conv-item.batch-checked .conv-check{background:var(--accent,#70a15a);border-color:var(--accent,#70a15a);}
+  .conv-check svg{width:12px;height:10px;}
 
   .sync-banner{
     display:flex;align-items:center;gap:6px;

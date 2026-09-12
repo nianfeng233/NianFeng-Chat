@@ -15,7 +15,7 @@ a Windows desktop application.
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
 
-- Current version: v0.43.0
+- Current version: v1.1.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -39,6 +39,19 @@ a Windows desktop application.
   changes take effect after the prompted restart.
 - **Notifications**: system, character-message, and other notifications; character messages include
   the character avatar and a preview. Built-in and custom notification sounds are supported.
+- **Immediate channel delivery**: assistant messages are sent to the target channel as soon as they
+  are written, instead of waiting for the whole model turn to finish. Cross-channel `chat_send`
+  calls therefore really reach the target channel (sensitive operations still require confirmation).
+  When a tool sends several messages, the first one goes out immediately and the rest keep the
+  simulated-human typing delay on both web and external channels.
+- **Input state**: the WeChat clawbot keeps its typing state alive for the whole turn, re-asserting it
+  after authorization prompts or replies, and stops only when the turn is completely done. A separate
+  `napcat-input-state` extension keeps refreshing NapCat private-chat `set_input_status`; group input
+  state is not supported by the OneBot API.
+- **Mobile layout**: mobile browsers automatically get a single-column layout with a back bar and a
+  bottom navigation for Chat / Channels / Settings; use `?mobile=1` or `?mobile=0` to debug.
+- **Runtime logs**: Settings → System → Runtime Logs shows model start / done / timeout, tool
+  timings, confirmation results, outbound delivery, and backend request timings.
 - **Languages**: Simplified Chinese is provided by the built-in `lang-zh-cn` language-pack plugin;
   copy that plugin and edit its translation table to add another language.
 
@@ -70,8 +83,7 @@ npm install
 npm start
 ```
 
-Then open Settings → Models. Turn off “Use built-in model” (the official service is not released
-yet and the list is empty), add a provider (OpenAI-compatible / DeepSeek / Anthropic / Gemini /
+Then open Settings → Models, add a provider (OpenAI-compatible / DeepSeek / Anthropic / Gemini /
 Ollama), fill in the Base URL and API key, fetch the model list, and choose a default model.
 
 On Windows you can also double-click `start.cmd`.
@@ -86,6 +98,8 @@ On Windows you can also double-click `start.cmd`.
   `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores a cookie.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
+- **Runtime logs**: Settings → System → Runtime Logs; filter by level / category / keyword, pause,
+  clear, or copy, with timeouts and failed outbound deliveries highlighted in red.
 - **Language**: Simplified Chinese comes from the `lang-zh-cn` plugin; copy it to create another
   language pack.
 

@@ -43,6 +43,7 @@ export const MESSAGES = {
   'channel.add': '添加渠道',
   'session.yesterday': '昨天',
   'settings.title': '设置',
+  'settings.search': '搜索设置…',
 }
 
 export function apply(ctx) {

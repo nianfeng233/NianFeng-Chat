@@ -140,6 +140,7 @@ export function apply(ctx) {
               <button class="record-btn" data-record-mode="json">JSON 源码</button>
               <button class="record-btn" data-record-add>新增消息</button>
               <button class="record-btn" data-record-reload>取消修改</button>
+              <button class="record-btn" data-record-undo-save hidden>恢复上次保存前</button>
               <button class="record-btn primary" data-record-save>保存</button>
             </div>
             <div class="record-error" data-record-error></div>
@@ -185,10 +186,13 @@ export function apply(ctx) {
       const editorEl = container.querySelector('[data-record-editor]')
       const editorError = container.querySelector('[data-editor-error]')
       const modeButtons = [...container.querySelectorAll('[data-record-mode]')]
+      const undoLastSaveBtn = container.querySelector('[data-record-undo-save]')
       for (const select of container.querySelectorAll('[data-editor-field="visibility"]')) {
         select.innerHTML = VISIBILITIES.map(value => `<option value="${value}">${value}</option>`).join('')
       }
 
+      const lastSavedSnapshots = new Map()
+      let jsonRiskAccepted = false
       let activeChannel = null
       let draft = []
       let dirty = false
@@ -249,6 +253,10 @@ export function apply(ctx) {
 
       const updateJsonSource = () => {
         sourceEl.value = JSON.stringify(draft, null, 2)
+      }
+      const syncUndoSaveButton = () => {
+        if (!undoLastSaveBtn) return
+        undoLastSaveBtn.hidden = !activeChannel || !lastSavedSnapshots.has(activeChannel)
       }
 
       const renderCards = () => {
@@ -377,6 +385,7 @@ export function apply(ctx) {
         updateJsonSource()
         renderCards()
         renderList()
+        syncUndoSaveButton()
       }
 
       const switchChannel = async channelId => {
@@ -388,8 +397,16 @@ export function apply(ctx) {
         loadChannel(channelId)
       }
 
-      const setMode = next => {
+      const setMode = async next => {
         if (next === mode) return
+        if (next === 'json' && !jsonRiskAccepted && modal) {
+          const accepted = await modal.confirm(
+            'JSON 源码为高风险编辑模式',
+            '直接编辑内部字段仍可能破坏消息结构；校验通过不代表数据一定正确。建议先点「保存」留一份当前状态，改坏后可用「恢复上次保存前」找回。',
+          )
+          if (!accepted?.ok) return
+          jsonRiskAccepted = true
+        }
         if (next === 'cards') {
           let parsed
           try {
@@ -487,12 +504,32 @@ export function apply(ctx) {
           return
         }
         try {
+          // 保存前把当前状态留档，供改坏后一键撤回。
+          lastSavedSnapshots.set(activeChannel, JSON.parse(JSON.stringify(store.messagesOf(activeChannel))))
           const result = store.replaceMessages(activeChannel, parsed)
-          toast.success(`已保存 ${result.count} 条消息`)
+          toast.success(`已保存 ${result.count} 条消息；如需回退，可点「恢复上次保存前」`)
           loadChannel(activeChannel)
         } catch (err) {
           setError(`保存失败：${err.message}`)
         }
+      }
+
+      const undoLastSave = async () => {
+        if (!activeChannel || !lastSavedSnapshots.has(activeChannel)) return
+        if (modal) {
+          const confirmed = await modal.confirm(
+            '恢复上次保存前的状态？',
+            '当前草稿会先被替换为上一次成功保存前的数据，你需要再点一次「保存」才会写回。',
+          )
+          if (!confirmed?.ok) return
+        }
+        draft = JSON.parse(JSON.stringify(lastSavedSnapshots.get(activeChannel)))
+        setDirty(true)
+        setError('')
+        updateJsonSource()
+        renderCards()
+        toast.info('已载入上次保存前的状态，请点「保存」应用')
+        undoLastSaveBtn.hidden = true
       }
 
       const reloadDraft = () => {
@@ -509,6 +546,7 @@ export function apply(ctx) {
       for (const button of modeButtons) button.addEventListener('click', () => setMode(button.dataset.recordMode))
       container.querySelector('[data-record-save]').addEventListener('click', saveAll)
       container.querySelector('[data-record-reload]').addEventListener('click', reloadDraft)
+      container.querySelector('[data-record-undo-save]').addEventListener('click', undoLastSave)
       container.querySelector('[data-record-add]').addEventListener('click', () => openEditor(-1))
       container.querySelector('[data-record-refresh-list]').addEventListener('click', () => {
         listInitialized = false

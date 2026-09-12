@@ -42,7 +42,7 @@ const DEFAULTS = {
     settingsContent: { alpha: 0.56, blur: 22, saturate: 150, brightness: 100, borderWidth: 0.5 },
     titlebar: { alpha: 0.42, blur: 14, saturate: 150, brightness: 100, borderWidth: 0.5 },
   },
-  'general.restore': true,
+  'general.restore': false,
   'general.minimizeOnClose': false,
   'debug': false,
   'plugins.disabled': [],
@@ -56,6 +56,9 @@ const DEFAULTS = {
   'model.useBuiltin': true,
   'model.timeoutMs': 60000,
   'model.requestBody': '',
+  'model.failoverEnabled': false,
+  'model.failoverKey': '',
+  'model.failoverRetries': 1,
   'chat.stream': true,
   // 推理等级：DeepSeek 官方 off / low / high / max
   'chat.reasoningEffort': 'off',
@@ -81,8 +84,13 @@ const DEFAULTS = {
   'chat.typingMinMs': 500,
   'chat.typingMaxMs': 5000,
   'chat.typingPerCharMs': 35,
+  // 渠道输入状态：NapCat 输入中会很快消失，需要定时重报；微信原生输入中可以持续到整轮结束
+  'napcat.inputState.enabled': true,
+  'napcat.inputState.intervalMs': 3000,
+  'napcat.inputState.timeoutMs': 10 * 60 * 1000,
   'chat.requireToolCall': true,
   'chat.toolRetryLimit': 2,
+  'chat.emptyRetryLimit': 2,
   'chat.composerHeight': 0,
   'chat.userId': 'web-user',
   // 插件权限中心

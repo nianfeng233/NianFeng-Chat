@@ -17,6 +17,7 @@ Thumbs.db
 # 测试与调试产生的临时目录
 .edge-profile/
 .tmp/
+.local/
 data/
 user_data/
 coverage/

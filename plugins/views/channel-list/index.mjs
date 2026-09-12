@@ -158,7 +158,9 @@ export function apply(ctx) {
             }
           } },
           { separator: true },
-          { label: '移除渠道', danger: true, action: () => {
+          { label: '移除渠道', danger: true, action: async () => {
+            const confirmed = await modal.confirm('移除渠道', `将移除「${channel.name}」及其配置，且不可恢复。`)
+            if (!confirmed?.ok) return
             channels.removeChannel(tab, channel.id)
             toast.warn(`已移除「${channel.name}」`)
           } },

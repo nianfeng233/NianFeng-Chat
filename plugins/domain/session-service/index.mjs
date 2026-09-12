@@ -40,8 +40,8 @@ export function apply(ctx) {
   // 删除墓碑：删除请求没来得及写回后端就退出程序时，下次启动用它
   // 防止后端的旧会话把本地已删除的会话“复活”。
   if (!Array.isArray(data.removedIds)) data.removedIds = []
-  // 「启动时恢复上次状态」关闭时，启动后不自动选中上次的会话
-  if (!config.get('general.restore', true)) data.activeId = null
+  // 「启动时恢复上次状态」默认关闭；关闭时启动后不自动选中上次的会话。
+  if (!config.get('general.restore', false)) data.activeId = null
 
   let source = 'local'
   let lastSyncError = ''
@@ -64,9 +64,13 @@ export function apply(ctx) {
   /**
    * 本地 localStorage 只做「离线滚动缓存」：
    *   - 后端在线时，完整历史在 SQLite（chat.db），localStorage 不再保存全量消息；
-   *   - 离线时保留每个会话最近 50 条，保证还能继续聊、界面不空。
+   *   - 离线时保留每个会话最近 20 条，保证还能继续聊、界面不空。
+   *
+   * 流式输出会高频改动消息，这里做节流写盘；页面隐藏 / 卸载时强制 flush，
+   * 既避免每个 chunk 都写一次 localStorage，又不会丢数据。
    */
-  const persistLocal = () => {
+  let persistTimer = null
+  const writeLocalNow = () => {
     const conversations = data.conversations.map(conv => {
       const messages = Array.isArray(conv.messages) ? conv.messages : []
       // 离线兜底只保留最近 20 条；完整历史以 SQLite / 后端为准，避免 localStorage 走旧版爆掉。
@@ -74,6 +78,37 @@ export function apply(ctx) {
       return { ...conv, messages: keep, messageCount: messageCountOf(conv), localTruncated: messages.length > keep.length }
     })
     storage.set(NS, KEY, { conversations, activeId: data.activeId, removedIds: data.removedIds || [] })
+  }
+  const persistLocal = () => {
+    if (typeof window !== 'undefined' && persistTimer) return
+    if (typeof window === 'undefined') {
+      writeLocalNow()
+      return
+    }
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      writeLocalNow()
+    }, 350)
+  }
+  const flushLocalNow = () => {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+    }
+    writeLocalNow()
+  }
+
+  if (typeof window !== 'undefined') {
+    const onVisibility = () => {
+      if (document.hidden) flushLocalNow()
+    }
+    window.addEventListener('beforeunload', flushLocalNow)
+    document.addEventListener('visibilitychange', onVisibility)
+    ctx.effect(() => {
+      window.removeEventListener('beforeunload', flushLocalNow)
+      document.removeEventListener('visibilitychange', onVisibility)
+      flushLocalNow()
+    })
   }
   const randomId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
   const find = id => data.conversations.find(c => c.id === id) || null
@@ -468,12 +503,10 @@ export function apply(ctx) {
         const payload = await api.sessions()
         const server = (payload.conversations || []).filter(conv => conv?.id)
         const { conversations, serverById, removedIds } = mergeServerConversations(server)
-        const restoreLast = config.get('general.restore', true)
-        const activeId = restoreLast
-          ? conversations.some(conv => conv.id === data.activeId)
-            ? data.activeId
-            : conversations[0]?.id || null
-          : null
+        const restoreLast = config.get('general.restore', false)
+        const isNormalSession = conv => conv && conv.meta?.hiddenFromSessionList !== true && conv.meta?.channelConversation !== true
+        const remembered = conversations.find(conv => conv.id === data.activeId)
+        const activeId = restoreLast ? (isNormalSession(remembered) ? remembered.id : conversations.find(isNormalSession)?.id || null) : null
         data = { conversations, activeId, removedIds }
         source = 'server'
         persistLocal()

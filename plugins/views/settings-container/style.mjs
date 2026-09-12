@@ -5,6 +5,12 @@
  */
 /** settings-container 样式：卡片 / 行 / 开关 / 分段控件（取自 demo 的设置页样式） */
 export const SETTINGS_CONTAINER_CSS = `
+  .settings-nav-search{display:flex;align-items:center;gap:7px;height:34px;margin:0 2px 12px;padding:0 10px;border-radius:9px;background:rgba(255,255,255,.72);border:1px solid rgba(0,0,0,.06);color:var(--text-4);box-sizing:border-box;}
+  .settings-nav-search span{font-size:15px;line-height:1;}
+  .settings-nav-search input{flex:1;min-width:0;border:0;outline:0;background:transparent;font:inherit;font-size:12.5px;color:var(--text);}
+  .settings-nav-search input::placeholder{color:var(--text-4);}
+  .settings-nav-group[hidden]{display:none;}
+  .settings-nav-item[hidden]{display:none;}
   .settings-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px}
   .settings-title{font-size:20px;line-height:1.3;font-weight:650;letter-spacing:.1px;color:var(--text)}
   .settings-desc{margin-top:6px;font-size:12.5px;line-height:1.55;color:var(--text-3)}

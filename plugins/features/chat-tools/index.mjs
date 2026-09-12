@@ -45,6 +45,20 @@ export function apply(ctx) {
 
   const unavailable = () => ({ ok: false, code: 'CHANNEL_UNAVAILABLE', error: '目标渠道不可用' })
 
+  /** 目标是否是真正的外部渠道（Nova 网页会话不算）。 */
+  const isExternalChannel = channelId => {
+    const record = store.channelRecord?.(channelId)
+    return !!record && record.source !== 'nova' && !String(channelId || '').startsWith('nova:web:')
+  }
+
+  const queuedDelivery = channelId =>
+    isExternalChannel(channelId)
+      ? {
+          delivery: 'queued',
+          delivery_note: '消息已进入渠道外发队列；实际发送结果会写入聊天记录与运行日志，失败时会回写错误提示。',
+        }
+      : { delivery: 'inline' }
+
   const sleep = (ms, entry) =>
     new Promise(resolve => {
       const started = Date.now()
@@ -216,14 +230,15 @@ export function apply(ctx) {
     const duplicates = []
     let reasoningAttached = false
     const delivery = context.delivery || { count: 0 }
-    const simulate = config.get('chat.simulateTyping', true) && isCurrent
+    // 跨渠道发送也要像网页端一样：首条立即发送，后续消息按字数模拟真人打字延迟。
+    const simulate = config.get('chat.simulateTyping', true)
     const emitTyping = typing => {
       if (simulate) events.emit('chat:typing', { conversationId, channelId, typing })
     }
     for (const raw of rawList) {
         if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         const item = typeof raw === 'string' ? { content: raw } : raw || {}
-        const content = String(item.content ?? item.text ?? '').trim()
+        const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
         const normalizedImages = await normalizeOutboundImages(item.images)
         if (!content && !normalizedImages.length) continue
         const existing = content ? context.sentContents?.get(content) : null
@@ -273,6 +288,7 @@ export function apply(ctx) {
       duplicates: duplicates.length ? duplicates : undefined,
       sent_at: store.toLocalIso(),
       end: args.end === true || args.end === 'true',
+      ...queuedDelivery(channelId),
     }
   }
 
@@ -288,7 +304,7 @@ export function apply(ctx) {
 
     const title = String(args.title || '未命名资料').slice(0, 200)
     const summary = String(args.summary || '').slice(0, 500)
-    const content = String(args.content ?? '')
+    const content = String(args.content ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '')
     if (!content.trim()) return { ok: false, error: '资料内容不能为空' }
 
     const reference = documents.put({
@@ -301,7 +317,8 @@ export function apply(ctx) {
     })
 
     const delivery = context.delivery || { count: 0 }
-    const simulate = config.get('chat.simulateTyping', true) && isCurrent
+    // 跨渠道资料消息同样保留逐条延迟，避免多条资料 / 消息一次性轰炸目标渠道。
+    const simulate = config.get('chat.simulateTyping', true)
     if (simulate && delivery.count > 0) {
       events.emit('chat:typing', { conversationId, channelId, typing: true })
       await sleep(typingDelayMs(summary || title), context.entry)
@@ -345,6 +362,7 @@ export function apply(ctx) {
       message_ids: message ? [message.message_id] : [],
       sent_at: store.toLocalIso(),
       end: args.end === true || args.end === 'true',
+      ...queuedDelivery(channelId),
     }
   }
 

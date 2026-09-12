@@ -23,6 +23,14 @@ export const NAPCAT_CSS = `
   .nc-field input[type="range"]{width:auto;height:26px;padding:0;border:0;background:transparent;}
   .nc-perms input[type="checkbox"]{margin-top:2px;}
   .nc-field-help{font-size:11px;color:var(--text-4);line-height:1.55;}
+  .nc-mode-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:3px;border-radius:11px;background:rgba(0,0,0,.045);}
+  .nc-mode-tab{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:7px 9px;border:0;border-radius:8px;background:transparent;color:var(--text-3);cursor:pointer;font:inherit;text-align:left;transition:background .15s,color .15s,box-shadow .15s;}
+  .nc-mode-tab b{font-size:12.5px;font-weight:600;}
+  .nc-mode-tab small{font-size:10px;color:var(--text-4);}
+  .nc-mode-tab:hover{background:rgba(255,255,255,.65);color:var(--text);}
+  .nc-mode-tab.active{background:#fff;color:#0077cc;box-shadow:0 1px 4px rgba(30,60,20,.08);}
+  .nc-mode-tab.active small{color:#4d97c7;}
+  .nc-perm[hidden]{display:none;}
   .nc-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .nc-grid-3{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start;}
   .nc-grid-3 .outline-btn{height:34px;padding:0 12px;white-space:nowrap;}

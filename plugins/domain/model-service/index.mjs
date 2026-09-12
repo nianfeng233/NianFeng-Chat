@@ -41,71 +41,126 @@ export function apply(ctx) {
      * @returns {{ abort: Function }}
      */
     stream(messages, options = {}, callbacks = {}) {
-      const key = options.model || registry.activeKey()
-      const resolved = registry.resolve(key)
-      if (!resolved?.providerImpl?.stream) {
-        const err = new Error(
-        registry.list().length === 0
-          ? '尚未配置模型提供商：请到「设置 → 模型」接入 Ollama（本地）或 OpenAI 兼容接口'
-          : `模型未就绪：${key || '未选择模型'}`,
-      )
-        callbacks.onError?.(err)
-        events.emit('model:error', { key, error: err })
-        return { abort() {} }
-      }
+      const requestedKey = options.model || registry.activeKey()
+      const startedAt = Date.now()
+      const elapsed = () => Date.now() - startedAt
+      const fallbackKey = String(config.get('model.failoverKey', '') || '').trim()
+      const failoverEnabled = config.get('model.failoverEnabled', false) === true && !!fallbackKey && fallbackKey !== requestedKey
+      const maxFallbacks = failoverEnabled ? Math.max(0, Math.min(3, Number(config.get('model.failoverRetries', 1)) || 0)) : 0
 
-      const controller = new AbortController()
-      const signal = options.signal || controller.signal
       let aborted = false
+      let finished = false
+      let emitted = false
+      let attemptIndex = 0
+      let currentKey = requestedKey
+      let currentController = null
+      const outerController = new AbortController()
+      const signal = options.signal || outerController.signal
 
-      const finishError = error => {
-        if (aborted) return
-        aborted = true
+      const emitError = error => {
+        if (aborted || finished) return
+        // 只有“还没输出任何内容”时才适合自动切换，避免已经显示的半截回复被另一模型重写。
+        if (!emitted && attemptIndex < maxFallbacks) {
+          attemptIndex += 1
+          const nextKey = fallbackKey
+          events.emit('model:fallback', {
+            from: currentKey,
+            to: nextKey,
+            error,
+            attempt: attemptIndex,
+          })
+          ctx.logger.warn(`[model-service] 模型 ${currentKey} 失败，自动切换备用模型 ${nextKey}：${error?.message || error}`)
+          startAttempt(nextKey)
+          return
+        }
+        finished = true
         callbacks.onError?.(error)
-        events.emit('model:error', { key, error })
+        events.emit('model:error', { key: currentKey, error, elapsedMs: elapsed() })
       }
 
-      try {
-        callbacks.onStart?.({ key, model: resolved.model })
-        events.emit('model:start', { key, messages })
-        Promise.resolve(
-          resolved.providerImpl.stream({
-            messages,
-            model: resolved.model,
-            provider: resolved.provider,
-            options: { ...resolved.providerImpl.defaults, ...options },
-            signal,
-            onChunk: delta => {
-              if (aborted) return
-              callbacks.onChunk?.(delta)
-            },
-            onToolCall: call => {
-              if (aborted) return
-              callbacks.onToolCall?.(call)
-            },
-            onReasoning: delta => {
-              if (aborted) return
-              callbacks.onReasoning?.(delta)
-            },
-            onDone: summary => {
-              if (aborted) return
-              aborted = true
-              callbacks.onDone?.(summary || {})
-              events.emit('model:done', { key, usage: summary?.usage || null, finishReason: summary?.reason || null })
-            },
-            onError: finishError,
-          }),
-        ).catch(finishError)
-      } catch (err) {
-        finishError(err)
+      const startAttempt = key => {
+        const resolved = registry.resolve(key)
+        if (!resolved?.providerImpl?.stream) {
+          const err = new Error(
+            registry.list().length === 0
+              ? '尚未配置模型提供商：请到「设置 → 模型」接入 Ollama（本地）或 OpenAI 兼容接口'
+              : `模型未就绪：${key || '未选择模型'}`,
+          )
+          emitError(err)
+          return
+        }
+        currentKey = key
+        emitted = false
+        currentController = new AbortController()
+        const abortCurrent = () => {
+          try {
+            currentController.abort(signal.reason)
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        if (signal.aborted) abortCurrent()
+        else signal.addEventListener('abort', abortCurrent, { once: true })
+
+        try {
+          callbacks.onStart?.({ key, model: resolved.model, attempt: attemptIndex })
+          events.emit('model:start', { key, model: resolved.model, at: startedAt, messages, attempt: attemptIndex })
+          Promise.resolve(
+            resolved.providerImpl.stream({
+              messages,
+              model: resolved.model,
+              provider: resolved.provider,
+              options: { ...resolved.providerImpl.defaults, ...options },
+              signal: currentController.signal,
+              onChunk: delta => {
+                if (aborted) return
+                emitted = true
+                callbacks.onChunk?.(delta)
+              },
+              onToolCall: call => {
+                if (aborted) return
+                emitted = true
+                callbacks.onToolCall?.(call)
+              },
+              onReasoning: delta => {
+                if (aborted) return
+                emitted = true
+                callbacks.onReasoning?.(delta)
+              },
+              onDone: summary => {
+                if (aborted || finished) return
+                finished = true
+                callbacks.onDone?.(summary || {})
+                events.emit('model:done', {
+                  key,
+                  model: resolved.model,
+                  usage: summary?.usage || null,
+                  finishReason: summary?.reason || null,
+                  elapsedMs: elapsed(),
+                  attempt: attemptIndex,
+                })
+              },
+              onError: emitError,
+            }),
+          ).catch(emitError)
+        } catch (err) {
+          emitError(err)
+        }
       }
+
+      startAttempt(requestedKey)
 
       return {
         abort() {
-          if (aborted) return
+          if (aborted || finished) return
           aborted = true
-          controller.abort()
-          events.emit('model:aborted', { key })
+          try {
+            currentController?.abort()
+            outerController.abort()
+          } catch (_) {
+            /* ignore */
+          }
+          events.emit('model:aborted', { key: currentKey })
         },
       }
     },

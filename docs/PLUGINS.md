@@ -6,7 +6,7 @@
 # 念风插件目录 · 开发定位手册
 
 > 用途：新会话/新工作区里直接按插件定位到具体文件与职责。
-> 当前共 **90 个前端内置插件 + 9 个后端插件**（另有 NapCat / 微信clawbot / QQ官方机器人渠道前端 + 图片服务等后端桥）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
+> 当前共 **93 个前端内置插件 + 8 个后端插件 + 4 个后端桥**（另有 NapCat / 微信clawbot / QQ官方机器人渠道前端 + 图片服务等后端桥）。生成时间：手机界面、运行日志、渠道即时外发与输入状态更新之后。
 
 ---
 
@@ -19,14 +19,14 @@
 | `src/runtime/compat.mjs` | 插件 ctx 兼容层：`inject/provide/emit/on/effect/registry/events/logger` | 改插件 API 约定（慎改） |
 | `src/runtime/semver.mjs` | `depends` 版本判断 | 改依赖版本规则 |
 | `scripts/sync-plugins.mjs` | 扫描 `plugins/**/index.mjs` 生成 `plugins/registry.mjs` | 增删插件后必须跑 `npm run sync-plugins` |
-| `scripts/smoke.mjs` | 前端端到端测试（241 项，会启动真实后端） | 加插件后补测试 |
-| `scripts/test-backend.mjs` | 后端 API 测试（63 项） | 改后端接口后补测试 |
+| `scripts/smoke.mjs` | 前端端到端测试（248 项，会启动真实后端） | 加插件后补测试 |
+| `scripts/test-backend.mjs` | 后端 API 测试（65 项，含空回复重试与明确报错） | 改后端接口后补测试 |
 | `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
 | `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
 | `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，25 项） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送后补测试 |
 | `scripts/test-images.mjs` | 图片文件服务测试（保存 / 读取 / 索引无 base64 / 裁剪，8 项） | 改图片存储或 /api/images 路由后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
-| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（114 项，真实 Mock function calling + DeepSeek reasoning 回传；含 chat.db 持久化检查） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
+| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（118 项，真实 Mock function calling + DeepSeek reasoning 回传 + 空回复纠正；含 chat.db 持久化检查） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
 | `scripts/test-vendors.mjs` | 厂商协议测试（30 项：DeepSeek / Anthropic / Gemini / OpenAI 参数降级） | 改厂商适配后补测试 |
 
 插件模块格式（cordis 原生）：
@@ -75,7 +75,7 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## L2 · 业务服务层（`plugins/domain/`，15 个）
+## L2 · 业务服务层（`plugins/domain/`，16 个）
 
 | 插件 | 路径 | 职责 | 对外服务 | 修改指引 |
 |---|---|---|---|---|
@@ -98,7 +98,7 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## L3 · 视觉框架层（`plugins/shell/`，9 个）
+## L3 · 视觉框架层（`plugins/shell/`，10 个）
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
@@ -111,10 +111,11 @@ export function apply(ctx) { /* ... */ }
 | `rail` | `shell/rail/` | 侧边栏容器、上中下插槽 | 侧栏结构 |
 | `left-list-panel` | `shell/left-list-panel/` | 左玻璃板、拖拽调宽、紧凑模式、圆角衰减 | 左列布局 |
 | `right-main-panel` | `shell/right-main-panel/` | 右玻璃板与视图切换 | 右列布局 |
+| `mobile-shell` | `shell/mobile-shell/` | 手机访问自动单栏布局、顶部返回栏、底部导航、全屏设置；`?mobile=1/0` 可调试 | 手机界面适配 |
 
 ---
 
-## L4 · 视觉内容层（`plugins/views/`，31 个）
+## L4 · 视觉内容层（`plugins/views/`，33 个）
 
 ### 顶栏与侧栏
 
@@ -152,9 +153,9 @@ export function apply(ctx) { /* ... */ }
 |---|---|---|---|
 | `settings-view` (V15) | `views/settings-view/` | 设置覆盖层、Esc 关闭 | 设置外壳 |
 | `settings-container` (V16) | `views/settings-container/` | 设置页注册表、分组导航、页面调度 | 新增设置页先看这里 |
-| `official-service`（独立插件，暂不可用） | `features/official-service/` | 账号页 + 官方内置模型 / 计费入口的独立归属；官方服务端未制作时标记暂不可用，禁用后相关入口全部隐藏 | 官方服务接入后在此实现登录 / 内置模型 |
 | `settings-item-general` (V17) | `views/settings-item-general/` | 通用设置、语言、调试日志 | 常规开关 |
-| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理；「使用念风内置模型」区域依赖 `official-service` 服务，插件禁用即隐藏 | 模型页 |
+| `settings-item-chat-auth` | `views/settings-item-chat-auth/` | 跨渠道读取 / 发送策略、手动授权记录与权限审计集中管理 | 渠道授权 |
+| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理、当前模型、推理等级 / temperature、失败自动切换备用模型 | 模型页 |
 | `settings-item-theme` (V19) | `views/settings-item-theme/` | 主题/背景/强调色/界面细节 + `appearance-page.addSection()` | 外观页 |
 | `settings-item-bubble` (V20) | `views/settings-item-bubble/` | 气泡切换（插入外观页） | 气泡选择 UI |
 | `settings-item-plugins` (V21) | `views/settings-item-plugins/` | **插件自检、错误/冲突标红、详情、启停** | 插件管理页 |
@@ -166,6 +167,7 @@ export function apply(ctx) { /* ... */ }
 | `settings-item-privacy` | `views/settings-item-privacy/` | 权限开关 | 隐私设置 |
 | `settings-item-code-runner` | `views/settings-item-code-runner/` | JavaScript Web Worker 沙箱（无 DOM / 无网络 / 5s 超时） | 代码片段运行 |
 | `settings-item-unimplemented` | `views/settings-item-unimplemented/` | **未实现清单** | 新增未实现项在这里登记 |
+| `settings-item-logs` | `views/settings-item-logs/` | 运行日志台：cordis 日志 + 模型阶段 / 工具 / 权限确认 / 渠道外发 / 后端请求，超时标红，支持筛选、暂停、清空、复制 | 排查模型调用与超时 |
 
 ---
 
@@ -182,12 +184,13 @@ export function apply(ctx) { /* ... */ }
 | `chat-tools` | `features/chat-tools/index.mjs` | `read_messages / chat_send / send_document / read_document` 工具实现 | 聊天工具语义 |
 | `context-builder` | `features/context-builder/index.mjs` | 工作记忆 + 渠道记忆合并、去重、token 预算截断、untrusted 包装 | 上下文格式 |
 
-## L6 · 可选扩展层（`plugins/extras/`，2 个）
+## L6 · 可选扩展层（`plugins/extras/`，3 个）
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
 | `markdown-enhancer` | `extras/markdown-enhancer/index.mjs` | Markdown 渲染服务（气泡在用） | 增强/精简 Markdown 语法 |
 | `lang-zh-cn` | `extras/lang-zh-cn/index.mjs` | 简体中文语言包（i18n 实例插件） | 复制目录改翻译表即可新增语种 |
+| `napcat-input-state` | `extras/napcat-input-state/index.mjs` | NapCat 私聊在整轮模型调用期间持续刷新“正在输入中”，参考 AstrBot 输入状态插件；群聊接口不支持 | 输入状态保活 / QQ 状态接口 |
 
 > 已移除（后续以独立扩展插件回归）：`bubble-qq`、`bubble-wechat`、`pomodoro`、`music-player`、`rss-reader`、`tts-reader`、`translator`、`channel-telegram`。
 > 重新添加时的做法：照抄同类插件结构 → `npm run sync-plugins` → 补 `scripts/smoke.mjs`。
@@ -229,6 +232,7 @@ NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通
 | `models` | `server/plugins/models.mjs` | OpenAI 兼容 / DeepSeek 官方 / Anthropic Claude / Google Gemini / Ollama 真实接入；各厂商原生工具调用与 reasoning 转换；`registerProvider()` 预留托管扩展点 | `models`；`/api/providers*`、`/api/chat` |
 | `hub` | `server/plugins/hub.mjs` | SSE 客户端管理与广播 | `hub`；`/api/events` |
 | `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管；提供 `httpApi` 路由 / 能力扩展点 | `http`、`httpApi` |
+| `runtime-logs` | `server/plugins/logs.mjs` | 后端 cordis 日志环形缓冲、SSE `log/line` 广播、`<数据目录>/logs/runtime.log` 落盘与轮转、`/api/logs/runtime` | `runtimeLogs`；`GET /api/logs/runtime` |
 | `napcat-bridge` | `channels/napcat/bridge.mjs` | NapCat / OneBot 11 连接池（forward WS + 自实现 reverse WS 服务端）、私聊 / 群聊路由、发送、发现会话、通用 `action` 透传；状态写入 `<数据目录>/napcat.json`（token AES-GCM 加密） | `napcat`；自行通过 `httpApi` 注册 `/api/napcat/*` |
 | `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
 | `qqbot-bridge` | `channels/qqbot/bridge.mjs` | QQ 官方机器人 access_token / WebSocket 网关 / Webhook 回调 / 扫码适配器；按 `(sessionType, openid)` 路由与绑定过滤；被动回复 `msg_seq` 管理；账号状态写入 `<数据目录>/qqbot.json`（AppSecret / token AES-GCM 加密） | `qqbot`；自行通过 `httpApi` 注册 `/api/qqbot/*` |

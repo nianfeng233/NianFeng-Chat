@@ -648,6 +648,9 @@ async function main() {
     }
     document.querySelector('[data-record-mode="json"]').click()
     await sleep(10)
+    // 高风险模式会有二次确认弹窗：先确认进入。
+    document.querySelector('#modalOk')?.click()
+    await sleep(20)
     const sourceEl = document.querySelector('[data-record-source]')
     sourceEl.value = '[{"role":"user","content":123}]'
     sourceEl.dispatchEvent({ type: 'input', target: sourceEl })
@@ -690,6 +693,35 @@ async function main() {
   check('首条工具消息不延迟', firstGap !== null && firstGap < 300, `${firstGap}ms`)
   check('第二条工具消息按 0.5s~2s 动态延迟', secondGap !== null && secondGap >= 450 && secondGap <= 2500, `${secondGap}ms`)
   check('两条消息按顺序写入', marks[0]?.content === '第一条消息' && marks[1]?.content === '第二条消息', JSON.stringify(marks))
+
+  // 跨渠道发送同样保留逐条延迟（此前只在当前渠道生效，导致 QQ 等渠道一次性连发多条）
+  sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossSendable: true, sensitiveConfirm: false } })
+  store.channelForConversation(conv1.id)
+  const crossMarks = []
+  const offCrossAdded = ctx.on('message:added', ({ conversationId, message } = {}) => {
+    if (conversationId === conv2.id && message?.role === 'assistant') crossMarks.push({ at: Date.now(), content: message.content })
+  })
+  const crossStarted = Date.now()
+  await tools.execute(
+    'chat_send',
+    { channel: channel2.channelId, messages: ['跨渠道第一条', '跨渠道第二条'], end: true },
+    {
+      conversationId: conv1.id,
+      channelId: channel1.channelId,
+      roleId: 'role-test',
+      userId: 'web-user',
+      sentContents: new Map(),
+      delivery: { count: 0 },
+      entry: { cancelled: false },
+    },
+  )
+  const crossFirstGap = crossMarks[0] ? crossMarks[0].at - crossStarted : null
+  const crossSecondGap = crossMarks[1] ? crossMarks[1].at - crossMarks[0].at : null
+  offCrossAdded()
+  check('跨渠道首条消息不延迟', crossFirstGap !== null && crossFirstGap < 300, `${crossFirstGap}ms`)
+  check('跨渠道第二条消息仍按动态延迟', crossSecondGap !== null && crossSecondGap >= 450 && crossSecondGap <= 2500, `${crossSecondGap}ms`)
+  sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossSendable: false, sensitiveConfirm: true } })
+  store.channelForConversation(conv1.id)
   config.set('chat.simulateTyping', false)
 
   console.log('\n⑩h 多轮上下文顺序与降级消息元数据')
@@ -799,6 +831,33 @@ async function main() {
       builtGood.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call-good'),
     JSON.stringify(builtGood.messages.map(message => message.role)),
   )
+
+  console.log('\n⑩k 模型空回复：纠正重试后明确提示，不静默等待')
+  {
+    const originalStream = modelService.stream
+    let emptyCalls = 0
+    config.set('chat.simulateTyping', false)
+    config.set('chat.emptyRetryLimit', 2)
+    modelService.stream = function () {
+      emptyCalls += 1
+      const callbacks = arguments[2] || {}
+      callbacks.onDone?.({})
+      return { abort() {} }
+    }
+    try {
+      const emptyConv = sessions.create({ name: '空回复测试', meta: { roleId: 'role-empty' } })
+      sessions.activate(emptyConv.id)
+      messages.requestSend(emptyConv.id, '测试模型空回复')
+      const notice = await waitFor(
+        () => sessions.messages(emptyConv.id).find(message => message.role === 'assistant' && String(message.content || '').includes('连续返回空回复')),
+        { timeout: 6000 },
+      )
+      check('空回复自动纠正并重试', emptyCalls === 3, `模型调用 ${emptyCalls} 次`)
+      check('重试仍为空后写入明确提示', !!notice, JSON.stringify(sessions.messages(emptyConv.id).map(message => message.content).slice(-3)))
+    } finally {
+      modelService.stream = originalStream
+    }
+  }
 
   console.log('\n⑪ 渠道数据跨 web/exe 共享持久化')
   const group = channelRegistry.groups('private')[0]

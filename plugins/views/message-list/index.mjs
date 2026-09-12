@@ -16,7 +16,7 @@ export const author = '念风内核'
 export const icon = '📜'
 export const core = true
 export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
-export const inject = ['slots', 'session-service', 'message-service', 'service-container', 'event-bus', 'context-menu', 'toast', 'config']
+export const inject = ['slots', 'session-service', 'message-service', 'service-container', 'event-bus', 'context-menu', 'modal?', 'toast', 'config']
 export const provides = [
   { name: 'message-list', type: 'singleton' },
   { name: 'bubble-styles', type: 'selectable' },
@@ -32,6 +32,7 @@ export function apply(ctx) {
   const sessions = ctx.inject('session-service')
   const events = ctx.inject('event-bus')
   const menu = ctx.inject('context-menu')
+  const modal = ctx.inject('modal?')
   const toast = ctx.inject('toast')
   const config = ctx.inject('config')
 
@@ -122,7 +123,9 @@ export function apply(ctx) {
       menu.open(e.clientX, e.clientY, [
         { label: '复制内容', action: () => copy(message.content) },
         { separator: true },
-        { label: '删除这条消息', danger: true, action: () => {
+        { label: '删除这条消息', danger: true, action: async () => {
+          const confirmed = modal ? (await modal.confirm('删除这条消息', '删除后不会进入模型上下文，且不可恢复。')).ok : true
+          if (!confirmed) return
           ctx.inject('message-service').remove(conv.id, messageId)
         } },
       ], { target: message })

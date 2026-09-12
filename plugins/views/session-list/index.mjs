@@ -40,7 +40,15 @@ export function apply(ctx) {
           <span class="search-ico">${icons.search}</span>
           <input type="text" id="convSearchInput" placeholder="${i18n.t('chat.searchConv', '搜索会话')}" autocomplete="off" />
         </div>
+        <button class="icon-btn" id="batchBtn" title="批量管理">${icons.check}</button>
         <button class="icon-btn" id="newConvBtn" title="新建会话 (Ctrl+N)">${icons.plus}</button>
+      </div>
+      <div class="batch-bar" id="batchBar" hidden>
+        <span data-batch-count>已选 0</span>
+        <button type="button" data-batch-all>全选</button>
+        <button type="button" data-batch-export>导出 JSON</button>
+        <button type="button" data-batch-delete class="danger">删除选中</button>
+        <button type="button" data-batch-exit>退出</button>
       </div>
       <div class="sync-banner" id="syncBanner" style="display:none">
         <span id="syncBannerText"></span>
@@ -57,6 +65,9 @@ export function apply(ctx) {
     const syncBannerText = container.querySelector('#syncBannerText')
     const syncRetry = container.querySelector('#syncRetry')
     const newConvBtn = container.querySelector('#newConvBtn')
+    const batchBtn = container.querySelector('#batchBtn')
+    const batchBar = container.querySelector('#batchBar')
+    const batchCount = container.querySelector('[data-batch-count]')
     const searchBox = container.querySelector('#convSearchBox')
     const searchInput = container.querySelector('#convSearchInput')
     const popover = container.querySelector('#convSearchPopover')
@@ -64,6 +75,21 @@ export function apply(ctx) {
     const paneEl = container.closest('.list-pane')
 
     let keyword = ''
+    let batchMode = false
+    const batchSelected = new Set()
+
+    const syncBatchBar = () => {
+      if (!batchBar) return
+      batchBar.hidden = !batchMode
+      batchBtn?.classList.toggle('active', batchMode)
+      if (batchCount) batchCount.textContent = `已选 ${batchSelected.size}`
+    }
+    const exitBatch = () => {
+      batchMode = false
+      batchSelected.clear()
+      syncBatchBar()
+      render()
+    }
 
     const syncBannerState = () => {
       const status = sessions.status?.() || { source: 'local' }
@@ -92,8 +118,10 @@ export function apply(ctx) {
         .map(conv => {
           // 角色头像统一走 identity：自定义图片或首字色块，避免每个视图各写一份。
           const avatar = characterAvatarHtml(conv)
+          const checked = batchSelected.has(conv.id)
           return `
-          <div class="conv-item ${conv.id === activeId ? 'active' : ''}" data-id="${conv.id}">
+          <div class="conv-item ${conv.id === activeId && !batchMode ? 'active' : ''} ${checked ? 'batch-checked' : ''}" data-id="${conv.id}">
+            ${batchMode ? `<span class="conv-check">${checked ? icons.check : ''}</span>` : ''}
             ${avatar}
             <div class="conv-main">
               <div class="conv-top">
@@ -102,7 +130,7 @@ export function apply(ctx) {
               </div>
               <div class="conv-msg">${escapeHtml(conv.preview || '')}</div>
             </div>
-            <button class="conv-del" data-conv-delete="${conv.id}" title="删除会话">${icons.trash}</button>
+            ${batchMode ? '' : `<button class="conv-del" data-conv-delete="${conv.id}" title="删除会话">${icons.trash}</button>`}
           </div>`
         })
         .join('')
@@ -124,9 +152,15 @@ export function apply(ctx) {
         return
       }
       const item = e.target.closest('.conv-item')
-      if (item) {
-        sessions.toggle(item.dataset.id) // 再次点击已选中会话可取消
+      if (!item) return
+      if (batchMode) {
+        if (batchSelected.has(item.dataset.id)) batchSelected.delete(item.dataset.id)
+        else batchSelected.add(item.dataset.id)
+        syncBatchBar()
+        render()
+        return
       }
+      sessions.toggle(item.dataset.id) // 再次点击已选中会话可取消
     }
     const onContextMenu = e => {
       const item = e.target.closest('.conv-item')
@@ -148,6 +182,48 @@ export function apply(ctx) {
     listEl.addEventListener('click', onClick)
     listEl.addEventListener('contextmenu', onContextMenu)
     newConvBtn.addEventListener('click', onCreateShortcut)
+
+    const onToggleBatch = () => {
+      batchMode = !batchMode
+      batchSelected.clear()
+      syncBatchBar()
+      render()
+    }
+    batchBtn?.addEventListener('click', onToggleBatch)
+    const onBatchBarClick = async event => {
+      const button = event.target.closest('button')
+      if (!button) return
+      if (button.dataset.batchAll !== undefined) {
+        const list = sessions.list().filter(conv => !conv.meta?.hiddenFromSessionList)
+        const allSelected = list.every(conv => batchSelected.has(conv.id))
+        batchSelected.clear()
+        if (!allSelected) for (const conv of list) batchSelected.add(conv.id)
+        syncBatchBar()
+        render()
+      } else if (button.dataset.batchExport !== undefined) {
+        if (!batchSelected.size) return toast.info('请先选择会话')
+        const exportService = ctx.registry.get('export-service')
+        if (!exportService?.exportMany) return toast.warn('导出服务未启用')
+        exportService.exportMany([...batchSelected], 'json')
+      } else if (button.dataset.batchDelete !== undefined) {
+        if (!batchSelected.size) return toast.info('请先选择会话')
+        const confirmed = await modal.open({
+          title: `删除选中的 ${batchSelected.size} 个会话`,
+          description: '会话与消息将被删除，此操作不可撤销。',
+          confirmText: '删除',
+        })
+        if (!confirmed?.ok) return
+        let count = 0
+        for (const id of [...batchSelected]) {
+          if (sessions.remove(id)) count += 1
+        }
+        toast.warn(`已删除 ${count} 个会话`)
+        exitBatch()
+      } else if (button.dataset.batchExit !== undefined) {
+        exitBatch()
+      }
+    }
+    batchBar?.addEventListener('click', onBatchBarClick)
     syncRetry.addEventListener('click', async () => {
       syncRetry.disabled = true
       syncRetry.textContent = '同步中…'
@@ -269,6 +345,8 @@ export function apply(ctx) {
       listEl.removeEventListener('click', onClick)
       listEl.removeEventListener('contextmenu', onContextMenu)
       newConvBtn.removeEventListener('click', onCreateShortcut)
+      batchBtn?.removeEventListener('click', onToggleBatch)
+      batchBar?.removeEventListener('click', onBatchBarClick)
       searchInput.removeEventListener('input', onSearch)
       document.removeEventListener('click', onDocClick)
       document.removeEventListener('mousedown', onDocDown)

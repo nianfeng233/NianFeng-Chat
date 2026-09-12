@@ -5,7 +5,7 @@
 -->
 # 插件清单与实现状态
 
-> 共 **90 个前端内置插件 + 9 个后端插件**（核心 66 · 可选 22）。NapCat / 微信clawbot / QQ官方机器人 渠道插件与 image-service 同时包含前端插件与 Node 后端桥。
+> 共 **93 个前端内置插件 + 8 个后端插件 + 4 个后端桥**（核心 68 · 可选 25）。NapCat / 微信clawbot / QQ官方机器人 渠道插件与 image-service 同时包含前端插件与 Node 后端桥。
 > 详细职责、文件定位与修改指引见 **[`docs/PLUGINS.md`](PLUGINS.md)**。
 
 ---
@@ -16,14 +16,14 @@
 |---|---|---|---|
 | L0 内核 | `plugins/kernel/` | 5 | event-bus / plugin-loader / dependency-resolver / lifecycle / service-container |
 | L1 基础服务 | `plugins/foundation/` | 15 | storage / config / logger / i18n / theme-tokens / slots / 各种宿主 / shortcuts / notification / error-reporter / **backend-client** |
-| L2 业务服务 | `plugins/domain/` | 15 | session / message / model-registry / model-service / view-router / channel-registry / plugin-manager / search / export / **chat-store / document-service / chat-permissions / chat-queue / tool-registry / image-service** |
+| L2 业务服务 | `plugins/domain/` | 16 | session / message / model-registry / model-service / view-router / channel-registry / plugin-manager / search / export / **chat-store / document-service / chat-permissions / chat-queue / tool-registry / image-service / user-identity** |
 | L2.5 渠道插件 | `plugins/channels/` | 3 | **NapCat**（OneBot 11：私聊 / 群聊 / 隐私、多 QQ 连接复用与群聊规则） / **微信clawbot** / **QQ官方机器人** |
-| L3 视觉框架 | `plugins/shell/` | 9 | app-shell / bg-provider / bg-aurora / bg-solid / bg-image / titlebar / rail / left-list-panel / right-main-panel |
-| L4 视觉内容 | `plugins/views/` | 31 | 三视图 + 顶栏/侧栏部件 + 全局搜索 + 设置项（V1~V24 全覆盖） |
-| L5 业务功能 | `plugins/features/` | 8 | chat-flow / channel-base / **model-adapter-backend / chat-tools / context-builder** / character-editor / **chat-notify** / official-service |
-| L6 可选扩展 | `plugins/extras/` | 2 | markdown-enhancer / **lang-zh-cn（语言包示例）** |
-| 后端 | `server/plugins/` | 9 | settings / sessions / models / hub / instance / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/napcat/bridge.mjs`、`plugins/channels/wechat-clawbot/bridge.mjs`、`plugins/channels/qqbot/bridge.mjs` 与 `plugins/domain/image-service/bridge.mjs` 后端桥 |
-| **合计** | | **99** | 前端 90 + 后端 9（含 NapCat / Clawbot / QQ / 图片服务前后端、用户身份、插件健康守卫） |
+| L3 视觉框架 | `plugins/shell/` | 10 | app-shell / bg-provider / bg-aurora / bg-solid / bg-image / titlebar / rail / left-list-panel / right-main-panel / **mobile-shell（手机单栏界面）** |
+| L4 视觉内容 | `plugins/views/` | 33 | 三视图 + 顶栏/侧栏部件 + 全局搜索 + 设置项（含**运行日志页 / 渠道授权页**） |
+| L5 业务功能 | `plugins/features/` | 8 | chat-flow / channel-base / **model-adapter-backend / chat-tools / context-builder** / character-editor / **chat-notify** / **plugin-health-guard** |
+| L6 可选扩展 | `plugins/extras/` | 3 | markdown-enhancer / **lang-zh-cn（语言包示例）** / **napcat-input-state（NapCat 私聊输入状态保活）** |
+| 后端 | `server/plugins/` | 8 | settings / sessions / models / hub / instance / runtime-logs / **plugin-registry（外部插件目录）** / http（+ `server/index.mjs` 引导）；另有 `plugins/channels/napcat/bridge.mjs`、`plugins/channels/wechat-clawbot/bridge.mjs`、`plugins/channels/qqbot/bridge.mjs` 与 `plugins/domain/image-service/bridge.mjs` 后端桥 |
+| **合计** | | **101**（另 4 个后端桥） | 前端 93 + 后端 8（含 NapCat / Clawbot / QQ / 图片服务前后端、用户身份、插件健康守卫、手机界面与运行日志） |
 
 ---
 

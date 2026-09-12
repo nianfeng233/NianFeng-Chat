@@ -255,7 +255,7 @@ export function apply(ctx) {
           }
           ctx.emit('backend:event', { event: type, data })
         }
-        for (const type of ['hello', 'channel:message', 'clawbot:message', 'clawbot:status', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'sessions/changed', 'settings/updated']) {
+        for (const type of ['hello', 'channel:message', 'clawbot:message', 'clawbot:status', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'sessions/changed', 'settings/updated', 'log/line']) {
           eventSource.addEventListener(type, forward(type))
         }
         eventSource.onerror = () => {
