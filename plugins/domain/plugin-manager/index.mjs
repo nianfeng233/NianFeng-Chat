@@ -185,6 +185,7 @@ export function apply(ctx) {
         dir: record.dir,
         path: record.path,
         depends: meta.depends || {},
+        optionalDepends: meta.optionalDepends || {},
         inject: meta.inject || [],
         provides: meta.provides || [],
         slots: meta.slots || [],

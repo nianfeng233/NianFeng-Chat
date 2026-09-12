@@ -151,17 +151,39 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
       } catch (_) {
         /* ignore */
       }
+      // 先保存 server 引用：插件卸载后 http 服务会被一起释放，不能再从 ctx 上取。
+      let httpServer = null
       try {
-        ctx.http.server.closeIdleConnections?.()
-        ctx.http.server.closeAllConnections?.()
+        httpServer = ctx.http?.server || null
       } catch (_) {
-        /* 旧版 Node 没有这两个方法 */
+        httpServer = null
       }
-      await new Promise(resolve => ctx.http.server.close(resolve))
+      // 先卸载插件，让渠道 bridge 有机会关闭 reverse WebSocket / 定时器等资源，
+      // 否则 server.close() 会被仍挂着的 upgrade 连接卡住。
       try {
-        await ctx.root.fiber?.dispose?.()
+        await Promise.race([
+          ctx.root.fiber?.dispose?.(),
+          new Promise(resolve => setTimeout(resolve, 2000)),
+        ])
       } catch (_) {
         /* ignore */
+      }
+      if (httpServer) {
+        try {
+          httpServer.closeIdleConnections?.()
+          httpServer.closeAllConnections?.()
+        } catch (_) {
+          /* 旧版 Node 没有这两个方法 */
+        }
+        await Promise.race([
+          new Promise(resolve => httpServer.close(resolve)),
+          new Promise(resolve => setTimeout(resolve, 2500)),
+        ])
+        try {
+          httpServer.closeAllConnections?.()
+        } catch (_) {
+          /* ignore */
+        }
       }
     },
   }

@@ -126,6 +126,7 @@ export function apply(ctx, config = {}) {
         unavailable: mod.unavailable === true,
         unavailableReason: mod.unavailableReason || '',
         depends: mod.depends || {},
+        optionalDepends: mod.optionalDepends || mod.softDepends || {},
         inject: Array.isArray(mod.inject) ? mod.inject : mod.inject && typeof mod.inject === 'object' ? Object.keys(mod.inject) : [],
         provides: mod.provides || [],
         permissions: mod.permissions || [],

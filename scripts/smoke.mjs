@@ -162,6 +162,50 @@ async function main() {
     typeof smokeManager.registerSettings === 'function' && typeof smokeManager.openSettings === 'function' && smokeManager.hasSettings('wechat-clawbot'),
     typeof smokeManager.registerSettings,
   )
+  check('NapCat 插件设置面板已注册', smokeManager.hasSettings('napcat'), smokeManager.hasSettings('napcat'))
+
+  const napcatService = ctx.inject('napcat-channel')
+  check('NapCat 扩展服务 napcat-channel 可用', typeof napcatService?.decide === 'function' && typeof napcatService?.listInstances === 'function')
+  const napcatRulesBase = { blacklist: [], requireAt: true, replyProbability: 50, quote: true, mention: true, silentContext: true }
+  const napcatDecisionChannel = rules => ({ meta: { category: 'group', rules: { ...napcatRulesBase, ...rules } } })
+  check(
+    'NapCat 群聊规则：黑名单优先忽略',
+    napcatService.decide(napcatDecisionChannel({ blacklist: ['42'] }), { senderId: '42', messageType: 'group' }).ignore === true,
+  )
+  check(
+    'NapCat 群聊规则：开启艾特时只有 @ 机器人才触发',
+    napcatService.decide(napcatDecisionChannel({ requireAt: true }), { senderId: '42', messageType: 'group', mentionedSelf: false }).trigger === false &&
+      napcatService.decide(napcatDecisionChannel({ requireAt: true }), { senderId: '42', messageType: 'group', mentionedSelf: true }).trigger === true,
+  )
+  check(
+    'NapCat 群聊规则：关闭艾特后回复概率生效',
+    napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 100 }), { senderId: '42', messageType: 'group' }).trigger === true &&
+      napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 0 }), { senderId: '42', messageType: 'group' }).trigger === false,
+  )
+  check(
+    'NapCat 群聊规则：黑名单优先于白名单',
+    napcatService.decide(napcatDecisionChannel({ blacklist: ['42'], whitelist: ['42'], whitelistForAt: true }), {
+      senderId: '42',
+      messageType: 'group',
+      mentionedSelf: true,
+    }).ignore === true,
+  )
+  check(
+    'NapCat 群聊规则：艾特回复可应用白名单',
+    napcatService.decide(napcatDecisionChannel({ whitelistForAt: true, whitelist: ['42'] }), { senderId: '42', messageType: 'group', mentionedSelf: true }).trigger === true &&
+      napcatService.decide(napcatDecisionChannel({ whitelistForAt: true, whitelist: ['42'] }), { senderId: '99', messageType: 'group', mentionedSelf: true }).trigger === false,
+  )
+  check(
+    'NapCat 群聊规则：概率回复可应用白名单',
+    napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 100, whitelistForProbability: true, whitelist: ['42'] }), {
+      senderId: '42',
+      messageType: 'group',
+    }).trigger === true &&
+      napcatService.decide(napcatDecisionChannel({ requireAt: false, replyProbability: 100, whitelistForProbability: true, whitelist: ['42'] }), {
+        senderId: '99',
+        messageType: 'group',
+      }).trigger === false,
+  )
 
   const smokeSessions = ctx.inject('session-service')
   const hiddenConversation = smokeSessions.create({ name: '隐藏渠道会话冒烟', meta: { hiddenFromSessionList: true } })
@@ -266,6 +310,62 @@ async function main() {
       versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
     `${versionRecord?.status} · ${(versionIssues.find(issue => issue.id === 'smoke-version')?.message || '')}`,
   )
+
+  // 可选依赖：缺失时插件照常运行，只在自检里标黄；必须依赖缺失仍然标红。
+  const softDir = join(externalRoot, 'views', 'smoke-soft')
+  const hardDir = join(externalRoot, 'views', 'smoke-hard')
+  await mkdir(softDir, { recursive: true })
+  await mkdir(hardDir, { recursive: true })
+  const softFile = join(softDir, 'index.mjs')
+  const hardFile = join(hardDir, 'index.mjs')
+  await writeFile(
+    softFile,
+    [
+      "export const name = 'smoke-soft'",
+      "export const version = '1.0.0'",
+      "export const displayName = '可选依赖插件'",
+      "export const optionalDepends = { 'smoke-soft-missing': '^1.0.0' }",
+      'export function apply() {}',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  await writeFile(
+    hardFile,
+    [
+      "export const name = 'smoke-hard'",
+      "export const version = '1.0.0'",
+      "export const displayName = '缺失必须依赖插件'",
+      "export const depends = { 'smoke-hard-missing': '^1.0.0' }",
+      'export function apply() {}',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  const depApp = new App({ baseUrl: new URL('../', import.meta.url) })
+  await depApp.loadAll(
+    [
+      { id: 'smoke-soft', version: '1.0.0', displayName: '可选依赖插件', path: pathToFileURL(softFile).href, external: true },
+      { id: 'smoke-hard', version: '1.0.0', displayName: '缺失必须依赖插件', path: pathToFileURL(hardFile).href, external: true },
+    ],
+    {},
+  )
+  const softRecord = depApp.records.get('smoke-soft')
+  const hardRecord = depApp.records.get('smoke-hard')
+  const depIssues = depApp.selfCheck()
+  check(
+    '缺少可选依赖时插件仍激活并标黄',
+    softRecord?.status === 'active' &&
+      depIssues.some(issue => issue.id === 'smoke-soft' && issue.severity === 'warning' && issue.message.includes('可选依赖')),
+    `${softRecord?.status} · ${(depIssues.find(issue => issue.id === 'smoke-soft')?.message || '')}`,
+  )
+  check(
+    '缺少必须依赖时插件未激活并标红',
+    hardRecord?.status === 'inactive' &&
+      depIssues.some(issue => issue.id === 'smoke-hard' && issue.severity === 'error' && issue.message.includes('缺少依赖')),
+    `${hardRecord?.status} · ${(depIssues.find(issue => issue.id === 'smoke-hard')?.message || '')}`,
+  )
+
   await fetch(`${backend.url}/api/plugins/dirs`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -392,17 +492,22 @@ async function main() {
   const registeredTypes = channelRegistry.typeList().map(t => t.id)
   check('未实现渠道路径被明确标注 discord/email', plannedTypes.includes('discord') && plannedTypes.includes('email') && !plannedTypes.includes('wechat'), plannedTypes.join(','))
   check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot'), registeredTypes.join(','))
+  const knownChannelTypes = new Set(['wechat-clawbot', 'qqbot', 'napcat'])
   check(
     'QQ官方机器人 渠道类型已由插件注册',
-    registeredTypes.includes('qqbot') && registeredTypes.every(id => id === 'wechat-clawbot' || id === 'qqbot'),
+    registeredTypes.includes('qqbot') && registeredTypes.every(id => knownChannelTypes.has(id)),
     registeredTypes.join(','),
   )
+  check('NapCat 渠道类型已由插件注册', registeredTypes.includes('napcat'), registeredTypes.join(','))
   const clawbotType = channelRegistry.type('wechat-clawbot')
   check('微信clawbot 提供自定义添加窗口', typeof clawbotType?.create === 'function')
   check('微信clawbot 提供自定义渠道详情', typeof clawbotType?.detail === 'function')
   const qqbotType = channelRegistry.type('qqbot')
   check('QQ官方机器人 提供自定义添加窗口', typeof qqbotType?.create === 'function')
   check('QQ官方机器人 提供自定义渠道详情', typeof qqbotType?.detail === 'function')
+  const napcatType = channelRegistry.type('napcat')
+  check('NapCat 提供自定义添加窗口', typeof napcatType?.create === 'function')
+  check('NapCat 提供自定义渠道详情', typeof napcatType?.detail === 'function')
 
   // 角色下拉框回归：chat-store 会把普通会话登记为 nova 网页渠道，它们仍是角色；
   // 其它渠道（wechat-clawbot / qqbot）的聊天记录容器不能被当成角色列出来。
@@ -449,6 +554,52 @@ async function main() {
       !wxRoleOptions.text.includes('其它渠道记录'),
     wxRoleOptions.text,
   )
+
+  // NapCat 创建窗口：群聊规则面板 / 目标群号 / 角色下拉过滤。
+  napcatType.create({ tab: 'group' })
+  await sleep(50)
+  const ncMaskList = Array.from(document.body.querySelectorAll('.nc-mask'))
+  const ncCreateDialog = ncMaskList[ncMaskList.length - 1]
+  const ncRoleText = Array.from(ncCreateDialog?.querySelector('[data-nc-role]')?.querySelectorAll('option') || [])
+    .map(option => option.textContent || '')
+    .join('|')
+  check(
+    'NapCat 角色下拉只列真正的角色',
+    ncRoleText.includes('冒烟角色') && ncRoleText.includes('Nova角色冒烟') && !ncRoleText.includes('其它渠道记录'),
+    ncRoleText,
+  )
+  check('NapCat 群聊分类显示群聊规则面板', ncCreateDialog?.querySelector('[data-nc-group-rules]')?.hidden === false)
+  check(
+    'NapCat 群聊目标标签显示“目标群号”',
+    String(ncCreateDialog?.querySelector('[data-nc-target-label]')?.textContent || '').includes('群号'),
+    String(ncCreateDialog?.querySelector('[data-nc-target-label]')?.textContent || ''),
+  )
+  check(
+    'NapCat 权限设置包含 6 项且复选框结构完整',
+    ncCreateDialog?.querySelectorAll('[data-nc-perm]')?.length === 6,
+    String(ncCreateDialog?.querySelectorAll('[data-nc-perm]')?.length),
+  )
+  const ncModeSelect = ncCreateDialog?.querySelector('[data-nc-mode]')
+  if (ncModeSelect) {
+    ncModeSelect.value = 'reverse'
+    ncModeSelect.dispatchEvent({ type: 'change' })
+  }
+  check('NapCat Reverse 模式显示反向主机 / 端口', ncCreateDialog?.querySelector('[data-nc-reverse-row]')?.hidden === false)
+  const ncRequireAt = ncCreateDialog?.querySelector('[data-nc-require-at]')
+  const ncProbability = ncCreateDialog?.querySelector('[data-nc-probability]')
+  const ncProbabilityNumber = ncCreateDialog?.querySelector('[data-nc-probability-number]')
+  if (ncRequireAt && ncProbability) {
+    ncRequireAt.checked = false
+    ncRequireAt.dispatchEvent({ type: 'change' })
+  }
+  check('NapCat 关闭艾特限制后回复概率输入可用', ncProbability?.disabled === false)
+  if (ncProbabilityNumber) {
+    ncProbabilityNumber.value = '37'
+    ncProbabilityNumber.dispatchEvent({ type: 'input' })
+  }
+  check('NapCat 回复概率支持手动输入数值', String(ncProbabilityNumber?.value || '') === '37' && String(ncProbability?.value || '') === '37')
+  ncCreateDialog?.querySelector('[data-nc-cancel]')?.click()
+  await sleep(20)
 
   // 保存渠道只负责创建并提示去详情「接入」，不应自动弹出二维码窗口。
   qqbotType.create({ tab: 'private' })

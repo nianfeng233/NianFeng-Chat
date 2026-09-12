@@ -6,7 +6,7 @@
 # 念风插件目录 · 开发定位手册
 
 > 用途：新会话/新工作区里直接按插件定位到具体文件与职责。
-> 当前共 **89 个前端内置插件 + 9 个后端插件**（另有微信clawbot / QQ官方机器人渠道前端 + 图片服务等后端桥）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
+> 当前共 **90 个前端内置插件 + 9 个后端插件**（另有 NapCat / 微信clawbot / QQ官方机器人渠道前端 + 图片服务等后端桥）。生成时间：聊天链路一期（工具调用 / 工作记忆 / 权限确认）之后。
 
 ---
 
@@ -19,13 +19,14 @@
 | `src/runtime/compat.mjs` | 插件 ctx 兼容层：`inject/provide/emit/on/effect/registry/events/logger` | 改插件 API 约定（慎改） |
 | `src/runtime/semver.mjs` | `depends` 版本判断 | 改依赖版本规则 |
 | `scripts/sync-plugins.mjs` | 扫描 `plugins/**/index.mjs` 生成 `plugins/registry.mjs` | 增删插件后必须跑 `npm run sync-plugins` |
-| `scripts/smoke.mjs` | 前端端到端测试（221 项，会启动真实后端） | 加插件后补测试 |
+| `scripts/smoke.mjs` | 前端端到端测试（241 项，会启动真实后端） | 加插件后补测试 |
 | `scripts/test-backend.mjs` | 后端 API 测试（63 项） | 改后端接口后补测试 |
 | `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
 | `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
+| `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，25 项） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送后补测试 |
 | `scripts/test-images.mjs` | 图片文件服务测试（保存 / 读取 / 索引无 base64 / 裁剪，8 项） | 改图片存储或 /api/images 路由后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
-| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（113 项，真实 Mock function calling + DeepSeek reasoning 回传） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
+| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（114 项，真实 Mock function calling + DeepSeek reasoning 回传；含 chat.db 持久化检查） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
 | `scripts/test-vendors.mjs` | 厂商协议测试（30 项：DeepSeek / Anthropic / Gemini / OpenAI 参数降级） | 改厂商适配后补测试 |
 
 插件模块格式（cordis 原生）：
@@ -193,10 +194,11 @@ export function apply(ctx) { /* ... */ }
 
 ---
 
-## 渠道插件（`plugins/channels/`，2 个）
+## 渠道插件（`plugins/channels/`，3 个）
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
+| `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 轮群上下文、发现会话 | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md` |
 | `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
 | `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` 自动绑定、WebSocket / Webhook、**仅私聊**、图片收发、被动回复与聊天记录 | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md` |
 
@@ -210,18 +212,24 @@ QQ 官方机器人按事件类型区分会话：`C2C_MESSAGE_CREATE`（私聊）
 入站消息同样写入 `qqbot:<channelId>` 记录并以 `skipUserAppend` 触发 `chat-flow`，
 整轮结束后作为被动消息（带 `msg_id` + `msg_seq`）发回 QQ。
 
+NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通过 `instanceId` 复用；
+桥按 `instanceId + targetType + targetId` 路由到渠道。群聊消息无论是否触发模型，
+默认都会以 `skipUserAppend` 写入本渠道记录，`context-builder` 对
+`contextMode=channel-only` 的渠道只取本群最近 20 轮可见消息，不混入其它私聊工作记忆。
+
 ---
-## 后端插件（`server/plugins/`，8 个 + 渠道桥 1 个）
+## 后端插件（`server/plugins/`，8 个 + 渠道桥 4 个）
 
 | 插件 | 路径 | 职责 | 对外服务 / 接口 |
 |---|---|---|---|
 | `plugin-registry` | `server/plugins/plugin-registry.mjs` | 内置 + 外部插件目录扫描、清单合并、`/user-plugins` 文件服务、目录选择与删除 | `pluginRegistry`；`/api/plugins*`、`/user-plugins/*` |
 | `instance` | `server/plugins/instance.mjs` + `server/data-dir.mjs` | 实例数据目录（默认 `user_data/`，支持切换 / 迁移 / 恢复默认） | `instance`；`GET/PUT /api/data-dir` |
 | `settings` | `server/plugins/settings.mjs` | `user_data/config.json` 读写、深合并、凭据脱敏 | `settings`；`GET/PUT /api/config` |
-| `sessions` | `server/plugins/sessions.mjs` | `user_data/sessions.json` 持久化、防抖落盘、渠道会话复用 | `sessions`；`/api/sessions*` |
+| `sessions` | `server/plugins/sessions.mjs` | `user_data/sessions.json` 会话元数据 + `user_data/chat.db` 聊天原文（内置 SQLite；旧数据自动迁移、无 SQLite 时回退 JSON）、渠道会话复用 | `sessions`；`/api/sessions*` |
 | `models` | `server/plugins/models.mjs` | OpenAI 兼容 / DeepSeek 官方 / Anthropic Claude / Google Gemini / Ollama 真实接入；各厂商原生工具调用与 reasoning 转换；`registerProvider()` 预留托管扩展点 | `models`；`/api/providers*`、`/api/chat` |
 | `hub` | `server/plugins/hub.mjs` | SSE 客户端管理与广播 | `hub`；`/api/events` |
 | `http` | `server/plugins/http.mjs` | 手写路由 REST + SSE + 可选静态托管；提供 `httpApi` 路由 / 能力扩展点 | `http`、`httpApi` |
+| `napcat-bridge` | `channels/napcat/bridge.mjs` | NapCat / OneBot 11 连接池（forward WS + 自实现 reverse WS 服务端）、私聊 / 群聊路由、发送、发现会话、通用 `action` 透传；状态写入 `<数据目录>/napcat.json`（token AES-GCM 加密） | `napcat`；自行通过 `httpApi` 注册 `/api/napcat/*` |
 | `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
 | `qqbot-bridge` | `channels/qqbot/bridge.mjs` | QQ 官方机器人 access_token / WebSocket 网关 / Webhook 回调 / 扫码适配器；按 `(sessionType, openid)` 路由与绑定过滤；被动回复 `msg_seq` 管理；账号状态写入 `<数据目录>/qqbot.json`（AppSecret / token AES-GCM 加密） | `qqbot`；自行通过 `httpApi` 注册 `/api/qqbot/*` |
 | `image-service-bridge` | `domain/image-service/bridge.mjs` | 图片文件存储与 `/api/images` / `/api/images/:id` / `/api/images/prune` 路由；索引写入 `<数据目录>/images.json`（不含 base64） | `imageStore`；通过 `httpApi` 注册 `/api/images*` |

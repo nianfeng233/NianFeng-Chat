@@ -413,9 +413,10 @@ export function apply(ctx, config = {}) {
 
   /* ---------------- 会话 ---------------- */
 
-  route('GET', '/api/sessions', async (req, res) => {
+  route('GET', '/api/sessions', async (req, res, params, url) => {
     await sessions.ready()
-    sendJson(res, 200, { conversations: sessions.list() })
+    const compact = url?.searchParams?.get('compact') === '1'
+    sendJson(res, 200, { conversations: compact && typeof sessions.listCompact === 'function' ? sessions.listCompact() : sessions.list(), compact })
   })
 
   route('POST', '/api/sessions', async (req, res) => {
@@ -453,6 +454,30 @@ export function apply(ctx, config = {}) {
     const message = sessions.updateMessage(params.id, params.messageId, body)
     if (!message) return sendError(res, 404, '消息不存在')
     sendJson(res, 200, message)
+  })
+
+  /** 整段替换消息（聊天记录 JSON 编辑器保存时使用） */
+  route('PUT', '/api/sessions/:id/messages', async (req, res, params) => {
+    await sessions.ready()
+    const body = await readBody(req)
+    const list = Array.isArray(body?.messages) ? body.messages : body
+    const conv = sessions.replaceMessages(params.id, Array.isArray(list) ? list : [])
+    if (!conv) return sendError(res, 404, '会话不存在')
+    sendJson(res, 200, { ok: true, count: conv.messages.length })
+  })
+
+  route('DELETE', '/api/sessions/:id/messages', async (req, res, params) => {
+    await sessions.ready()
+    const conv = sessions.clearMessages(params.id)
+    if (!conv) return sendError(res, 404, '会话不存在')
+    sendJson(res, 200, { ok: true })
+  })
+
+  route('DELETE', '/api/sessions/:id/messages/:messageId', async (req, res, params) => {
+    await sessions.ready()
+    const ok = sessions.removeMessage(params.id, params.messageId)
+    if (!ok) return sendError(res, 404, '消息不存在')
+    sendJson(res, 200, { ok: true })
   })
 
   /* ---------------- 其他真实能力 ---------------- */

@@ -198,6 +198,9 @@ export function apply(ctx) {
       participatesWorkingMemory: conv.meta?.participatesWorkingMemory !== false,
       crossReadable: conv.meta?.crossReadable === true,
       crossSendable: conv.meta?.crossSendable === true,
+      // 渠道插件可以按渠道指定上下文策略：group-only / 自定义轮数（例如 NapCat 群聊 20 轮）。
+      contextMode: String(conv.meta?.contextMode || ''),
+      contextRounds: Math.max(0, Number(conv.meta?.contextRounds) || 0),
       agentTurns: data.channels[channelId]?.agentTurns || [],
       seq,
       lastAt: data.channels[channelId]?.lastAt || list.at(-1)?.timestamp || null,

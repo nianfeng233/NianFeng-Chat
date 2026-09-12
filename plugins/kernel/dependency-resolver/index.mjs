@@ -38,8 +38,10 @@ export function apply(ctx) {
         status: record.status,
         reason: record.reason,
         depends: Object.keys(record.manifest.depends || {}),
+        optionalDepends: Object.keys(record.manifest.optionalDepends || {}),
         injectedBy: loader.list().filter(r => (r.manifest.inject || []).includes(id)).map(r => r.id),
         edges: [...(graph.edges.get(id) || [])],
+        optionalEdges: [...(graph.optionalEdges?.get(id) || [])],
       }
     },
     /** 加载顺序批次（与文档 §9.1 对照用） */

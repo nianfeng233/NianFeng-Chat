@@ -54,7 +54,7 @@
 |---|---|
 | `instance` | 实例数据目录（默认 `user_data/`，支持切换 / 迁移 / 恢复默认） |
 | `settings` | `user_data/config.json` 读写、脱敏、深合并 |
-| `sessions` | `user_data/sessions.json` 持久化、防抖落盘、渠道会话复用 |
+| `sessions` | `user_data/sessions.json` 会话元数据 + `user_data/chat.db`（内置 SQLite）聊天原文、渠道会话复用 |
 | `models` | 提供商适配器（OpenAI 兼容 / DeepSeek 官方 / Anthropic / Gemini / Ollama），真实 `listModels / test / stream`、各厂商 tools / tool_calls / reasoning 转换、参数降级重试、提供商 / 模型 CRUD、模型参数与代理 |
 | `hub` | SSE 客户端管理与广播 |
 | `http` | 手写路由的 REST + SSE API，可选静态托管（单端口模式） |

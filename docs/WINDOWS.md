@@ -63,7 +63,8 @@ powershell -ExecutionPolicy Bypass -File scripts\create-shortcut.ps1
 * 数据目录：项目下的 `user_data\`（默认，可切换）
 * 外部插件：默认读取数据目录下的 `user_data\plugins\`，也可在「设置 → 插件 → 插件目录」指定任意目录；放进插件文件夹后重新扫描即可，无需重新生成 registry.mjs
   * `config.json` — 配置与模型凭据（API Key）
-  * `sessions.json` — 全部会话与消息
+  * `sessions.json` — 会话元数据（名称 / 预览 / 渠道绑定）
+  * `chat.db` — 全部聊天记录原文（内置 SQLite；旧版 sessions.json 首次启动会自动迁移）
 
 关闭黑窗口（或按 Ctrl+C）即退出念风；所有数据已落盘，下次启动会恢复。
 

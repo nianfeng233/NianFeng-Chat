@@ -19,7 +19,7 @@ import { satisfies } from './semver.mjs'
 import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 
-export const VERSION = '0.42.0'
+export const VERSION = '1.0.0'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -347,6 +347,7 @@ export class App {
           enabled: entry.enabled !== false,
           icon: entry.icon || '',
           depends: entry.depends || {},
+          optionalDepends: normalizeDepends(entry.optionalDepends || entry.softDepends),
           provides: entry.provides || [],
           slots: [],
         },
@@ -538,10 +539,10 @@ export class App {
     return false
   }
 
-  /** 只检查插件 depends 声明（不含 cordis inject 服务），用于加载前的版本/依赖判定 */
-  dependsIssues(record) {
+  /** 检查一组插件名依赖（不含 cordis inject 服务），用于加载前的版本/依赖判定 */
+  dependsIssuesFor(record, dependencies = {}) {
     const missing = []
-    for (const [dep, range] of Object.entries(record.manifest.depends || {})) {
+    for (const [dep, range] of Object.entries(dependencies || {})) {
       const target = this.records.get(dep)
       if (!target) missing.push(`${dep}${range ? '@' + range : ''}`)
       else if (range && !satisfies(target.manifest.version, range)) missing.push(`${dep}@${range}(实际 ${target.manifest.version})`)
@@ -549,6 +550,20 @@ export class App {
       else if (target.status === STATUS.INACTIVE || target.status === STATUS.DISABLED) missing.push(`${dep}(未激活)`)
     }
     return [...new Set(missing)]
+  }
+
+  /** 只检查插件必须 depends 声明（不含 cordis inject 服务） */
+  dependsIssues(record) {
+    return this.dependsIssuesFor(record, record.manifest.depends || {})
+  }
+
+  /**
+   * 可选插件依赖（manifest.optionalDepends / softDepends）。
+   * 缺失、未启用或版本不匹配都不会阻止本插件加载，只在插件页标黄提示；
+   * 仍然影响插件详情里的依赖说明，方便第三方插件做“装了才启用”的扩展联动。
+   */
+  optionalDependsIssues(record) {
+    return this.dependsIssuesFor(record, record.manifest.optionalDepends || {})
   }
 
   /** 硬依赖问题：缺失 / 加载失败 / 未激活；版本不匹配只做警告，不阻塞加载 */
@@ -705,6 +720,32 @@ export class App {
         }
       }
 
+      // 可选依赖只影响扩展能力，缺失 / 未启用 / 版本不匹配统一标黄，不阻止插件运行。
+      for (const item of this.optionalDependsIssues(record)) {
+        if (/实际/.test(String(item))) {
+          push(
+            id,
+            'warning',
+            `可选依赖版本不匹配：${item}`,
+            '可选依赖已安装但版本不同，相关扩展能力可能不可用；升级 / 降级后会自动恢复',
+          )
+        } else if (/\(未激活\)|\(加载失败\)/.test(String(item))) {
+          push(
+            id,
+            'warning',
+            `可选依赖不可用：${item}`,
+            '可选依赖存在但未启用 / 加载失败；本插件仍可运行，相关扩展能力暂不可用',
+          )
+        } else {
+          push(
+            id,
+            'warning',
+            `缺少可选依赖：${item}`,
+            '缺少可选依赖不影响本插件基础功能，只影响依赖它扩展的能力',
+          )
+        }
+      }
+
       if (record.status === STATUS.ERROR) {
         push(id, 'error', `加载/运行失败：${record.reason || '未知错误'}`, record.error?.stack || '')
       }
@@ -769,13 +810,17 @@ export class App {
       .filter(Boolean)
   }
 
-  /** 插件名 depends 的依赖图 + 拓扑排序 + 环检测 */
+  /** 插件名 depends 的依赖图 + 拓扑排序 + 环检测；optionalDepends 单独返回，不参与硬加载顺序 */
   graph() {
     const ids = [...this.records.keys()]
     const edges = new Map(ids.map(id => [id, new Set()]))
+    const optionalEdges = new Map(ids.map(id => [id, new Set()]))
     for (const [id, record] of this.records) {
       for (const dep of Object.keys(record.manifest.depends || {})) {
         if (this.records.has(dep)) edges.get(id).add(dep)
+      }
+      for (const dep of Object.keys(record.manifest.optionalDepends || {})) {
+        if (this.records.has(dep)) optionalEdges.get(id).add(dep)
       }
     }
     const order = []
@@ -800,7 +845,7 @@ export class App {
       return ok
     }
     for (const id of ids) visit(id, [])
-    return { order, edges, cycleIds, cycle }
+    return { order, edges, optionalEdges, cycleIds, cycle }
   }
 
   /* ================= 第 2 层：语义冲突启发式 ================= */
@@ -856,6 +901,31 @@ export class App {
 
 /* ================= 工具 ================= */
 
+/**
+ * 依赖声明统一成 { 插件名: semver范围 }：
+ * - { name: '^1.0.0' }
+ * - [name, name2]（等价于不做版本约束）
+ * - 'name'
+ */
+function normalizeDepends(value) {
+  if (!value) return {}
+  if (Array.isArray(value)) {
+    return Object.fromEntries(value.map(item => [String(item || '').trim(), '']).filter(([name]) => name))
+  }
+  if (typeof value === 'string') {
+    const name = value.trim()
+    return name ? { [name]: '' } : {}
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([name, range]) => [String(name || '').trim(), String(range || '').trim()])
+        .filter(([name]) => name),
+    )
+  }
+  return {}
+}
+
 function collectManifest(mod, entry) {
   const apply = pickApply(mod)
   return {
@@ -869,7 +939,8 @@ function collectManifest(mod, entry) {
     unavailableReason: mod.unavailableReason || entry.unavailableReason || '',
     core: mod.core !== undefined ? !!mod.core : !!entry.core,
     enabled: mod.enabled !== undefined ? !!mod.enabled : entry.enabled !== false,
-    depends: mod.depends || entry.depends || {},
+    depends: normalizeDepends(mod.depends || entry.depends),
+    optionalDepends: normalizeDepends(mod.optionalDepends || mod.softDepends || entry.optionalDepends || entry.softDepends),
     inject: mod.inject || [],
     provides: mod.provides || entry.provides || [],
     permissions: mod.permissions || entry.permissions || [],

@@ -12,7 +12,7 @@
 
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
 
-- 当前版本：v0.43.0
+- 当前版本：v1.0.0
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 - 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
 - 官方 QQ 群：1109357470
@@ -147,6 +147,24 @@ npm run build:clawbot-plugin
 `plugins/channels/wechat-clawbot/bridge.mjs`，完整版启动时会自动加载；外部插件目录
 放置方式见下一节。
 
+### 内置渠道插件：NapCat
+
+插件目录：`plugins/channels/napcat/`，通过 NapCatQQ 的 OneBot 11 协议接入 QQ。
+
+使用步骤：
+
+1. 先安装并启动 NapCatQQ，在「网络配置」里开启 WebSocket 服务器（Forward，常见端口 3001，建议设置 token）；
+2. 打开「渠道」页 →「添加渠道」→ **NapCat**；
+3. 选择角色、渠道分类（私聊 / 群聊 / 隐私），填写目标 QQ 号或群号；
+4. NapCat 连接处如果已有连接会自动优先复用；没有就新建连接：
+   - Forward 模式填 `ws://127.0.0.1:3001` 与 token；
+   - Reverse 模式填反向主机 / 端口 / 路径，默认生成 `ws://127.0.0.1:6199/ws`；Token 可选，留空则 NapCat 也不用填；
+5. 群聊可以在添加 / 编辑窗口里配置黑名单、仅艾特回复、回复概率、引用回复、艾特触发者与静默上下文；
+6. 每个 NapCat 登录 QQ 只建议建立一条连接，多个渠道 / 多个角色可以复用它；状态与连接管理在
+   「设置 → 插件 → NapCat → 设置」里。
+
+详细说明见 `plugins/channels/napcat/README.md`。
+
 ## 构建
 
 ```bash
@@ -157,21 +175,22 @@ npm run build:desktop   # 只构建桌面版
 产物位于 `release/`：
 
 - `release/web/source/`：纯净 Web 源码；
-- `release/web/deploy/`：Web 可部署版（自带便携 Node）；
+- `release/web/deploy/`：Web 可部署版（自带便携 Node，不需要 WebView2；云服务器用 `启动念风-无浏览器.cmd`）；
 - `release/desktop/source/`：桌面壳源码与运行时 app；
-- `release/desktop/deploy/念风Chat.exe`：Windows 桌面单文件。
+- `release/desktop/deploy/念风Chat.exe`：Windows 桌面单文件。系统没有 WebView2 Runtime 时会优先自动下载并静默安装（国内镜像优先，可用 `NIANFENG_WEBVIEW2_INSTALLER_URL` 覆盖），安装失败才回退浏览器并保持 Node 后台运行。
 
 `node.exe`、`念风Chat.exe` 与部署压缩包体积较大，作为 GitHub Release 附件分发，不进入 Git 仓库。
 
 ## 测试
 
 ```bash
-npm test              # 模块检查 + 后端 API + Clawbot + 前端端到端 + 对话 / 工具 / 厂商协议
+npm test              # 模块检查 + 后端 API + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
 npm run test:smoke    # 前端端到端（真实后端与 SSE）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
+npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 ```
 
-当前 `npm test` 通过；`scripts/smoke.mjs` 共 212 项通过。
+当前 `npm test` 通过；`scripts/smoke.mjs` 共 241 项通过。
 
 ## 版本管理与发布
 

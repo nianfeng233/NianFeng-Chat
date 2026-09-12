@@ -18,7 +18,7 @@ use std::{
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
 #[cfg(target_os = "windows")]
@@ -47,6 +47,173 @@ enum UserEvent {
     SetMinimizeOnClose(bool),
     /// 设置页保存 WebUI 监听配置后的一键重启（重启整个 exe）
     Restart,
+}
+
+/// 创建 WebView2 视图；独立成函数便于“安装 WebView2 后重试一次”。
+fn build_webview(
+    window: &tao::window::Window,
+    url: String,
+    init_script: String,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<wry::WebView, Box<dyn std::error::Error>> {
+    let view = WebViewBuilder::new()
+        .with_url(url)
+        .with_initialization_script(init_script)
+        .with_accept_first_mouse(true)
+        .with_ipc_handler(move |request: Request<String>| {
+            let body = request.body().trim();
+            if let Some(action) = body.strip_prefix("wind:") {
+                if action == "restart" {
+                    let _ = proxy.send_event(UserEvent::Restart);
+                } else if let Some(value) = action.strip_prefix("minimize-on-close:") {
+                    let _ = proxy.send_event(UserEvent::SetMinimizeOnClose(value == "1"));
+                } else {
+                    let _ = proxy.send_event(UserEvent::WindowAction(action.to_string()));
+                }
+                return;
+            }
+            if let Some(payload) = body.strip_prefix("notify:") {
+                // 前端约定：kind\u0001title\u0001body；kind 由前端决定标题内容，宿主只负责弹系统通知。
+                let mut parts = payload.split('\u{1}');
+                let _kind = parts.next().unwrap_or("system");
+                let title = parts.next().unwrap_or("念风").to_string();
+                let body = parts.next().unwrap_or("").to_string();
+                let icon = parts.next().unwrap_or("").to_string();
+                let _ = proxy.send_event(UserEvent::Notify { title, body, icon });
+            }
+        })
+        .build(window)?;
+    Ok(view)
+}
+
+/// 判断 WebView2 初始化失败是否属于“Runtime 缺失/找不到文件”，避免其它错误也触发下载安装。
+fn looks_like_webview2_missing(error: &str) -> bool {
+    let text = error.to_lowercase();
+    text.contains("0x80070002")
+        || error.contains("系统找不到指定的文件")
+        || text.contains("file not found")
+        || text.contains("cannot find")
+        || text.contains("webview2")
+}
+
+/// WebView2 安装器下载地址：优先国内加速镜像，官方作为兜底；环境变量可覆盖。
+fn webview2_installer_urls() -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Ok(value) = std::env::var("NIANFENG_WEBVIEW2_INSTALLER_URL") {
+        let value = value.trim();
+        if !value.is_empty() {
+            urls.push(value.to_string());
+        }
+    }
+    // 国内可访问性通常更好的加速代理（按顺序尝试）。
+    for proxy in ["https://ghproxy.net/", "https://gh-proxy.com/", "https://mirror.ghproxy.com/"] {
+        urls.push(format!("{proxy}https://go.microsoft.com/fwlink/p/?LinkId=2124703"));
+    }
+    // 官方兜底
+    urls.push("https://go.microsoft.com/fwlink/p/?LinkId=2124703".to_string());
+    urls
+}
+
+/// 用 curl / PowerShell 下载文件；只接受大于 500KB 的安装器，避免下载到错误页面。
+fn download_file(url: &str, path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let curl = Command::new("curl.exe")
+            .args([
+                "-L",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "300",
+                "-o",
+            ])
+            .arg(path)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        if matches!(curl, Ok(status) if status.success()) {
+            if fs::metadata(path).map(|meta| meta.len() > 500_000).unwrap_or(false) {
+                return true;
+            }
+        }
+        let escaped_url = url.replace('\'', "''");
+        let escaped_path = path.to_string_lossy().replace('\'', "''");
+        let command = format!(
+            "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{escaped_url}' -OutFile '{escaped_path}'"
+        );
+        let powershell = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &command])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        return matches!(powershell, Ok(status) if status.success())
+            && fs::metadata(path).map(|meta| meta.len() > 500_000).unwrap_or(false);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (url, path);
+        false
+    }
+}
+
+/// 自动下载并静默安装 WebView2 Evergreen Bootstrapper。返回是否尝试过安装（调用方会重试 build）。
+fn try_install_webview2(base_dir: &Path) -> bool {
+    let dir = base_dir.join("webview2");
+    let _ = fs::create_dir_all(&dir);
+    let installer = dir.join("MicrosoftEdgeWebview2Setup.exe");
+    let mut downloaded = fs::metadata(&installer).map(|meta| meta.len() > 500_000).unwrap_or(false);
+    if !downloaded {
+        // 离线场景：允许用户提前把安装器放到本机，并通过环境变量指定路径。
+        if let Ok(local) = std::env::var("NIANFENG_WEBVIEW2_INSTALLER_PATH") {
+            let local_path = PathBuf::from(local.trim());
+            if local_path.is_file() && fs::metadata(&local_path).map(|meta| meta.len() > 500_000).unwrap_or(false) {
+                let _ = fs::copy(&local_path, &installer);
+                downloaded = fs::metadata(&installer).map(|meta| meta.len() > 500_000).unwrap_or(false);
+            }
+        }
+    }
+    if !downloaded {
+        for url in webview2_installer_urls() {
+            append_error_log(base_dir, &format!("正在下载 WebView2 安装器：{url}"));
+            if download_file(&url, &installer) {
+                downloaded = true;
+                break;
+            }
+        }
+    }
+    if !downloaded {
+        append_error_log(base_dir, "WebView2 安装器下载失败（可设置 NIANFENG_WEBVIEW2_INSTALLER_URL 指定镜像）");
+        return false;
+    }
+    append_error_log(base_dir, "正在静默安装 WebView2 Runtime（可能需要 1~3 分钟）…");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let status = Command::new(&installer)
+            .args(["/silent", "/install"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        append_error_log(base_dir, &format!("WebView2 安装器退出状态：{status:?}"));
+        return true;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 fn main() {
@@ -156,37 +323,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
       })();
     "#;
 
-    let webview = WebViewBuilder::new()
-        .with_url(webview_url)
-        .with_initialization_script(init_script)
-        .with_accept_first_mouse(true)
-        .with_ipc_handler(move |request: Request<String>| {
-            let body = request.body().trim();
-            if let Some(action) = body.strip_prefix("wind:") {
-                if action == "restart" {
-                    let _ = proxy_for_ipc.send_event(UserEvent::Restart);
-                } else if let Some(value) = action.strip_prefix("minimize-on-close:") {
-                    let _ = proxy_for_ipc.send_event(UserEvent::SetMinimizeOnClose(value == "1"));
-                } else {
-                    let _ = proxy_for_ipc.send_event(UserEvent::WindowAction(action.to_string()));
+    // 云服务器 / Windows Server 通常没有 WebView2 Runtime。此时不再直接闪退，
+    // 而是回退到“默认浏览器 + Node 后台继续运行”，保证 WebUI 仍然可用。
+    let force_browser = std::env::args().any(|arg| arg == "--browser" || arg == "--no-webview")
+        || matches!(
+            std::env::var("NIANFENG_FORCE_BROWSER").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        );
+    let mut webview: Option<wry::WebView> = None;
+    let mut fallback_detail = String::new();
+    let no_install = std::env::args().any(|arg| arg == "--no-webview-install")
+        || matches!(std::env::var("NIANFENG_NO_WEBVIEW_INSTALL").ok().as_deref(), Some("1") | Some("true") | Some("TRUE"));
+    if force_browser {
+        fallback_detail.push_str("已通过 --browser / NIANFENG_FORCE_BROWSER 强制使用浏览器模式。");
+    } else {
+        match build_webview(&window, webview_url.clone(), init_script.to_string(), proxy_for_ipc.clone()) {
+            Ok(view) => webview = Some(view),
+            Err(err) => {
+                let err_text = err.to_string();
+                fallback_detail = format!("WebView2 初始化失败：{err_text}");
+                // 云服务器最常见的失败是缺少 WebView2 Runtime（HRESULT 0x80070002）。
+                // 先尝试自动下载安装器并静默安装（国内镜像优先），安装成功后重试一次。
+                if !no_install && looks_like_webview2_missing(&err_text) {
+                    append_error_log(&base_dir, "检测到 WebView2 不可用，尝试自动下载并安装（优先国内镜像）…");
+                    if try_install_webview2(&base_dir) {
+                        match build_webview(&window, webview_url.clone(), init_script.to_string(), proxy_for_ipc.clone()) {
+                            Ok(view) => {
+                                webview = Some(view);
+                                fallback_detail.clear();
+                            }
+                            Err(retry_err) => {
+                                fallback_detail = format!("{fallback_detail}；自动安装后重试仍失败：{retry_err}");
+                            }
+                        }
+                    } else {
+                        fallback_detail.push_str("；WebView2 自动安装失败");
+                    }
                 }
-                return;
             }
-            if let Some(payload) = body.strip_prefix("notify:") {
-                // 前端约定：kind\u0001title\u0001body；kind 由前端决定标题内容，宿主只负责弹系统通知。
-                let mut parts = payload.split('\u{1}');
-                let _kind = parts.next().unwrap_or("system");
-                let title = parts.next().unwrap_or("念风").to_string();
-                let body = parts.next().unwrap_or("").to_string();
-                let icon = parts.next().unwrap_or("").to_string();
-                let _ = proxy_for_ipc.send_event(UserEvent::Notify { title, body, icon });
-            }
-        })
-        .build(&window)?;
+        }
+    }
+
+    if webview.is_none() {
+        // 没有 WebView2 时退回浏览器；Node 服务继续后台运行。
+        let _ = window.set_visible(false);
+        append_error_log(&base_dir, &format!("WebView2 不可用，已回退到浏览器模式：{fallback_detail}"));
+        let fallback_test = matches!(
+            std::env::var("NIANFENG_FALLBACK_TEST").ok().as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+        );
+        if !fallback_test {
+            let opened = open_external_browser(&webview_url);
+            show_browser_fallback(&fallback_detail, &webview_url, opened);
+        }
+        wait_child_exit(&mut child);
+        return Ok(());
+    }
 
     // window / webview / node 子进程都必须在事件循环期间保持存活。
     let window = Some(window);
-    let mut webview = Some(webview);
+    let mut webview = webview;
     let mut child = Some(child);
     // 「关闭窗口时最小化」：由前端设置页通过 IPC 同步，决定关闭按钮是否退出程序。
     let mut minimize_on_close = false;
@@ -338,6 +534,84 @@ fn show_fatal_message(message: &str) {
 #[cfg(not(target_os = "windows"))]
 fn show_fatal_message(_message: &str) {}
 
+/// 用系统默认浏览器打开地址。避免 `cmd /c start` 对 URL 中 `&` 的二次解释，Windows 下走 ShellExecuteW。
+fn open_external_browser(url: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let operation: Vec<u16> = "open\0".encode_utf16().collect();
+        let file: Vec<u16> = format!("{url}\0").encode_utf16().collect();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        return result as isize > 32;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        Command::new(opener)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    }
+}
+
+/// 把浏览器回退 / WebView2 错误写进日志，方便云服务器排查。
+fn append_error_log(base_dir: &Path, message: &str) {
+    let path = base_dir.join("error.log");
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{}] {message}", now_string());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_browser_fallback(detail: &str, url: &str, opened: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+    let action = if opened {
+        "已尝试用系统默认浏览器打开"
+    } else {
+        "浏览器没有自动打开，请手动在浏览器中访问"
+    };
+    let text = format!(
+        "未能创建桌面窗口：当前系统没有可用的 Microsoft Edge WebView2 Runtime。\n\n{detail}\n\n{action}：\n{url}\n\n云服务器建议使用 Web 版「启动念风-无浏览器.cmd」，不需要 WebView2。\n\n念风服务会继续在后台运行；要停止，请在任务管理器中结束“念风Chat.exe”和 node.exe。\0"
+    );
+    let title: Vec<u16> = "念风chat · 已回退到浏览器模式\0".encode_utf16().collect();
+    let body: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_browser_fallback(_detail: &str, _url: &str, _opened: bool) {}
+
+/// 浏览器回退模式下等待 Node 子进程退出，避免 exe 提前结束导致服务停掉。
+fn wait_child_exit(child: &mut Child) {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
 
 fn now_string() -> String {
     // 避免引入时间库：使用 systemtime 转 unix 秒；日志只用于排查。

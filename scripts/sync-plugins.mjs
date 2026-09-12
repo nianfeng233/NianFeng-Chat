@@ -51,6 +51,7 @@ for (const file of files) {
       unavailable: mod.unavailable === true,
       unavailableReason: mod.unavailableReason || '',
       depends: mod.depends || {},
+      optionalDepends: mod.optionalDepends || mod.softDepends || {},
       provides: mod.provides || [],
       permissions: mod.permissions || [],
     }
