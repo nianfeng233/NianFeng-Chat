@@ -69,7 +69,7 @@ const dirty = capture('git', ['status', '--porcelain'])
 if (dirty) {
   console.log('提交发布工作树变更…')
   run('git', ['add', '-A'])
-  run('git', ['commit', '-m', `release: 念风 ${tag}`])
+  run('git', ['commit', '-m', `release: 念风Chat ${tag}`])
 } else {
   console.log('发布工作树没有新变更，跳过提交')
 }
@@ -80,7 +80,7 @@ if (existingTag === tag) {
   console.error(`tag ${tag} 已存在；如需重新发布请升版本号`)
   process.exit(1)
 }
-run('git', ['tag', '-a', tag, '-m', `念风 ${tag}`])
+run('git', ['tag', '-a', tag, '-m', `念风Chat ${tag}`])
 
 // 3) 推送
 if (!skipPush) {
@@ -108,7 +108,7 @@ if (createRelease) {
   }
   const releaseArgs = ['release', 'create', tag, ...assets]
   if (repo) releaseArgs.push('-R', repo)
-  releaseArgs.push('--title', `念风 ${tag}`)
+  releaseArgs.push('--title', `念风Chat ${tag}`)
   if (notesFile && existsSync(notesFile)) releaseArgs.push('--notes-file', notesFile)
   else releaseArgs.push('--generate-notes')
   const prerelease = /-(alpha|beta|rc)/i.test(tag)

@@ -94,7 +94,7 @@ feat: 外部插件目录与热扫描
 fix: exe 系统通知头像缺失
 docs: 重写 README 与发布规范
 chore: 升级 cordis
-release: 念风 v0.41.0
+release: 念风Chat v0.41.0
 ```
 
 ---
