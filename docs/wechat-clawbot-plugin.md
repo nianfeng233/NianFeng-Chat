@@ -27,7 +27,11 @@
 4. 点击「接入」按 Clawbot / iLink 流程获取二维码，本地渲染，手机微信扫码后上线；
 5. 微信消息写入所选角色的 clawbot 渠道聊天记录，并触发念风完整模型链路；
 6. 模型整轮调用（含工具调用与全部回复消息）彻底结束后，才关闭微信 typing 状态；
-7. 「设置 → 聊天记录」可按角色查看 / 编辑该渠道记录。
+7. 「设置 → 聊天记录」可按角色查看 / 编辑该渠道记录；
+8. 渠道会话标记为 `hiddenFromSessionList`，不再出现在普通会话列表，避免同一角色出现两个入口；
+9. 渠道设置支持「用户显示名 / 用户唯一标识」（默认与网页端一致），解决微信侧消息与网页端历史被模型识别成两个用户的问题；
+10. 插件页对应条目提供「设置」按钮，可打开插件自己的配置面板（微信clawbot 面板会列出所有 clawbot 渠道）；
+11. 后端桥自动加载 + `httpApi` 路由扩展点，后续新增渠道插件不需要修改 `server/index.mjs` / `server/plugins/http.mjs`。
 
 ## 3. 对本体做的必要改动
 
@@ -39,8 +43,12 @@
 | `plugins/views/channel-detail-host/index.mjs` | 渠道详情支持类型自带的 `detail()` 渲染器 |
 | `plugins/features/chat-flow/index.mjs` | `message:send` 支持 `skipUserAppend`，供渠道先落库再触发模型 |
 | `plugins/foundation/backend-client/index.mjs` | 订阅 `clawbot:message` / `clawbot:status` 后端事件 |
-| `server/index.mjs` | 加载 Clawbot 后端桥插件 |
-| `server/plugins/http.mjs` | 新增 `/api/clawbot/*` 路由与健康能力声明 |
+| `plugins/domain/plugin-manager/index.mjs` | 新增通用插件设置面板注册 / 打开扩展点（`registerSettings` / `openSettings`） |
+| `plugins/views/settings-item-plugins/index.mjs` | 有设置面板的插件在插件页显示「设置」按钮 |
+| `plugins/views/session-list/index.mjs` | 过滤 `hiddenFromSessionList` 的渠道会话，避免渠道消息在普通会话列表出现第二份 |
+| `server/index.mjs` | 新增通用渠道后端桥加载器：自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录 |
+| `server/plugins/http.mjs` | 新增通用 `httpApi` 路由 / 能力扩展点；Clawbot 专用路由已移回自己的 `bridge.mjs` |
+| `plugins/channels/wechat-clawbot/bridge.mjs` | 通过 `httpApi.route()` 自行注册 `/api/clawbot/*`，不再依赖本体路由 |
 | `server/data-dir.mjs` / `start.mjs` / `server/index.mjs` | 兼容旧 `FENGYU_*` 环境变量与旧 AppData 指针 |
 
 ## 4. 项目重命名
@@ -65,5 +73,5 @@ npm run build:release     # 同时生成 Web 与桌面版；exe 内含 wechat-cl
 npm run build:clawbot-plugin
 ```
 
-当前测试结果：`npm test` 全部通过；`test:clawbot` 15/15，`smoke` 209/209，
+当前测试结果：`npm test` 全部通过；`test:clawbot` 15/15，`smoke` 211/211，
 `test-backend` 63/63，其余测试均通过。

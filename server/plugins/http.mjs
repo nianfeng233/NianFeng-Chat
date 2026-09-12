@@ -13,7 +13,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 
 export const name = 'http'
-export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry', 'clawbot']
+export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -138,7 +138,9 @@ export function apply(ctx, config = {}) {
           .replace(/\//g, '\\/') +
         '$',
     )
-    routes.push({ method, regex, keys, handler })
+    const entry = { method, regex, keys, handler }
+    routes.push(entry)
+    return entry
   }
 
   const match = (method, pathname) => {
@@ -161,6 +163,35 @@ export function apply(ctx, config = {}) {
     return null
   }
 
+  /**
+   * 后端插件通用 HTTP 扩展点：
+   * 渠道 bridge.mjs 等后端插件可以注册自己的 /api/... 路由，无需修改本文件。
+   *   const dispose = ctx.httpApi.route('GET', '/api/my-channel/status', handler)
+   * handler(req, res, params, url)，返回值忽略；抛出的错误会按 err.status 返回。
+   */
+  const extraCapabilities = new Set()
+  const register = route
+  const httpApi = {
+    route: (method, pattern, handler) => {
+      const entry = register(method, pattern, handler)
+      return () => {
+        const index = routes.indexOf(entry)
+        if (index >= 0) routes.splice(index, 1)
+      }
+    },
+    readBody,
+    sendJson,
+    sendError,
+    sse,
+    registerCapability(name) {
+      const key = String(name || '').trim()
+      if (!key) return () => {}
+      extraCapabilities.add(key)
+      return () => extraCapabilities.delete(key)
+    },
+    capabilities: () => [...extraCapabilities],
+  }
+
   /* ---------------- 基础 ---------------- */
 
   route('GET', '/api/health', async (req, res) => {
@@ -172,7 +203,11 @@ export function apply(ctx, config = {}) {
       uptime: Date.now() - startedAt,
       time: new Date().toISOString(),
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
-      capabilities: ['builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools', 'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'wechat-clawbot'],
+        capabilities: [
+          'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
+          'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'plugin-http-routes',
+          ...extraCapabilities,
+        ],
       dataDir: settings.dataDir,
       configFile: settings.file,
       providers: providerList.map(p => ({ id: p.id, type: p.type, configured: p.configured, status: p.status, models: p.models.length })),
@@ -451,79 +486,6 @@ export function apply(ctx, config = {}) {
     sendJson(res, 200, { requests: requestLog.slice(-limit), ...hub.snapshot() })
   })
 
-  /* ---------------- 微信 Clawbot 渠道后端桥 ---------------- */
-
-  /**
-   * 这些路由只做参数整理与错误包装，真实协议在同目录
-   * server/plugins/../plugins/channels/wechat-clawbot/bridge.mjs 中实现。
-   */
-  const withClawbot = async (res, fn) => {
-    try {
-      const bridge = ctx.clawbot
-      if (!bridge) return sendError(res, 503, '微信 Clawbot 后端桥未加载，请重启念风')
-      return sendJson(res, 200, await fn(bridge))
-    } catch (err) {
-      return sendError(res, Number(err?.status) || 502, err?.message || String(err))
-    }
-  }
-
-  route('GET', '/api/clawbot/status', async (req, res, params, url) =>
-    withClawbot(res, bridge =>
-      url.searchParams.get('all') === 'true'
-        ? bridge.status({ all: true })
-        : bridge.status({ channelId: url.searchParams.get('channelId') || '' }),
-    ),
-  )
-
-  route('POST', '/api/clawbot/login/start', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge => bridge.startLogin({ channelId: body.channelId }))
-  })
-
-  route('GET', '/api/clawbot/login/status', async (req, res, params, url) =>
-    withClawbot(res, bridge => bridge.loginStatus({ channelId: url.searchParams.get('channelId') || '' })),
-  )
-
-  route('POST', '/api/clawbot/logout', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge => bridge.logout({ channelId: body.channelId }))
-  })
-
-  route('POST', '/api/clawbot/send', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge =>
-      bridge.sendText({
-        channelId: body.channelId,
-        toUserId: body.toUserId,
-        text: body.text,
-        contextToken: body.contextToken,
-      }),
-    )
-  })
-
-  route('POST', '/api/clawbot/typing/start', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge =>
-      bridge.startTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }),
-    )
-  })
-
-  route('POST', '/api/clawbot/typing/stop', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge =>
-      bridge.stopTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }),
-    )
-  })
-
-  route('GET', '/api/clawbot/inbox', async (req, res, params, url) =>
-    withClawbot(res, bridge => bridge.inbox({ channelId: url.searchParams.get('channelId') || '' })),
-  )
-
-  route('POST', '/api/clawbot/inbox/ack', async (req, res) => {
-    const body = await readBody(req)
-    return withClawbot(res, bridge => bridge.ackInbox({ channelId: body.channelId, ids: body.ids }))
-  })
-
   /* ---------------- SSE 事件通道 ---------------- */
 
   route('GET', '/api/events', async (req, res) => {
@@ -658,6 +620,9 @@ export function apply(ctx, config = {}) {
     routes: () => routes.map(r => `${r.method} ${r.regex.source}`),
     requests: () => [...requestLog],
   })
+
+  // 通用后端插件 HTTP 扩展点：渠道 bridge.mjs 等插件自行注册 /api/... 路由。
+  ctx.provide('httpApi', httpApi)
 
   ctx.effect(
     () => () =>

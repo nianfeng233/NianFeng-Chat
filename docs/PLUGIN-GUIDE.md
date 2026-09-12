@@ -134,6 +134,39 @@ export function dispose(ctx) {}
 | `settingsSchema` | `Object` | 预留给通用表单型渠道插件（当前内置插件未使用，第三方插件可按自己的约定解释）。 |
 
 参考实现：`plugins/channels/wechat-clawbot/index.mjs`。
+
+### 4.2 后端桥与插件设置面板
+
+后端渠道桥放在 `plugins/channels/<name>/bridge.mjs`，会被后端启动器自动扫描加载；
+通过 `httpApi` 注册自己的接口，不需要修改本体：
+
+```js
+export const name = 'my-channel-bridge'
+export const inject = ['settings', 'hub', 'httpApi']
+export function apply(ctx) {
+  ctx.effect(() => ctx.httpApi.route('GET', '/api/my-channel/status', async (req, res) => {
+    ctx.httpApi.sendJson(res, 200, { ok: true })
+  }))
+}
+```
+
+前端插件可以注册自己的设置面板，插件页对应条目会自动出现「设置」按钮：
+
+```js
+export function apply(ctx) {
+  const manager = ctx.inject('plugin-manager')
+  ctx.effect(() => manager.registerSettings({
+    id: 'my-plugin',
+    title: '我的插件设置',
+    description: '插件专属配置',
+    render(container, { close, manager: pm }) {
+      container.innerHTML = '...'
+      return () => { /* 关闭时清理 */ }
+    },
+  }))
+}
+```
+
 ## 5. 样式
 
 ```js

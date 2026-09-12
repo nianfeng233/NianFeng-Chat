@@ -22,7 +22,7 @@ export const version = '1.0.0'
 export const displayName = '微信 Clawbot 后端桥'
 export const description = '渠道后端 · Clawbot 登录、长轮询、发送消息与 typing 状态。'
 export const core = false
-export const inject = ['settings', 'hub']
+export const inject = ['settings', 'hub', 'httpApi']
 export const provides = [{ name: 'clawbot', type: 'singleton' }]
 
 const DEFAULT_BASE_URL =
@@ -695,6 +695,105 @@ export function apply(ctx) {
   }
 
   ctx.provide('clawbot', service)
+
+  /**
+   * 通过通用 httpApi 注册自己的 /api/clawbot/* 路由。
+   * 这样 server/plugins/http.mjs 不需要包含任何 Clawbot 专用代码，
+   * 后续渠道插件只要提供 bridge.mjs 并注入 httpApi 即可扩展后端接口。
+   */
+  const http = ctx.httpApi
+  const safe = handler => async (req, res, params, url) => {
+    try {
+      await handler(req, res, params, url)
+    } catch (err) {
+      if (!res.headersSent) http.sendError(res, Number(err?.status) || 502, err?.message || String(err))
+      else res.end()
+    }
+  }
+  const routeDisposers = [
+    http.route(
+      'GET',
+      '/api/clawbot/status',
+      safe(async (req, res, params, url) => {
+        const payload = url.searchParams.get('all') === 'true'
+          ? await service.status({ all: true })
+          : await service.status({ channelId: url.searchParams.get('channelId') || '' })
+        http.sendJson(res, 200, payload)
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/login/start',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.startLogin({ channelId: body.channelId }))
+      }),
+    ),
+    http.route(
+      'GET',
+      '/api/clawbot/login/status',
+      safe(async (req, res, params, url) => {
+        http.sendJson(res, 200, await service.loginStatus({ channelId: url.searchParams.get('channelId') || '' }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/logout',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.logout({ channelId: body.channelId }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/send',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.sendText({
+          channelId: body.channelId,
+          toUserId: body.toUserId,
+          text: body.text,
+          contextToken: body.contextToken,
+        }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/typing/start',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.startTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/typing/stop',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.stopTyping({ channelId: body.channelId, toUserId: body.toUserId, contextToken: body.contextToken }))
+      }),
+    ),
+    http.route(
+      'GET',
+      '/api/clawbot/inbox',
+      safe(async (req, res, params, url) => {
+        http.sendJson(res, 200, await service.inbox({ channelId: url.searchParams.get('channelId') || '' }))
+      }),
+    ),
+    http.route(
+      'POST',
+      '/api/clawbot/inbox/ack',
+      safe(async (req, res) => {
+        const body = await http.readBody(req)
+        http.sendJson(res, 200, await service.ackInbox({ channelId: body.channelId, ids: body.ids }))
+      }),
+    ),
+  ]
+  const removeCapability = http.registerCapability('wechat-clawbot')
+  ctx.effect(() => () => {
+    for (const dispose of routeDisposers) dispose?.()
+    removeCapability?.()
+  })
 
   ctx.effect(() => async () => {
     closed = true

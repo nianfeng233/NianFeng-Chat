@@ -85,7 +85,7 @@ npm run sync-plugins
 外部插件目录（默认 `<数据目录>/plugins/`，exe 为
 `%LOCALAPPDATA%\NianFengChat\user_data\plugins\`）中的插件按以下结构放置：
 
-```
+```text
 <外部目录>/views/my-plugin/index.mjs
 ```
 
@@ -103,6 +103,26 @@ export function apply(ctx) {
 }
 ```
 
+插件可以注册自己的配置面板，「设置 → 插件」对应条目后会出现「设置」按钮：
+
+```js
+export function apply(ctx) {
+  const manager = ctx.inject('plugin-manager')
+  ctx.effect(() => manager.registerSettings({
+    id: 'my-plugin',
+    title: '我的插件设置',
+    description: '在插件页直接完成的专属配置。',
+    render(container, { close, manager: pm }) {
+      // container.innerHTML = ...
+      return () => { /* 面板关闭时清理 */ }
+    },
+  }))
+}
+```
+
+后端渠道桥也采用同一思路：在 `plugins/channels/<name>/bridge.mjs` 里注入 `httpApi` 并注册
+自己的 `/api/<channel>/...` 路由，启动时会自动加载，不需要改 `server/index.mjs`。
+
 ### 内置渠道插件：微信clawbot
 
 插件目录：`plugins/channels/wechat-clawbot/`（可单独分发，编译 exe 时会一并作为内置插件打包）。
@@ -110,11 +130,11 @@ export function apply(ctx) {
 使用步骤：
 
 1. 打开「渠道」页，点击「添加渠道」，在菜单中选择 **微信clawbot**；
-2. 在渠道设置窗口里选择使用角色、渠道分类（私聊 / 群聊 / 隐私），并按需勾选权限；
+2. 在渠道设置窗口里选择使用角色、渠道分类（私聊 / 群聊 / 隐私）、用户显示名 / 用户唯一标识，并按需勾选权限；
 3. 添加完成后在左侧选中该渠道，右侧详情点「接入」；使用手机微信扫描弹出的二维码；
 4. 扫码确认后渠道变为「已接入」，微信侧发来的消息会进入对应角色的 clawbot 渠道；
 5. 模型整轮调用（含工具调用与全部回复消息）结束后，微信侧的 typing 状态会自动关闭；
-6. 聊天记录可在「设置 → 聊天记录」里查看和修改。
+6. 聊天记录可在「设置 → 聊天记录」里查看和修改；插件专属配置也可从「设置 → 插件 → 微信clawbot → 设置」打开。
 
 单独分发：
 
@@ -150,7 +170,7 @@ npm run test:smoke    # 前端端到端（真实后端与 SSE）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 ```
 
-当前 `npm test` 通过；`scripts/smoke.mjs` 共 207 项通过。
+当前 `npm test` 通过；`scripts/smoke.mjs` 共 211 项通过。
 
 ## 版本管理与发布
 
@@ -170,7 +190,7 @@ npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 
 ## 目录结构
 
-```
+```text
 .
 ├── index.html
 ├── start.mjs             # 后端 + WebUI + 反向代理

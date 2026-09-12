@@ -14,6 +14,7 @@
  */
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
+import { resolveUserNickname } from '../../../src/util/identity.mjs'
 import { WECHAT_CLAWBOT_CSS } from './style.mjs'
 import { renderQrSvg, isQrImageContent } from './qrcode.mjs'
 
@@ -40,6 +41,7 @@ export const inject = [
   'api?',
   'message-service?',
   'chat-store?',
+  'plugin-manager?',
 ]
 export const provides = []
 export const permissions = ['network']
@@ -107,6 +109,18 @@ export function apply(ctx) {
   const findTab = channelId => channels.tabs().find(tab => channels.findChannel(tab, channelId)) || 'private'
   const channelKey = channelId => `wechat-clawbot:${channelId}`
   const permissionsOf = channel => ({ ...DEFAULT_PERMISSIONS, ...(channel?.meta?.permissions || {}) })
+  /**
+   * 微信侧用户标识。
+   * Clawbot 通常是个人号，微信协议只给出内部 user id；允许用户在渠道设置里
+   * 手动填写「用户显示名 / 唯一标识」，模型才能把它识别成网页端同一位用户。
+   * 默认跟随念风网页端用户标识，保证开箱即用。
+   */
+  const channelIdentity = channel => ({
+    userId: String(channel?.meta?.identity?.userId || channel?.meta?.identityUserId || config.get('chat.userId', 'web-user') || 'web-user').trim() || 'web-user',
+    userName:
+      String(channel?.meta?.identity?.userName || channel?.meta?.identityUserName || resolveUserNickname(config)).trim() ||
+      resolveUserNickname(config),
+  })
   const roleOf = channel => sessions.get(channel?.meta?.roleId) || null
   const isClawbotChannel = channel => channel?.type === TYPE_ID
   const statusClickColor = status => STATUS_COLOR[status] || STATUS_COLOR.offline
@@ -137,6 +151,12 @@ export function apply(ctx) {
       source: 'wechat-clawbot',
       roleId,
       clawbotChannelId: channel.id,
+      // 渠道消息有自己的渠道记录与记录入口（渠道详情 / 设置→聊天记录），
+      // 不在普通「会话」列表里再显示一份，避免同一角色出现两个入口、两份消息。
+      hiddenFromSessionList: true,
+      channelConversation: true,
+      identityUserId: channelIdentity(channel).userId,
+      identityUserName: channelIdentity(channel).userName,
       participatesWorkingMemory: permissionsOf(channel).context !== false,
       crossReadable: permissionsOf(channel).crossRead === true,
       crossSendable: permissionsOf(channel).crossSend === true,
@@ -250,6 +270,20 @@ export function apply(ctx) {
             </div>
           </div>
         </div>
+        <div class="wc-grid">
+          <label class="wc-field">
+            <span>用户显示名</span>
+            <input data-wc-identity-name maxlength="30" value="${escapeHtml(channelIdentity(source).userName)}" placeholder="例如：我 / 猫娘主人" />
+          </label>
+          <label class="wc-field">
+            <span>用户唯一标识</span>
+            <input data-wc-identity-id maxlength="80" value="${escapeHtml(channelIdentity(source).userId)}" placeholder="例如：web-user" />
+          </label>
+        </div>
+        <div class="wc-note">
+          Clawbot 通常是个人号，微信协议不会给出网页端的用户身份。把这里填成与网页端相同的标识，
+          模型才会把微信侧消息识别成同一位主人，聊天上下文才能自然延续。
+        </div>
         <div class="wc-field">
           <span>权限设置</span>
           <div class="wc-perms">
@@ -271,6 +305,8 @@ export function apply(ctx) {
     const nameInput = overlay.querySelector('[data-wc-name]')
     const roleSelect = overlay.querySelector('[data-wc-role]')
     const categorySelect = overlay.querySelector('[data-wc-category]')
+    const identityNameInput = overlay.querySelector('[data-wc-identity-name]')
+    const identityIdInput = overlay.querySelector('[data-wc-identity-id]')
     const errorEl = overlay.querySelector('[data-wc-error]')
 
     const setError = message => {
@@ -289,12 +325,17 @@ export function apply(ctx) {
       const nextCategory = TAB_ORDER.includes(categorySelect.value) ? categorySelect.value : 'private'
       const nextPermissions = {}
       for (const [key] of PERMISSION_META) nextPermissions[key] = !!overlay.querySelector(`[data-wc-perm="${key}"]`)?.checked
+      const nextIdentity = {
+        userId: String(identityIdInput.value || '').trim() || config.get('chat.userId', 'web-user') || 'web-user',
+        userName: String(identityNameInput.value || '').trim() || resolveUserNickname(config),
+      }
       const meta = {
         ...(source?.meta || {}),
         kind: TYPE_ID,
         roleId: nextRoleId,
         category: nextCategory,
         permissions: nextPermissions,
+        identity: nextIdentity,
         clawbotStatus: source?.meta?.clawbotStatus || 'offline',
         updatedAt: Date.now(),
       }
@@ -524,6 +565,7 @@ export function apply(ctx) {
               <span class="k">渠道分类</span><span class="v">${escapeHtml(TAB_LABELS[category] || category)}</span>
               <span class="k">聊天记录</span><span class="v">${conv ? `${escapeHtml(conv.name)} · ${count} 条` : '接入后自动创建'}</span>
               <span class="k">权限</span><span class="v">${escapeHtml(enabled.join(' · ') || '仅基础权限')}</span>
+              <span class="k">用户标识</span><span class="v">${escapeHtml(channelIdentity(channel).userName)} · ${escapeHtml(channelIdentity(channel).userId)}</span>
               <span class="k">微信账号</span><span class="v">${escapeHtml(accountText || (status === 'online' ? '已登录' : '未登录'))}</span>
               <span class="k">协议</span><span class="v">openclaw-weixin · iLink HTTP JSON API</span>
             </div>
@@ -735,18 +777,21 @@ export function apply(ctx) {
     const conv = ensureConversation(channel)
     if (!conv) return
     const permissions = permissionsOf(channel)
+    const identity = channelIdentity(channel)
     if (store?.append) {
       store.append(conv.id, {
         role: 'user',
         content: message.text,
-        sender_id: message.fromUserId,
-        sender_name: message.nickname || '微信用户',
+        // 使用渠道设置里手动配置的用户标识；默认与网页端一致，便于模型识别为同一位主人。
+        sender_id: identity.userId,
+        sender_name: identity.userName,
         source: 'wechat-clawbot',
         meta: {
           via: 'wechat-clawbot',
           direction: 'inbound',
           clawbotChannelId: channel.id,
           fromUserId: message.fromUserId,
+          wxSenderName: message.nickname || '',
           contextToken: message.contextToken || '',
           wxMessageId: message.id,
         },
@@ -790,6 +835,82 @@ export function apply(ctx) {
     detail: options => mountDetail(options),
   })
   ctx.effect(() => () => registration.dispose?.())
+
+  // 插件自己的配置面板：会出现在「设置 → 插件 → 微信clawbot → 设置」。
+  // 这是通用扩展点，后续渠道插件也可以在 apply 里注册自己的面板，无需改本体插件页。
+  const pluginManager = ctx.registry.get('plugin-manager')
+  if (pluginManager?.registerSettings) {
+    const disposePanel = pluginManager.registerSettings({
+      id: name,
+      title: '微信clawbot 渠道设置',
+      description: '集中查看 / 配置本插件的 clawbot 渠道和接入状态，无需再单独打开渠道页。',
+      render(container, helpers = {}) {
+        const closePanel = () => helpers.close?.()
+        const clawbotChannels = () => {
+          const list = []
+          for (const tab of channels.tabs()) for (const channel of channels.channels(tab)) if (isClawbotChannel(channel)) list.push({ tab, channel })
+          return list
+        }
+        const paint = () => {
+          const list = clawbotChannels()
+          container.innerHTML = list.length
+            ? list
+                .map(({ tab, channel }) => {
+                  const role = roleOf(channel)
+                  const identity = channelIdentity(channel)
+                  return `
+                    <div class="plugin-panel-item">
+                      <div class="plugin-panel-item-main">
+                        <div class="plugin-panel-item-name">${escapeHtml(channel.name || '微信clawbot')} <span class="plugin-tag">${escapeHtml(TAB_LABELS[tab] || tab)}</span></div>
+                        <div class="plugin-panel-item-desc">
+                          角色：${escapeHtml(role?.name || '未绑定')} · 状态：${escapeHtml(STATUS_LABEL[channel.status] || channel.status)} ·
+                          用户：${escapeHtml(identity.userName)} / ${escapeHtml(identity.userId)}
+                        </div>
+                      </div>
+                      <div class="plugin-panel-item-actions">
+                        <button class="outline-btn" data-wc-panel-edit="${escapeHtml(channel.id)}">配置</button>
+                        ${channel.status === 'online'
+                          ? '<button class="outline-btn" data-wc-panel-open="' + escapeHtml(channel.id) + '">打开记录</button>'
+                          : '<button class="outline-btn primary-soft" data-wc-panel-connect="' + escapeHtml(channel.id) + '">接入</button>'}
+                      </div>
+                    </div>`
+                })
+                .join('')
+            : '<div class="plugin-panel-empty">还没有微信clawbot 渠道。请到「渠道 → 添加渠道 → 微信clawbot」创建。</div>'
+        }
+        const onClick = event => {
+          const edit = event.target.closest?.('[data-wc-panel-edit]')
+          const connect = event.target.closest?.('[data-wc-panel-connect]')
+          const open = event.target.closest?.('[data-wc-panel-open]')
+          const target = findChannel(edit?.dataset.wcPanelEdit || connect?.dataset.wcPanelConnect || open?.dataset.wcPanelOpen)
+          if (!target) return
+          closePanel()
+          if (edit) openSettings({ mode: 'edit', channel: target, onSaved: paint })
+          else if (connect) openLogin(target)
+          else if (open) {
+            const conv = ensureConversation(target)
+            if (conv) {
+              ctx.registry.get('view-router')?.switch('chat')
+              sessions.activate(conv.id)
+            }
+          }
+        }
+        container.addEventListener('click', onClick)
+        const offs = [
+          events.on('channel:add', paint),
+          events.on('channel:removed', paint),
+          events.on('channel:updated', paint),
+          events.on('channel:status', paint),
+        ]
+        paint()
+        return () => {
+          offs.forEach(off => off?.())
+          container.removeEventListener('click', onClick)
+        }
+      },
+    })
+    ctx.effect(() => () => disposePanel?.())
+  }
 
   const offDone = events.on('chat:request-done', payload => {
     const finish = pendingTurns.get(payload?.conversationId)

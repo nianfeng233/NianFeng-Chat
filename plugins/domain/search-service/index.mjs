@@ -30,6 +30,7 @@ export function apply(ctx) {
       const q = query.toLowerCase()
       return sessions
         .list()
+        .filter(c => !c.meta?.hiddenFromSessionList)
         .filter(c => c.name.toLowerCase().includes(q) || String(c.preview || '').toLowerCase().includes(q))
         .slice(0, 6)
         .map(c => ({ type: 'conversation', id: c.id, title: c.name, snippet: c.preview, action: { event: 'search:open-conversation', payload: { id: c.id } } }))

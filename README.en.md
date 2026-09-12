@@ -99,7 +99,7 @@ npm run sync-plugins
 External plugins live in `<data-dir>/plugins/` by default (for the exe:
 `%LOCALAPPDATA%\NianFengChat\user_data\plugins\`) and use this layout:
 
-```
+```text
 <external-dir>/views/my-plugin/index.mjs
 ```
 
@@ -117,10 +117,41 @@ export function apply(ctx) {
 }
 ```
 
+Plugins can register their own settings panels; the Plugins page then shows a “Settings” action:
+
+```js
+export function apply(ctx) {
+  const manager = ctx.inject('plugin-manager')
+  ctx.effect(() => manager.registerSettings({
+    id: 'my-plugin',
+    title: 'My Plugin Settings',
+    description: 'Plugin-specific configuration.',
+    render(container, { close, manager: pm }) {
+      container.innerHTML = '...'
+      return () => { /* cleanup on close */ }
+    },
+  }))
+}
+```
+
+Channel backend bridges are auto-discovered from `plugins/channels/<name>/bridge.mjs`; inject
+`httpApi` and register your own `/api/<channel>/...` routes without touching the core.
+
+### Built-in channel plugin: WeChat Clawbot
+
+- Add it from Channels → Add Channel → **WeChat Clawbot**;
+- configure role, category (private/group/privacy), user name / user id and permissions;
+- click Connect in channel details, scan the QR code with WeChat, then use it;
+- channel messages go through the full model pipeline; typing is closed after the whole model
+  call (including tool calls and all reply messages) finishes;
+- channel conversations are hidden from the normal session list and can be viewed/edited under
+  Settings → Chat Records;
+- plugin-specific panel: Settings → Plugins → WeChat Clawbot → Settings.
+
 ## Building
 
 ```bash
-npm run build:release   # Web source + Web deploy + desktop source + NianFeng.exe
+npm run build:release   # Web source + Web deploy + desktop source + 念风Chat.exe
 npm run build:desktop   # desktop only
 ```
 
@@ -141,7 +172,7 @@ npm test              # module checks + backend API + end-to-end + chat / tools 
 npm run test:smoke    # frontend end-to-end against the real backend and SSE
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 207 checks.
+`npm test` currently passes; `scripts/smoke.mjs` passes 211 checks.
 
 ## Versioning and Releases
 
@@ -165,7 +196,7 @@ numbers, `user_data`, and similar content.
 
 ## Directory Layout
 
-```
+```text
 .
 ├── index.html
 ├── start.mjs             # backend + WebUI + reverse proxy

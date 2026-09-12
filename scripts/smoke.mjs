@@ -156,6 +156,23 @@ async function main() {
     ctx.inject('settings-container').list().map(pageItem => pageItem.id).join(','),
   )
 
+  const smokeManager = ctx.inject('plugin-manager')
+  check(
+    '插件设置面板扩展点已注册（微信clawbot 有设置面板）',
+    typeof smokeManager.registerSettings === 'function' && typeof smokeManager.openSettings === 'function' && smokeManager.hasSettings('wechat-clawbot'),
+    typeof smokeManager.registerSettings,
+  )
+
+  const smokeSessions = ctx.inject('session-service')
+  const hiddenConversation = smokeSessions.create({ name: '隐藏渠道会话冒烟', meta: { hiddenFromSessionList: true } })
+  await sleep(80)
+  check(
+    '渠道隐藏会话不出现在普通会话列表',
+    !document.getElementById('convList')?.textContent?.includes('隐藏渠道会话冒烟'),
+  )
+  smokeSessions.remove(hiddenConversation.id)
+  await sleep(40)
+
   const diagnostics = document.getElementById('wind-diag')
   check('诊断元素存在', !!diagnostics)
   check('诊断 error 为空', diagnostics?.dataset.errors === '[]', diagnostics?.dataset.errors)
@@ -487,7 +504,7 @@ async function main() {
   const pageErrors = []
   for (const page of pages) {
     settingsContainer.open(page.id)
-    await sleep(20)
+    await sleep(50)
     const content = document.querySelector('#settingsContent') || document.querySelector('.settings-content')
     const html = content?.innerHTML || ''
     if (html.length < 80) pageErrors.push(`${page.id} 内容为空`)

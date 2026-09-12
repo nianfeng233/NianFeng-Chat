@@ -10,7 +10,7 @@
  *   startBackend({ staticDir: 'dist' })   # 后端同时托管 WebUI（单端口部署）
  */
 import { Context } from 'cordis'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 
@@ -22,10 +22,52 @@ import * as hubPlugin from './plugins/hub.mjs'
 import * as modelsPlugin from './plugins/models.mjs'
 import * as instancePlugin from './plugins/instance.mjs'
 import * as pluginRegistryPlugin from './plugins/plugin-registry.mjs'
-import * as wechatClawbotBridge from '../plugins/channels/wechat-clawbot/bridge.mjs'
 import * as httpPlugin from './plugins/http.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
+
+/**
+ * 通用渠道后端桥加载器：
+ *   - 内置渠道：扫描 plugins/channels/<name>/bridge.mjs
+ *   - 外部渠道：扫描数据目录 / 环境变量插件目录里的 bridge.mjs
+ * 渠道 bridge 是普通 Node cordis 插件，可以 inject httpApi / settings / hub 等，
+ * 自行注册自己的 /api/<channel>/... 路由，因此后续新增渠道插件无需改 server/index.mjs。
+ *
+ * 安全提示：外部插件的 bridge.mjs 是后端 Node 代码，权限大于前端插件；只加载可信插件。
+ */
+async function collectBridgeFiles(root, depth = 0, out = []) {
+  if (!root || depth > 5) return out
+  let entries = []
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch (_) {
+    return out
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'release' || entry.name === 'target') continue
+    const full = join(root, entry.name)
+    if (entry.isDirectory()) await collectBridgeFiles(full, depth + 1, out)
+    else if (entry.isFile() && entry.name === 'bridge.mjs') out.push(full)
+  }
+  return out
+}
+
+async function loadChannelBridges(roots, ctx) {
+  const seen = new Set()
+  for (const root of roots) {
+    const files = (await collectBridgeFiles(root)).sort()
+    for (const file of files) {
+      if (seen.has(file)) continue
+      seen.add(file)
+      try {
+        const mod = await import(pathToFileURL(file).href + `?v=${Date.now()}`)
+        if (typeof mod.apply === 'function') ctx.plugin(mod, {})
+      } catch (err) {
+        console.warn(`[channel-bridge] 加载 ${file} 失败：${err?.message || err}`)
+      }
+    }
+  }
+}
 
 export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel, accessToken = '', onRestart = null } = {}) {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
@@ -74,8 +116,6 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [modelsPlugin, {}],
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
-    // 微信 Clawbot 后端桥：登录/长轮询/发送消息/typing；前端插件在同目录 index.mjs
-    [wechatClawbotBridge, {}],
     [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)
@@ -84,6 +124,17 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
   // 等配置与会话都完成加载后再开始对外服务（避免请求撞上初始化写盘）
   await Promise.all([ctx.sessions.ready(), ctx.settings?.ready?.()])
   paths.dataDir = ctx.instance?.info?.().dataDir || paths.dataDir
+
+  // HTTP 服务已就绪、httpApi 已 provide 后，再自动加载渠道后端桥（无需逐个写进本文件）。
+  // 外部插件目录优先级：环境变量 > 设置页配置 > 默认 <数据目录>/plugins。
+  const configuredPluginDir = String(ctx.settings?.get?.()?.plugins?.dir || '').trim()
+  const externalPluginDir =
+    process.env.NIANFENG_PLUGINS_DIR ||
+    process.env.FENGYU_PLUGINS_DIR ||
+    configuredPluginDir ||
+    join(paths.dataDir || dataDir || join(ROOT, 'user_data'), 'plugins')
+  await loadChannelBridges([join(ROOT, 'plugins', 'channels'), externalPluginDir], ctx)
+  await new Promise(resolve => setTimeout(resolve, 0))
 
   return {
     ctx,

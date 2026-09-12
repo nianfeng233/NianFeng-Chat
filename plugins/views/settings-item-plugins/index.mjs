@@ -139,9 +139,14 @@ export function apply(ctx) {
       const itemHtml = (plugin, list) => {
         const severity = severityOf(plugin, list)
         const disabled = plugin.status !== 'active'
+        // 插件可以注册自己的设置面板；有面板时，无论内置 / 第三方都显示「设置」。
+        const settingsBtn = plugin.hasSettings
+          ? `<button class="plugin-action-btn" data-plugin-action="settings" data-plugin-id="${plugin.id}">设置</button>`
+          : ''
         const actions = plugin.core
-          ? `<span class="plugin-core-hint">系统内置</span>`
+          ? `${settingsBtn}<span class="plugin-core-hint">系统内置</span>`
           : `
+            ${settingsBtn}
             <button class="plugin-action-btn" data-plugin-action="detail" data-plugin-id="${plugin.id}">详情</button>
             <button class="plugin-action-btn" data-plugin-action="toggle" data-plugin-id="${plugin.id}">${plugin.status === 'active' ? '禁用' : '启用'}</button>
             <button class="plugin-action-btn danger" data-plugin-action="remove" data-plugin-id="${plugin.id}">卸载</button>
@@ -178,6 +183,7 @@ export function apply(ctx) {
             <div class="plugin-issue muted">数据已保留；恢复后会重新加载插件。</div>
           </div>
           <div class="plugin-actions">
+            ${plugin.hasSettings ? `<button class="plugin-action-btn" data-plugin-action="settings" data-plugin-id="${plugin.id}">设置</button>` : ''}
             <button class="plugin-action-btn" data-plugin-action="detail" data-plugin-id="${plugin.id}">详情</button>
             <button class="plugin-action-btn primary" data-plugin-action="restore" data-plugin-id="${plugin.id}">恢复</button>
           </div>
@@ -426,6 +432,8 @@ export function apply(ctx) {
             const ok = await manager.restore(id)
             if (ok) toast.success(`已恢复插件「${manager.describe(id)?.name || id}」`)
             render()
+          } else if (action === 'settings') {
+            manager.openSettings(id)
           } else if (action === 'detail') {
             await showDetail(id)
           }
@@ -480,6 +488,7 @@ export function apply(ctx) {
         ctx.on('plugin:uninstalled', render),
         ctx.on('plugin:error', render),
         ctx.on('plugin:warning', render),
+        ctx.on('plugin:settings-registered', render),
       ]
 
       sortKeyEl.value = sortKey

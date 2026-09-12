@@ -81,6 +81,9 @@ export function apply(ctx) {
         .list()
         .slice()
         .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+        // 渠道自己的会话记录（如微信clawbot）只在「渠道详情 / 设置→聊天记录」里维护，
+        // 不再作为普通会话显示，避免同一个角色出现两个入口、收到两份消息。
+        .filter(conv => !conv.meta?.hiddenFromSessionList)
         .filter(conv => {
           if (!keyword) return true
           return conv.name.toLowerCase().includes(q) || String(conv.preview || '').toLowerCase().includes(q)
