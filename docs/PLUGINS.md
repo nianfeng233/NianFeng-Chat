@@ -89,6 +89,7 @@ export function apply(ctx) { /* ... */ }
 | `document-service` | `domain/document-service/index.mjs` | 资料原文存储与按 token 分段读取 | `document-service` | 资料库存储位置 / 分段策略 |
 | `chat-permissions` | `domain/chat-permissions/index.mjs` | 渠道权限表、跨渠道校验、敏感确认、审计 | `chat-permissions` | 权限模型 / 确认交互 |
 | `chat-queue` | `domain/chat-queue/index.mjs` | 角色级 FIFO 串行队列 | `chat-queue` | 并发与排队策略 |
+| `user-identity` | `domain/user-identity/index.mjs` | 统一用户标识：本机配置默认值 + 联网账号插件 `registerProvider()` | `user-identity` | 身份来源与隐私 |
 | `tool-registry` | `domain/tool-registry/index.mjs` | OpenAI function-calling 工具注册 / 编目 / 执行 | `tool-registry` | 新增领域工具 |
 
 ---
@@ -170,6 +171,7 @@ export function apply(ctx) { /* ... */ }
 |---|---|---|---|
 | `chat-flow` | `features/chat-flow/index.mjs` | 队列 → 存 → 上下文 → 工具循环 → 收尾；人设、推理等级、temperature、原生工具 / 文本工具协议兼容 | 聊天主链路 |
 | `chat-notify` | `features/chat-notify/index.mjs` | 监听 `message:added / message:done`；后台或非当前会话时逐条生成角色消息通知 | 消息提醒策略 |
+| `plugin-health-guard` | `features/plugin-health-guard/index.mjs` | 启动插件自检，发现红色错误时弹窗并引导到插件设置 | 错误门限与提示文案 |
 | `channel-base` | `features/channel-base/index.mjs` | 渠道基座：连接钩子 + 入站消息落库为会话 | 新渠道插件继承它 |
 | `model-adapter-backend` | `features/model-adapter-backend/index.mjs` | 把后端提供商注册为前端模型，经 `/api/chat` 流式对话 / 透传 tools | 模型来源与参数传递 |
 | `character-editor` | `features/character-editor/` | 新建 / 编辑会话角色：人格、模型、头像（捏人窗口） | 角色系统 |
