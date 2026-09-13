@@ -135,9 +135,10 @@ const DEFAULTS = {
   'napcat.inputState.intervalMs': 3000,
   'napcat.inputState.timeoutMs': 10 * 60 * 1000,
   'chat.requireToolCall': true,
-  // 严格模式最多纠正一次；之后直接把正文当回复发出，避免 DeepSeek 等模型
-  // 不返回 tool_calls 时一次普通聊天连续等待数分钟。
+  // 严格模式的纠正次数；上限由 chat.maxToolRounds 兜底，不再写死为 1。
   'chat.toolRetryLimit': 1,
+  // 每条 user 消息的 meta 里附一句“必须调用工具回复”的短提醒，缓解长上下文稀释。
+  'chat.perMessageToolReminder': true,
   'chat.emptyRetryLimit': 2,
   'chat.composerHeight': 0,
   'chat.userId': 'web-user',

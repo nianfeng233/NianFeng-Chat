@@ -69,8 +69,9 @@ export function apply(ctx) {
               { value: 'auto', label: 'auto · 模型决定' },
               { value: 'none', label: 'none · 关闭工具' },
             ], config.get('chat.toolChoice', 'required'))) +
-          row('严格工具模式', '模型直接输出正文时先按纠错提示重试一次；仍未调用工具就把正文作为回复发出，不再让用户空等或直接报错', switchBtn('chat.requireToolCall', true)) +
-          row('工具纠错次数', '严格模式下最多纠正几次（为提高响应速度，超过 1 次会按 1 次上限执行；0 = 不纠正，直接按普通文本降级）',
+          row('严格工具模式', '模型直接输出正文时先按纠错提示重试；仍未调用工具则把正文交给 chat_send 发送链兜底，不再直发裸 assistant 正文', switchBtn('chat.requireToolCall', true)) +
+          row('每条消息附带工具提醒', '在每条 user 消息的 meta 里附加“必须调用工具回复”的短提醒，缓解长上下文稀释；关闭可以省一点 token', switchBtn('chat.perMessageToolReminder', true)) +
+          row('工具纠错次数', '严格模式下最多纠正几次；0 = 不纠正，直接走正文兜底。总轮次仍受“最大工具轮次”约束',
             input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 1), { type: 'number', width: 70 })) +
           row('空回复纠正次数', '模型既没输出正文也没调用工具时，最多纠正几次；仍为空则明确报错并停止本轮',
             input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +

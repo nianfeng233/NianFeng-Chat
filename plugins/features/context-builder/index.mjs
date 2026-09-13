@@ -212,6 +212,12 @@ export function apply(ctx) {
     }
     if (message.role !== 'user') return null
     const text = String(message.content ?? '')
+    // 每条 user 消息都带一次“必须调用工具回复”的短提醒：长上下文里比只靠顶层
+    // system prompt 更靠近当前输入，能明显降低模型直接输出 assistant 正文的概率。
+    const perMessageToolReminder =
+      config.get('chat.toolsEnabled', true) !== false &&
+      config.get('chat.requireToolCall', true) !== false &&
+      config.get('chat.perMessageToolReminder', true) !== false
     // 图片优先从 image-service 内存缓存取 data URL；没有缓存时回退 dataUrl / 外链 URL。
     const imageService = ctx.registry.get('image-service')
     const allImages = Array.isArray(message.meta?.images) ? message.meta.images.filter(Boolean) : []
@@ -228,6 +234,9 @@ export function apply(ctx) {
       meta: {
         // 每条 user 消息的都是结构化信封：不可信正文放 content，
         // 时间 / 渠道 / 角色等系统生成的元数据放 meta，保证前缀历史稳定可缓存。
+        reply_policy: perMessageToolReminder
+          ? '必须调用工具回复：日常短消息用 chat_send，长文本 / 资料用 send_document；不允许直接输出 assistant 正文。'
+          : undefined,
         time: message.time || '',
         timestamp: message.timestamp || undefined,
         timezone: context.timezone || timezone(),
