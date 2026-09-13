@@ -491,7 +491,11 @@ export function apply(ctx) {
           meta: { via: 'composer', ...(normalizedImages.length ? { images: normalizedImages } : {}) },
         })
         scheduleStatus(conversationId, userMessage?.id)
-        const userWire = builder.toModelMessage(userMessage)
+        const userWire = builder.toModelMessage(userMessage, {
+          roleId,
+          channelId: userMessage?.channel_id || channelId,
+          timezone: builder.timezone?.(),
+        })
         if (userWire) entry.protocol.push(userWire)
       }
       emitStatus(conversationId, 'thinking', { round: 0, label: '正在思考' })

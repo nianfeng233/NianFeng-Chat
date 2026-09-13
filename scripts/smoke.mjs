@@ -158,6 +158,16 @@ async function main() {
     ctx.inject('settings-container').list().map(pageItem => pageItem.id).join(','),
   )
 
+  const toolDefs = ctx.registry.get('tool-registry')?.definitions?.() || []
+  const chatSendDef = toolDefs.find(item => item?.function?.name === 'chat_send')
+  check(
+    'chat_send 描述要求多条短消息拆成多个数组项',
+    String(chatSendDef?.function?.description || '').includes('独立消息') &&
+      String(chatSendDef?.function?.description || '').includes('真人聊天习惯') &&
+      String(chatSendDef?.function?.parameters?.properties?.messages?.description || '').includes('独立消息') &&
+      String(chatSendDef?.function?.parameters?.properties?.messages?.description || '').includes('句尾句号'),
+    JSON.stringify(chatSendDef?.function || null).slice(0, 260),
+  )
   const smokeManager = ctx.inject('plugin-manager')
   check(
     '插件设置面板扩展点已注册（微信clawbot 有设置面板）',
@@ -1371,6 +1381,7 @@ async function main() {
     JSON.stringify([...document.querySelectorAll('[data-logs-level] option')].map(option => option.getAttribute('value'))),
   )
   check('日志页有手动刷新按钮', !!document.querySelector('[data-logs-refresh]'))
+  check('日志页有“有新日志”回到底部兜底按钮', !!document.querySelector('[data-logs-jump]'))
   check(
     '运行日志页有级别 / 分类 / 搜索控件',
     !!document.querySelector('[data-logs-level]') &&

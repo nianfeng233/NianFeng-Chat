@@ -364,7 +364,28 @@ async function main() {
   const built = builder.build({ conversationId: conv2.id, roleId: 'role-test', persona: '你是冒烟测试角色。' })
   const builtText = built.messages.map(message => message.content).join('\n')
   check('新渠道上下文合并了工作记忆', builtText.includes('你好') && builtText.includes('"trust":"untrusted"'), builtText.slice(0, 160))
-  check('上下文带当前时间 / 时区 / 渠道元数据', builtText.includes('当前时间：') && builtText.includes('当前渠道：') && built.messages[0].role === 'system')
+  const builtSystem = String(built.messages[0]?.content || '')
+  const builtUserMessage = built.messages.find(message => message.role === 'user')
+  let builtUserPayload = null
+  try {
+    builtUserPayload = JSON.parse(String(builtUserMessage?.content || '{}'))
+  } catch (_) {
+    builtUserPayload = null
+  }
+  check(
+    'system 前缀只保留固定 prompt，不再每轮携带当前时间 / 渠道',
+    built.messages[0]?.role === 'system' && !builtSystem.includes('当前时间：') && !builtSystem.includes('当前渠道：'),
+    builtSystem.slice(0, 160),
+  )
+  check(
+    'user 消息用结构化 meta 携带时间戳 / 时区 / 渠道 / 角色',
+    builtUserPayload?.meta?.timestamp &&
+      builtUserPayload?.meta?.timezone &&
+      builtUserPayload?.meta?.channel &&
+      builtUserPayload?.meta?.role_id &&
+      builtUserPayload?.content?.trust === 'untrusted',
+    JSON.stringify(builtUserPayload?.meta || null),
+  )
   check('context-builder 受 token 预算约束', built.stats.memoryTokens <= built.stats.budget, JSON.stringify(built.stats))
 
   console.log('\n⑦b 渠道设置里勾选跨渠道权限：来源侧策略直接生效')

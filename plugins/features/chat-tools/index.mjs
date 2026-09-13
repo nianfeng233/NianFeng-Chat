@@ -425,7 +425,7 @@ export function apply(ctx) {
       'chat_send',
       {
         description:
-          '发送一条或多条聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。一次调用可发送多条，发完设置 end=true 结束本轮；end=false 表示继续下一轮工具调用。',
+          '发送一条或多条短聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，不要把多句话用换行符拼成一条大消息；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发大段长文 / 资料 / 文献时改用 send_document。',
         parameters: {
           type: 'object',
           properties: {
@@ -433,7 +433,7 @@ export function apply(ctx) {
             messages: {
               type: 'array',
               items: { type: 'string' },
-              description: '要发送的自然回复文本列表；不需要加编号、前缀或解释。',
+              description: '短聊天消息列表，每个数组项会作为独立消息发出。多条消息请拆开，例如 ["你好","有什么事？"]；不要用换行符把多句话塞进一条。日常聊天一般不需要句尾句号，更像 QQ / 微信真人输入；不要加编号、前缀或解释。',
             },
             images: {
               type: 'array',
@@ -451,7 +451,7 @@ export function apply(ctx) {
       'send_document',
       {
         description:
-          '发送长文本 / 资料 / 文献。原文存入资料库，聊天记录只保存标题、缩略和 doc_id；之后可用 read_document 读取原文。',
+          '发送长文本 / 资料 / 文献（例如大段说明、代码、文章，或内容里本来就有大段换行的情况）。原文存入资料库，聊天记录只保存标题、缩略和 doc_id；之后可用 read_document 读取原文。日常短聊天不要用这个工具，改用 chat_send。',
         parameters: {
           type: 'object',
           properties: {

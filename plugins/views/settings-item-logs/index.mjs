@@ -110,6 +110,7 @@ export function apply(ctx) {
             <button class="outline-btn" data-logs-copy>复制</button>
             <button class="outline-btn" data-logs-export>导出日志</button>
             <button class="outline-btn" data-logs-refresh title="立即重新拉取后端全部日志；SSE / 代理卡顿时可手动兜底">刷新</button>
+            <button class="outline-btn" data-logs-jump hidden title="有新日志；点击回到底部">有新日志 ↓</button>
             <span class="logs-stats" data-logs-stats></span>
           </div>
           <div class="logs-list" data-logs-list>
@@ -132,11 +133,14 @@ export function apply(ctx) {
       const pauseBtn = container.querySelector('[data-logs-pause]')
       const backendFileEl = container.querySelector('[data-logs-backend-file]')
       const syncHintEl = container.querySelector('[data-logs-sync-hint]')
+      const jumpBtn = container.querySelector('[data-logs-jump]')
 
       let entries = []
       let seq = 0
       let autoScroll = true
       let paused = false
+      // 用户手动向上翻日志时累计的新日志数量，用于“有新日志 ↓”提示。
+      let unseen = 0
       let renderTimer = null
       let backendTimer = null
       let backendFile = ''
@@ -158,6 +162,13 @@ export function apply(ctx) {
         }, 80)
       }
 
+      const updateJumpBtn = () => {
+        if (!jumpBtn) return
+        const show = unseen > 0 && !autoScroll
+        jumpBtn.hidden = !show
+        if (show) jumpBtn.textContent = `有新日志 ${unseen > 999 ? '999+' : unseen} ↓`
+      }
+
       const fingerprintOf = entry => {
         const at = Number(entry?.at) || Date.now()
         const text = String(entry?.text || '').slice(0, 600)
@@ -168,7 +179,7 @@ export function apply(ctx) {
       }
 
       const add = entry => {
-        if (!active) return
+        if (!active) return false
         const item = {
           id: ++seq,
           at: Date.now(),
@@ -180,7 +191,7 @@ export function apply(ctx) {
           ...entry,
         }
         const key = fingerprintOf(item)
-        if (entryKeys.has(key)) return
+        if (entryKeys.has(key)) return false
         entryKeys.add(key)
         if (entryKeys.size > MAX_ENTRIES * 2) {
           entryKeys.clear()
@@ -188,7 +199,12 @@ export function apply(ctx) {
         }
         entries.push(item)
         if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+        if (!autoScroll) {
+          unseen += 1
+          updateJumpBtn()
+        }
         scheduleRender()
+        return true
       }
 
       const addRawLog = record => {
@@ -224,6 +240,7 @@ export function apply(ctx) {
 
       const render = () => {
         if (!active || !listEl) return
+        const keepScrollTop = listEl.scrollTop
         const minLevel = LEVELS[levelSelect?.value] ?? LEVELS.info
         const cat = catSelect?.value || ''
         const keyword = String(searchInput?.value || '').trim().toLowerCase()
@@ -254,7 +271,15 @@ export function apply(ctx) {
               : ' 实时流未连接，正在用 3 秒轮询兜底；也可以点「刷新」立即重拉。'
             : ' 当前后端没有运行时日志实时接口（可能是旧进程或旧后端）：请重启后端后再打开日志页；现在只能看到浏览器端日志与旧请求日志。'
         }
-        if (autoScroll && !paused && listEl) listEl.scrollTop = listEl.scrollHeight
+        // 重新 innerHTML 会丢失原滚动位置：自动滚动时直接到底；用户手动翻上去
+        // 时保留原位置，并显示“有新日志”提示，避免刷新/实时更新看起来没反应。
+        if (autoScroll) {
+          unseen = 0
+          if (!paused) listEl.scrollTop = listEl.scrollHeight
+        } else {
+          listEl.scrollTop = Math.min(keepScrollTop, Math.max(0, listEl.scrollHeight - listEl.clientHeight))
+        }
+        updateJumpBtn()
       }
 
       const pullBackend = async () => {
@@ -271,23 +296,23 @@ export function apply(ctx) {
 
       let runtimeSeen = new Set()
       const addRuntimeLine = line => {
-        if (!line || typeof line !== 'object') return
+        if (!line || typeof line !== 'object') return false
         const id = Number(line.id) || 0
         if (id) {
-          if (runtimeSeen.has(id)) return
+          if (runtimeSeen.has(id)) return false
           runtimeSeen.add(id)
           if (runtimeSeen.size > 12000) runtimeSeen = new Set()
           if (id > latestRuntimeId) latestRuntimeId = id
         } else {
           const key = `runtime|${line.at || ''}|${line.name || ''}|${line.text || ''}`
-          if (runtimeSeen.has(key)) return
+          if (runtimeSeen.has(key)) return false
           runtimeSeen.add(key)
         }
         const text = String(line.text || line.line || '').trim()
-        if (!text) return
+        if (!text) return false
         const level = ['error', 'warn', 'info', 'debug'].includes(line.level) ? line.level : 'info'
         const name = String(line.name || 'backend')
-        add({
+        return add({
           at: Number(line.at) || Date.now(),
           level,
           cat: categoryOfSource(name),
@@ -299,7 +324,7 @@ export function apply(ctx) {
       }
 
       const pullBackendRuntime = async ({ force = false } = {}) => {
-        if (!active || !api) return
+        if (!active || !api) return { ok: false, error: '后端未连接' }
         try {
           if (force) {
             latestRuntimeId = 0
@@ -314,14 +339,19 @@ export function apply(ctx) {
             return pullBackendRuntime({ force: true })
           }
           backendFile = data?.file || backendFile
-          for (const line of data?.lines || []) addRuntimeLine(line)
+          let added = 0
+          for (const line of data?.lines || []) {
+            if (addRuntimeLine(line)) added += 1
+          }
           if (latest > latestRuntimeId) latestRuntimeId = latest
           if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
           scheduleRender()
-        } catch (_) {
+          return { ok: true, added, latest }
+        } catch (err) {
           // 旧后端没有该接口时保留本地日志订阅兜底。
           runtimeAvailable = false
           scheduleRender()
+          return { ok: false, error: err?.message || String(err) }
         }
       }
 
@@ -481,7 +511,9 @@ export function apply(ctx) {
         if (!button) return
         if (button.dataset.logsAutoscroll !== undefined) {
           autoScroll = !autoScroll
+          if (autoScroll) unseen = 0
           button.classList.toggle('on', autoScroll)
+          updateJumpBtn()
           if (autoScroll) render()
         } else if (button.dataset.logsPause !== undefined) {
           paused = !paused
@@ -531,19 +563,41 @@ export function apply(ctx) {
       // 导致列表没跟上时，一按就强制重新拉取后端日志全量。
       const onRefresh = async event => {
         event?.stopPropagation?.()
-        await pullBackendRuntime({ force: true })
+        // 手动刷新意味着“我现在就要看最新日志”：取消暂停并强制回到底部。
+        paused = false
+        pauseBtn?.classList.remove('on')
+        if (pauseBtn) pauseBtn.textContent = '暂停'
+        autoScroll = true
+        unseen = 0
+        updateJumpBtn()
+        const result = await pullBackendRuntime({ force: true })
         await pullBackend()
         render()
-        toast?.success?.('日志已刷新')
+        listEl.scrollTop = listEl.scrollHeight
+        if (result?.ok === false) toast?.error?.(`日志刷新失败：${result.error || '后端日志接口不可用'}`)
+        else if (Number(result?.added) > 0) toast?.success?.(`日志已刷新，新增 ${result.added} 条`)
+        else toast?.info?.('日志已刷新，没有新日志')
       }
       const refreshBtn = container.querySelector('[data-logs-refresh]')
       refreshBtn?.addEventListener('click', onRefresh)
+      const onJump = event => {
+        event?.stopPropagation?.()
+        autoScroll = true
+        unseen = 0
+        autoBtn?.classList.add('on')
+        updateJumpBtn()
+        render()
+        listEl.scrollTop = listEl.scrollHeight
+      }
+      jumpBtn?.addEventListener('click', onJump)
       container.addEventListener('click', onClick)
       const onListScroll = () => {
         if (paused) return
         const atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 28
         autoScroll = atBottom
+        if (autoScroll) unseen = 0
         autoBtn?.classList.toggle('on', autoScroll)
+        updateJumpBtn()
       }
       listEl?.addEventListener('scroll', onListScroll)
       levelSelect?.addEventListener('change', render)
@@ -581,6 +635,7 @@ export function apply(ctx) {
         offRecord?.()
         offs.forEach(off => off?.())
         refreshBtn?.removeEventListener('click', onRefresh)
+        jumpBtn?.removeEventListener('click', onJump)
         container.removeEventListener('click', onClick)
         listEl?.removeEventListener('scroll', onListScroll)
         levelSelect?.removeEventListener('change', render)
