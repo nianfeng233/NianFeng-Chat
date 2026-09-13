@@ -15,6 +15,7 @@
 import { createServer } from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import { extname, join, resolve } from 'node:path'
 import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -28,6 +29,9 @@ const args = new Set(process.argv.slice(2))
 const singlePort = args.has('--serve') || args.has('--single-port')
 const noOpenEnv = String(process.env.NIANFENG_NO_OPEN || process.env.FENGYU_NO_OPEN || '').trim()
 const autoOpen = !args.has('--no-open') && !/^(1|true|yes|on)$/i.test(noOpenEnv)
+// 服务端常驻代聊：默认开启（可用 --no-agent 或 NIANFENG_HEADLESS_AGENT=0 关闭）。
+// 它用 Node DOM 垫片运行与浏览器相同的前端插件，保证关掉 WebUI 后消息仍会被处理。
+const headlessAgentEnabled = !args.has('--no-agent') && !/^(0|false|no|off)$/i.test(String(process.env.NIANFENG_HEADLESS_AGENT || '').trim())
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -371,6 +375,9 @@ async function main() {
   let backend = null
   let web = null
   let restarting = false
+  let agentWorker = null
+  let agentCapabilityDispose = null
+  let shuttingDown = false
 
   const closeWebServer = () =>
     new Promise(resolve => {
@@ -404,6 +411,8 @@ async function main() {
   const restart = async () => {
     if (restarting) return
     restarting = true
+    shuttingDown = true
+    stopHeadlessAgent()
     console.log('正在重启念风…')
     try {
       await closeWebServer()
@@ -421,6 +430,67 @@ async function main() {
     process.exit(0)
   }
 
+  /** 关闭服务端代聊 Worker；同时撤销 server-agent 能力，让 WebUI 可以接管。 */
+  const stopHeadlessAgent = () => {
+    try {
+      agentCapabilityDispose?.()
+    } catch (_) {
+      /* ignore */
+    }
+    agentCapabilityDispose = null
+    const worker = agentWorker
+    agentWorker = null
+    if (!worker) return
+    try {
+      const result = worker.terminate()
+      result?.catch?.(() => {})
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  /** 启动服务端常驻代聊：隐藏的 Node 前端运行时，不依赖浏览器窗口。 */
+  const startHeadlessAgent = () => {
+    if (!headlessAgentEnabled || shuttingDown || agentWorker) return
+    try {
+      const registerCapability = backend?.ctx?.httpApi?.registerCapability
+      agentCapabilityDispose = typeof registerCapability === 'function' ? registerCapability('server-agent') : null
+      const worker = new Worker(new URL('./src/headless/runtime.mjs', import.meta.url), {
+        workerData: {
+          backendUrl: `${backend.url}/api`,
+          accessToken,
+        },
+      })
+      agentWorker = worker
+      worker.once('error', err => {
+        console.error('服务端代聊 Worker 异常：', err?.stack || err?.message || err)
+      })
+      worker.once('exit', code => {
+        if (agentWorker === worker) agentWorker = null
+        try {
+          agentCapabilityDispose?.()
+        } catch (_) {
+          /* ignore */
+        }
+        agentCapabilityDispose = null
+        if (shuttingDown || !headlessAgentEnabled) return
+        console.warn(`服务端代聊 Worker 退出（code=${code ?? 'null'}），2 秒后重启`)
+        const timer = setTimeout(() => {
+          if (!shuttingDown) startHeadlessAgent()
+        }, 2000)
+        timer.unref?.()
+      })
+    } catch (err) {
+      console.error('无法启动服务端代聊：', err?.message || err)
+      try {
+        agentCapabilityDispose?.()
+      } catch (_) {
+        /* ignore */
+      }
+      agentCapabilityDispose = null
+    }
+  }
+
   backend = await startBackend({
     port: singlePort ? webPort : backendPort,
     host: singlePort ? webuiHost : '127.0.0.1',
@@ -432,6 +502,7 @@ async function main() {
     // 单端口模式也会包含同一端口，便于本机 IP / hostname 访问。
     allowedOrigins: webuiOriginList(webuiHost, webPort),
   })
+  startHeadlessAgent()
   let webUrl = backend.url
   if (!singlePort) {
     web = createWebServer({
@@ -463,12 +534,15 @@ async function main() {
     `API   : ${backend.url}/api/health`,
     `数据  : ${backend.dataDir}`,
     singlePort ? '模式  : 单端口（可直接分享给同机使用）' : `代理  : ${webUrl}/api → 127.0.0.1:${backend.port}`,
+    headlessAgentEnabled ? '代聊  : 服务端常驻（关闭 WebUI 也会继续回复）' : '代聊  : 已关闭（仅 WebUI 运行时）',
     '停止  : 按 Ctrl+C',
   ])
 
   openBrowser(webUrl)
 
   const shutdown = async () => {
+    shuttingDown = true
+    stopHeadlessAgent()
     console.log('\n正在关闭念风…')
     try {
       await closeWebServer()

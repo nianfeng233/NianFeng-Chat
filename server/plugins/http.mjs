@@ -41,6 +41,15 @@ export function apply(ctx, config = {}) {
   const sessions = ctx.sessions
   const models = ctx.models
   const hub = ctx.hub
+  /** 服务端常驻代聊请求会带这个头；浏览器收到 agent=true 的事件后刷新对应会话。 */
+  const isAgentRequest = req => String(req?.headers?.['x-nianfeng-agent'] || '') === '1'
+  const broadcastSessionChange = (req, action, id, extra = {}) => {
+    try {
+      hub.broadcast('sessions/changed', { action, id, agent: isAgentRequest(req), at: Date.now(), ...extra })
+    } catch (_) {
+      /* SSE 广播失败不影响写入 */
+    }
+  }
 
   const port = config.port ?? 8788
   const host = config.host ?? '127.0.0.1'
@@ -644,6 +653,7 @@ export function apply(ctx, config = {}) {
     const body = await readBody(req)
     const message = sessions.addMessage(params.id, body)
     if (!message) return sendError(res, 404, '会话不存在')
+    broadcastSessionChange(req, 'message', params.id, { messageId: message.id })
     sendJson(res, 201, message)
   })
 
@@ -652,6 +662,7 @@ export function apply(ctx, config = {}) {
     const body = await readBody(req)
     const message = sessions.updateMessage(params.id, params.messageId, body)
     if (!message) return sendError(res, 404, '消息不存在')
+    broadcastSessionChange(req, 'message-update', params.id, { messageId: params.messageId })
     sendJson(res, 200, message)
   })
 
@@ -662,6 +673,7 @@ export function apply(ctx, config = {}) {
     const list = Array.isArray(body?.messages) ? body.messages : body
     const conv = sessions.replaceMessages(params.id, Array.isArray(list) ? list : [])
     if (!conv) return sendError(res, 404, '会话不存在')
+    broadcastSessionChange(req, 'messages-replace', params.id, { count: conv.messages.length })
     sendJson(res, 200, { ok: true, count: conv.messages.length })
   })
 
@@ -669,6 +681,7 @@ export function apply(ctx, config = {}) {
     await sessions.ready()
     const conv = sessions.clearMessages(params.id)
     if (!conv) return sendError(res, 404, '会话不存在')
+    broadcastSessionChange(req, 'messages-replace', params.id, { count: 0 })
     sendJson(res, 200, { ok: true })
   })
 
@@ -676,6 +689,7 @@ export function apply(ctx, config = {}) {
     await sessions.ready()
     const ok = sessions.removeMessage(params.id, params.messageId)
     if (!ok) return sendError(res, 404, '消息不存在')
+    broadcastSessionChange(req, 'message-remove', params.id, { messageId: params.messageId })
     sendJson(res, 200, { ok: true })
   })
 

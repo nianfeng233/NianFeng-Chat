@@ -941,6 +941,8 @@ export function apply(ctx) {
   }
 
   async function handleInbound(payload) {
+    // 服务端常驻代聊已接管时，WebUI 只负责展示，不再重复处理入站消息。
+    if (api?.supports?.('server-agent') && globalThis.__NIANFENG_SERVER_AGENT__ !== true) return
     const channelId = payload?.channelId
     const message = payload?.message
     const hasImages = Array.isArray(message?.images) && message.images.length > 0

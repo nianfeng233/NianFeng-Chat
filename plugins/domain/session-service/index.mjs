@@ -22,11 +22,12 @@ export const core = true
 export const depends = {
   'config': '^1.0.0',
   'storage': '^1.0.0',
+  'event-bus': '*',
 }
 export const optionalDepends = {
   'backend-client': '>=1.0.0',
 }
-export const inject = ['storage', 'config', 'api?']
+export const inject = ['storage', 'config', 'event-bus', 'api?']
 export const provides = [{ name: 'session-service', type: 'singleton' }]
 
 const NS = 'sessions'
@@ -40,6 +41,7 @@ export function apply(ctx) {
   const storage = ctx.inject('storage')
   const config = ctx.inject('config')
   const api = ctx.inject('api')
+  const events = ctx.inject('event-bus')
 
   let data = storage.get(NS, KEY, null)
   if (!data || !Array.isArray(data.conversations)) data = { conversations: [], activeId: null }
@@ -574,6 +576,58 @@ export function apply(ctx) {
       ctx.emit('conversation:reset', null)
       ctx.emit('conversation:sync', { conversations: [] })
     },
+  }
+
+
+  // 服务端常驻代聊写回消息时，后端会广播 agent=true 的 sessions/changed。
+  // 浏览器端只负责刷新对应会话，不重复处理入站消息。
+  let agentRefreshTimer = null
+  let agentRefreshChannel = ''
+  const refreshConversationFromBackend = async conversationId => {
+    if (!api || source !== 'server') return
+    try {
+      const payload = await api.sessions()
+      const remote = (payload.conversations || []).find(conv => conv.id === conversationId)
+      if (!remote) return
+      const local = find(conversationId)
+      let next = remote
+      if (local) {
+        const merged = mergeConversationMessages(local, remote)
+        next = {
+          ...(isNewerConversation(local, remote) ? local : remote),
+          messages: merged.messages,
+          messageCount: merged.messageCount,
+          updatedAt: Math.max(Number(local.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || remote.updatedAt,
+          localTruncated: merged.localTruncated,
+        }
+      }
+      service.adopt(next)
+    } catch (err) {
+      if (!isTransientSyncError(err)) ctx.logger.warn(`同步服务端代聊消息失败：${err.message}`)
+    }
+  }
+  if (events) {
+    ctx.effect(
+      events.on('backend:event', payload => {
+        const data = payload?.data || {}
+        if (payload?.event !== 'sessions/changed' || !data.id) return
+        // 只处理“另一边”的写入：浏览器处理服务端代聊的消息，代聊 runtime 处理浏览器写回的消息。
+        const fromAgent = data.agent === true
+        if (globalThis.__NIANFENG_SERVER_AGENT__ === true ? fromAgent : !fromAgent) return
+        agentRefreshChannel = String(data.id)
+        if (agentRefreshTimer) return
+        agentRefreshTimer = setTimeout(() => {
+          agentRefreshTimer = null
+          const id = agentRefreshChannel
+          agentRefreshChannel = ''
+          refreshConversationFromBackend(id).catch(() => {})
+        }, 180)
+      }),
+    )
+    ctx.effect(() => () => {
+      if (agentRefreshTimer) clearTimeout(agentRefreshTimer)
+      agentRefreshTimer = null
+    })
   }
 
   ctx.effect(() => {
