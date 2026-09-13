@@ -226,14 +226,14 @@ export function apply(ctx, config = {}) {
     res.end(body)
   }
 
-  const readBody = req =>
+  const readBody = (req, maxBytes = 2 * 1024 * 1024) =>
     new Promise((resolveBody, reject) => {
       let size = 0
       const chunks = []
       req.on('data', chunk => {
         size += chunk.length
-        if (size > 2 * 1024 * 1024) {
-          reject(Object.assign(new Error('请求体超过 2MB 限制'), { status: 413 }))
+        if (size > maxBytes) {
+          reject(Object.assign(new Error(`请求体超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`), { status: 413 }))
           req.destroy()
           return
         }
@@ -249,6 +249,9 @@ export function apply(ctx, config = {}) {
       })
       req.on('error', reject)
     })
+
+  /** 插件上传是 base64 JSON，单独放宽到 48MB（解码后的 zip 仍限制 32MB）。 */
+  const readUploadBody = req => readBody(req, 48 * 1024 * 1024)
 
   const sse = (res, handler) => {
     res.writeHead(200, {
@@ -346,7 +349,7 @@ export function apply(ctx, config = {}) {
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
       capabilities: [
         'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
-        'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'plugin-http-routes',
+        'external-plugins', 'plugin-dirs', 'plugin-upload', 'webui-auth', 'system-restart', 'plugin-http-routes',
         'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'health-detail-auth',
         ...extraCapabilities,
       ],
@@ -447,6 +450,18 @@ export function apply(ctx, config = {}) {
   route('POST', '/api/plugins/pick-dir', async (req, res) => {
     const result = await ctx.pluginRegistry.pickDirectory()
     sendJson(res, 200, { ok: true, path: result.path })
+  })
+
+  /** 浏览器上传 zip 插件包并安装到外部插件目录（远程部署同样适用） */
+  route('POST', '/api/plugins/upload', async (req, res) => {
+    const body = await readUploadBody(req)
+    const result = await ctx.pluginRegistry.installZip({
+      base64: body.data,
+      filename: body.filename,
+      overwrite: body.overwrite === true || String(body.overwrite) === 'true',
+    })
+    if (!result.ok) return sendError(res, result.exists ? 409 : 400, result.error)
+    sendJson(res, 200, result)
   })
 
   route('POST', '/api/plugins/open-dir', async (req, res) => {
@@ -727,9 +742,15 @@ export function apply(ctx, config = {}) {
     }
     const started = Date.now()
 
+    // 先做一次纯令牌状态计算：配了访问令牌且本次请求令牌有效时，
+    // Host / Origin 校验直接放行——远程部署（公网 IP / 域名 / 反向代理）
+    // 本来就不在默认的本机 Host 白名单里，令牌才是真正的访问凭证；
+    // DNS rebinding 的恶意网页拿不到这个令牌。
+    const earlyTokenState = accessToken ? checkAccessToken(req, url, rawPathname) : null
+    const trustedPeer = !!accessToken && earlyTokenState?.ok === true
     // Host / Origin 双重校验：DNS rebinding 的 Host 不是本机名，恶意网页的 Origin
-    // 也不在放行列表里；两者都在这里直接拒绝，不进入任何业务路由。
-    if (!isAllowedHost(req.headers.host) || !isAllowedOrigin(req.headers.origin)) {
+    // 也不在放行列表里；两者都拒绝，不进入任何业务路由。
+    if ((!isAllowedHost(req.headers.host) || !isAllowedOrigin(req.headers.origin)) && !trustedPeer) {
       sendError(res, 403, '请求来源校验失败：仅允许本机或已配置的 Host / Origin')
       return
     }
@@ -744,9 +765,11 @@ export function apply(ctx, config = {}) {
     try {
       /* WebUI 访问令牌：空 token 不启用；?token= 仅用于 HTML 首屏换 Cookie，API 只认头 / Cookie。 */
       if (accessToken && !openRoute(pathname)) {
-        const state = checkAccessToken(req, url, pathname)
+        const state = earlyTokenState || checkAccessToken(req, url, pathname)
         if (!state.ok) return sendAuthPage(res)
-        if (state.queryOk && !state.cookieOk) {
+        // 只要本次导航带的是有效 ?token=，就跳转到去掉令牌的干净地址，
+        // 即使浏览器早已有 Cookie，也不让令牌继续留在地址栏 / 历史记录里。
+        if (state.queryOk) {
           const clean = new URL(req.url, 'http://localhost')
           clean.searchParams.delete('token')
           res.writeHead(302, {

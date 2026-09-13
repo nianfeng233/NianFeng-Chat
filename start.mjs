@@ -127,6 +127,26 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
     }
   }
 
+  /**
+   * WebUI 边缘 Origin 校验（代理转发前先拦一层）：
+   *   - 没有 Origin（curl / 同源静态请求）放行；
+   *   - Origin 与请求 Host 主机名一致（同源 / 反代同一域名）放行；
+   *   - 其余跨站 Origin 一律拒绝，避免代理层替恶意页面绕过后端校验。
+   * 注意：令牌只用于 Host 信任，不作为跨站 Origin 的放行条件。
+   */
+  const isAllowedOrigin = req => {
+    const origin = String(req.headers.origin || '').trim()
+    if (!origin) return true
+    if (origin === 'null') return false
+    try {
+      const originHost = normalizeHostName(new URL(origin).hostname)
+      const requestHost = normalizeHostName(new URL(`http://${String(req.headers.host || '')}`).hostname)
+      return !!originHost && !!requestHost && originHost === requestHost
+    } catch (_) {
+      return false
+    }
+  }
+
   const cookieValue = (req, name) => {
     for (const part of String(req.headers.cookie || '').split(';')) {
       const [key, ...rest] = part.trim().split('=')
@@ -145,6 +165,25 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
 <p>这是一个受保护的 WebUI。请在地址后加上访问令牌完成首次引导：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://&lt;主机&gt;:&lt;端口&gt;/?token=你的令牌</pre>
 <p>验证通过后会写入本机 Cookie，随后地址栏会自动去掉令牌。</p></body></html>`
 
+  /**
+   * 计算请求携带的令牌状态（纯计算，不写 Cookie / 不改响应）。
+   * `?token=` 只允许用于首次 HTML 导航；API 只认 Cookie / 请求头。
+   */
+  const evaluateToken = (req, url, pathname) => {
+    const queryToken = url.searchParams.get('token') || ''
+    const cookieToken = cookieValue(req, 'nianfeng_token')
+    const headerToken = String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+    const headerOk = !!headerToken && timingSafeStringEqual(headerToken, token)
+    const cookieOk = !!cookieToken && timingSafeStringEqual(cookieToken, token)
+    const canUseQuery =
+      req.method === 'GET' &&
+      !pathname.startsWith('/api/') &&
+      !pathname.startsWith('/user-plugins/') &&
+      String(req.headers.accept || '').includes('text/html')
+    const queryOk = canUseQuery && !!queryToken && timingSafeStringEqual(queryToken, token)
+    return { headerOk, cookieOk, queryOk, ok: headerOk || cookieOk || queryOk }
+  }
+
   const setSecurityHeaders = res => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('X-Frame-Options', 'DENY')
@@ -153,10 +192,6 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
 
   return createServer(async (req, res) => {
     setSecurityHeaders(res)
-    if (!isAllowedHost(req.headers.host)) {
-      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
-      return
-    }
     let url
     try {
       url = new URL(req.url, 'http://localhost')
@@ -171,26 +206,31 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
       /* 非法编码时保持原样 */
     }
 
+    // 配了访问令牌且令牌有效时，Host 校验放行：
+    // 远程部署（公网 IP / 域名 / 反向代理）通常不在默认的本机 Host 列表里，
+    // 但令牌本身已是可信凭证；DNS rebinding 的恶意网页拿不到这个令牌。
+    const tokenState = token ? evaluateToken(req, url, pathname) : null
+    if (!isAllowedHost(req.headers.host) && !tokenState?.ok) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
+      return
+    }
+    if (!isAllowedOrigin(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
+      return
+    }
+
     // 访问令牌：health / version 放行（供宿主探活）。
     // ?token= 只允许用于首次 HTML 导航换 Cookie；API 请求只认 Cookie / 请求头。
     if (token && req.method !== 'OPTIONS' && pathname !== '/api/health' && pathname !== '/api/version') {
-      const queryToken = url.searchParams.get('token') || ''
-      const cookieToken = cookieValue(req, 'nianfeng_token')
-      const headerToken = String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-      const headerOk = !!headerToken && timingSafeStringEqual(headerToken, token)
-      const cookieOk = !!cookieToken && timingSafeStringEqual(cookieToken, token)
-      const canUseQuery =
-        req.method === 'GET' &&
-        !pathname.startsWith('/api/') &&
-        !pathname.startsWith('/user-plugins/') &&
-        String(req.headers.accept || '').includes('text/html')
-      const queryOk = canUseQuery && !!queryToken && timingSafeStringEqual(queryToken, token)
-      if (!headerOk && !cookieOk && !queryOk) {
+      const state = tokenState || evaluateToken(req, url, pathname)
+      if (!state.ok) {
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(authPage)
         return
       }
-      if (queryOk && !cookieOk) {
+      // 只要本次导航带的是有效 ?token=，就跳转到去掉令牌的干净地址：
+      // 即使浏览器早已有 Cookie，也不能把令牌继续留在地址栏 / 历史记录里。
+      if (state.queryOk) {
         const clean = new URL(req.url, 'http://localhost')
         clean.searchParams.delete('token')
         res.writeHead(302, {
@@ -212,7 +252,15 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
           port: backendPort,
           path: req.url,
           method: req.method,
-          headers: { ...req.headers, host: `127.0.0.1:${backendPort}` },
+          // WebUI 代理层已经完成 Host / Origin 校验，这里统一把 Origin 收敛到
+          // 本机后端地址：后端只信任本机代理，否则远程 IP / 域名访问会因为
+          // Origin 不在后端白名单里被 403（“请求来源校验失败”的根因）。
+          headers: (() => {
+            const headers = { ...req.headers, host: `127.0.0.1:${backendPort}` }
+            if (headers.origin) headers.origin = `http://127.0.0.1:${backendPort}`
+            delete headers.referer
+            return headers
+          })(),
         },
         proxyRes => {
           res.writeHead(proxyRes.statusCode || 502, proxyRes.headers)

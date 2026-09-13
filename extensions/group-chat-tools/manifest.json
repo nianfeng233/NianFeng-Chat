@@ -28,6 +28,7 @@
   "provides": ["group-chat-tools"],
   "distribution": {
     "directory": "extensions/group-chat-tools",
-    "placement": "外部插件：<数据目录>/plugins/group-chat-tools/index.mjs；需与内置 NapCat 渠道插件配合使用"
+    "zip": "group-chat-tools-v1.0.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/group-chat-tools/index.mjs；需与内置 NapCat 渠道插件配合使用，也可在「设置 → 插件 → 添加插件」里直接上传 zip 安装"
   }
 }

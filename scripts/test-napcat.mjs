@@ -15,6 +15,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startBackend } from '../server/index.mjs'
+import { isBacklogMessage } from '../plugins/channels/napcat/index.mjs'
 
 const results = []
 let failed = 0
@@ -454,6 +455,15 @@ async function main() {
         (discover.data?.peers || []).some(item => item.type === 'private' && String(item.peerId) === '10002'),
       JSON.stringify((discover.data?.peers || []).map(item => `${item.type}:${item.peerId}`)),
     )
+    const backlogNow = Date.now()
+    check('积压判定：receivedAt 早于启动时间', isBacklogMessage({ receivedAt: backlogNow - 60000 }, { sessionStartedAt: backlogNow }) === true)
+    check('积压判定：receivedAt 在宽限期内视为实时', isBacklogMessage({ receivedAt: backlogNow - 1000 }, { sessionStartedAt: backlogNow }) === false)
+    check(
+      '积压判定：消息发送时间早于启动时间也算积压',
+      isBacklogMessage({ receivedAt: backlogNow, time: new Date(backlogNow - 3600000).toISOString() }, { sessionStartedAt: backlogNow }) === true,
+    )
+    check('积压判定：napcat.replyBacklog=true 时恢复回复', isBacklogMessage({ receivedAt: backlogNow - 60000 }, { sessionStartedAt: backlogNow, replyBacklog: true }) === false)
+    check('积压判定：没有时间信息的新消息不算积压', isBacklogMessage({}, { sessionStartedAt: backlogNow }) === false)
   } finally {
     try {
       ws?.close()

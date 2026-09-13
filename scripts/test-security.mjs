@@ -16,7 +16,7 @@
  * 用法：npm run test:security
  */
 import http from 'node:http'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startBackend } from '../server/index.mjs'
@@ -66,6 +66,51 @@ async function freePort() {
   await new Promise(resolve => probe.close(resolve))
   return port
 }
+
+/** 测试用最小 zip 写入（store 方法；我们的解析器不校验 CRC）。 */
+function makeZip(entries) {
+  const localParts = []
+  const centralParts = []
+  let offset = 0
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(String(entry.name), 'utf8')
+    const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(String(entry.data ?? ''), 'utf8')
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0, 6)
+    local.writeUInt16LE(0, 8)
+    local.writeUInt32LE(0, 14)
+    local.writeUInt32LE(data.length, 18)
+    local.writeUInt32LE(data.length, 22)
+    local.writeUInt16LE(nameBuf.length, 26)
+    local.writeUInt16LE(0, 28)
+    localParts.push(local, nameBuf, data)
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0)
+    central.writeUInt16LE(20, 4)
+    central.writeUInt16LE(20, 6)
+    central.writeUInt16LE(0, 8)
+    central.writeUInt16LE(0, 10)
+    central.writeUInt32LE(0, 16)
+    central.writeUInt32LE(data.length, 20)
+    central.writeUInt32LE(data.length, 24)
+    central.writeUInt16LE(nameBuf.length, 28)
+    central.writeUInt32LE(offset, 42)
+    centralParts.push(central, nameBuf)
+    offset += 30 + nameBuf.length + data.length
+  }
+  const local = Buffer.concat(localParts)
+  const central = Buffer.concat(centralParts)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(central.length, 12)
+  eocd.writeUInt32LE(local.length, 16)
+  return Buffer.concat([local, central, eocd])
+}
+
 
 async function main() {
   const staticRoot = join(TEMP, 'static')
@@ -188,6 +233,36 @@ async function main() {
         JSON.stringify({ status: bootstrap.status, setCookie: setCookie.slice(0, 70), location }),
       )
 
+
+      const bootstrapAgain = await fetch(secureBackend.url + '/?token=' + encodeURIComponent(token), {
+        redirect: 'manual',
+        headers: { Accept: 'text/html', Cookie: 'nianfeng_token=' + encodeURIComponent(token) },
+      })
+      check(
+        '已有 Cookie 时再次带 ?token= 仍 302 清理地址栏',
+        bootstrapAgain.status === 302 && String(bootstrapAgain.headers.get('location') || '') === '/',
+        JSON.stringify({ status: bootstrapAgain.status, location: bootstrapAgain.headers.get('location') }),
+      )
+
+      const remoteHost = '110.42.14.109:12278'
+      const remoteToken = await rawRequest(secureBackend.url, '/api/health', {
+        headers: { Host: remoteHost, Origin: 'http://' + remoteHost, 'X-NianFeng-Token': token },
+      })
+      check(
+        '携带有效令牌时远程 Host / Origin 可访问（公网部署回归）',
+        remoteToken.status === 200,
+        JSON.stringify({ status: remoteToken.status }),
+      )
+      const remoteNoToken = await rawRequest(secureBackend.url, '/api/health', {
+        headers: { Host: remoteHost, Origin: 'http://' + remoteHost },
+      })
+      check(
+        '无令牌的远程 Host / Origin 仍被拒绝（DNS rebinding 防护不回退）',
+        remoteNoToken.status === 403,
+        JSON.stringify({ status: remoteNoToken.status }),
+      )
+
+
       console.log('\n④ /api/rss SSRF 拦截')
       const blocked = [
         'http://127.0.0.1:1/feed',
@@ -276,7 +351,7 @@ async function main() {
       const healthJson = await health.json()
       check(
         'WebUI 代理携带 Cookie 后 health 返回完整详情',
-        health.status === 200 && healthJson.authenticated === true && !!healthJson.dataDir && health.headers.get('access-control-allow-origin') === `http://127.0.0.1:${webPort}`,
+        health.status === 200 && healthJson.authenticated === true && !!healthJson.dataDir,
         JSON.stringify({ status: health.status, authenticated: healthJson.authenticated, acao: health.headers.get('access-control-allow-origin') }),
       )
 
@@ -299,6 +374,27 @@ async function main() {
 
       const hostRebind = await rawRequest(`http://127.0.0.1:${webPort}`, '/', { headers: { Host: 'evil.example' } })
       check('WebUI 端口同样拒绝 DNS rebinding Host', hostRebind.status === 403, JSON.stringify({ status: hostRebind.status }))
+
+
+      const remoteProxy = await rawRequest('http://127.0.0.1:' + webPort, '/api/health', {
+        headers: { Host: '110.42.14.109:12278', Origin: 'http://110.42.14.109:12278', Cookie: cookie, Accept: 'application/json' },
+      })
+      let remoteProxyJson = {}
+      try { remoteProxyJson = JSON.parse(remoteProxy.text || '{}') } catch (_) {}
+      check(
+        'WebUI 代理：远程 Host / Origin + Cookie 不再被后端 403',
+        remoteProxy.status === 200 && remoteProxyJson.authenticated === true,
+        JSON.stringify({ status: remoteProxy.status, text: String(remoteProxy.text || '').slice(0, 120) }),
+      )
+      const remoteProxyNoToken = await rawRequest('http://127.0.0.1:' + webPort, '/api/health', {
+        headers: { Host: '110.42.14.109:12278', Origin: 'http://110.42.14.109:12278' },
+      })
+      check(
+        'WebUI 代理：远程 Host / Origin 无令牌仍 403',
+        remoteProxyNoToken.status === 403,
+        JSON.stringify({ status: remoteProxyNoToken.status }),
+      )
+
 
       const rootConfig = await rawRequest(`http://127.0.0.1:${webPort}`, '/user_data/config.json', { headers: { Cookie: cookie } })
       check('WebUI 静态服务不暴露 user_data 配置', rootConfig.status === 404, JSON.stringify({ status: rootConfig.status }))
@@ -333,6 +429,53 @@ async function main() {
       })
       await devBackend.close()
     }
+
+    console.log('\n⑧ 插件 zip 上传安装')
+    const uploadJsonRequest = async payload => {
+      const res = await fetch(backend.url + '/api/plugins/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json().catch(() => null)
+      return { status: res.status, data }
+    }
+    const externalRoot = join(TEMP, 'data-a', 'plugins')
+    const demoZip = makeZip([
+      { name: 'demo-plugin/index.mjs', data: "export const name = 'demo-plugin'\nexport const version = '1.0.0'\nexport function apply() {}\n" },
+      { name: 'demo-plugin/manifest.json', data: '{"id":"demo-plugin","name":"demo-plugin"}' },
+    ])
+    const install = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64') })
+    check('上传 zip 可安装外部插件', install.status === 200 && install.data?.installed?.[0]?.id === 'demo-plugin', JSON.stringify(install.data))
+    const pluginsAfter = await (await fetch(backend.url + '/api/plugins')).json()
+    check('安装后的插件出现在 /api/plugins', (pluginsAfter.plugins || []).some(item => item.id === 'demo-plugin' && item.external), JSON.stringify((pluginsAfter.plugins || []).map(item => item.id)))
+    const installedFile = await readFile(join(externalRoot, 'demo-plugin', 'index.mjs'), 'utf8').catch(() => '')
+    check('插件文件写入外部插件目录', installedFile.includes("name = 'demo-plugin'"), installedFile.slice(0, 60))
+
+    const again = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64') })
+    check('同名插件默认拒绝覆盖（409）', again.status === 409, JSON.stringify(again.data))
+    const overwrite = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64'), overwrite: true })
+    check('overwrite=true 时允许覆盖安装', overwrite.status === 200, JSON.stringify(overwrite.data))
+
+    const escapeZip = makeZip([{ name: '../escaped.txt', data: 'ESCAPE-SECRET' }])
+    const escape = await uploadJsonRequest({ filename: 'escape.zip', data: escapeZip.toString('base64') })
+    check('zip-slip 路径被拒绝', escape.status === 400, JSON.stringify(escape.data))
+    const escapedFile = await readFile(join(TEMP, 'escaped.txt'), 'utf8').catch(() => '')
+    check('zip-slip 没有写出目标目录', !escapedFile.includes('ESCAPE-SECRET'), escapedFile)
+
+    const blockedZip = makeZip([
+      { name: 'demo-blocked/index.mjs', data: 'export const name = "demo-blocked"\nexport function apply() {}\n' },
+      { name: 'demo-blocked/evil.exe', data: 'MZ' },
+    ])
+    const blockedInstall = await uploadJsonRequest({ filename: 'demo-blocked.zip', data: blockedZip.toString('base64') })
+    const blockedFile = await readFile(join(externalRoot, 'demo-blocked', 'evil.exe')).catch(() => null)
+    check('可执行文件被拒绝写入并报告', blockedInstall.status === 200 && Array.isArray(blockedInstall.data?.blocked) && blockedInstall.data.blocked.length === 1 && !blockedFile, JSON.stringify(blockedInstall.data))
+
+    const noIndexZip = makeZip([{ name: 'readme.txt', data: 'nothing' }])
+    const noIndex = await uploadJsonRequest({ filename: 'noindex.zip', data: noIndexZip.toString('base64') })
+    check('没有 index.mjs 的压缩包被拒绝', noIndex.status === 400, JSON.stringify(noIndex.data))
+
+
   } finally {
     await backend.close().catch(() => {})
     await rm(TEMP, { recursive: true, force: true }).catch(() => {})

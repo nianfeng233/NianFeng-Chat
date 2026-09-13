@@ -16,12 +16,13 @@
  *     这样 exe 不需要内置 scripts/sync-plugins.mjs，用户丢完插件重启/重新扫描即可。
  */
 import { constants } from 'node:fs'
-import { access, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { access, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isInsideDir } from '../security-utils.mjs'
+import { ZipError, isSafeZipEntryName, listZipEntries } from '../zip-utils.mjs'
 
 export const name = 'plugin-registry'
 export const inject = ['settings', 'instance', 'hub']
@@ -278,6 +279,146 @@ export function apply(ctx, config = {}) {
     return { ok: true, dir }
   }
 
+  /* ---------------- 上传安装 zip 插件 ---------------- */
+
+  const BLOCKED_INSTALL_EXTENSIONS = new Set(['.exe', '.dll', '.bat', '.cmd', '.ps1', '.sh', '.com', '.scr', '.msi', '.node', '.so', '.dylib'])
+  const MAX_ZIP_BYTES = 32 * 1024 * 1024
+
+  const safeFolderName = value => {
+    const name = String(value || '')
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^[.\-\s]+|[.\-\s]+$/g, '')
+      .slice(0, 64)
+    return name || 'plugin'
+  }
+
+  /** 从 zip 条目里找出「插件根目录」：包含 index.mjs 的最外层目录（最多三层）。 */
+  const findPluginRoots = entries => {
+    const roots = new Set()
+    for (const entry of entries) {
+      if (entry.directory) continue
+      const name = entry.name
+      if (!/(^|\/)index\.mjs$/i.test(name)) continue
+      if (/(^|\/)node_modules(\/|$)/i.test(name)) continue
+      const root = name.slice(0, name.length - 'index.mjs'.length).replace(/\/$/, '')
+      if (root.split('/').filter(Boolean).length > 3) continue
+      roots.add(root)
+    }
+    const sorted = [...roots].sort((a, b) => a.split('/').filter(Boolean).length - b.split('/').filter(Boolean).length)
+    const picked = []
+    for (const root of sorted) {
+      if (picked.some(parent => root === parent || root.startsWith(`${parent}/`))) continue
+      picked.push(root)
+    }
+    return picked
+  }
+
+  const resolvePluginName = (pluginRoot, entries, fallback) => {
+    const prefix = pluginRoot ? `${pluginRoot}/` : ''
+    const manifest = entries.find(entry => !entry.directory && entry.name === `${prefix}manifest.json`)
+    if (manifest) {
+      try {
+        const parsed = JSON.parse(manifest.data.toString('utf8'))
+        const id = String(parsed.id || parsed.name || '').trim()
+        if (id) return safeFolderName(id)
+      } catch (_) {
+        /* manifest 坏了就退回目录名 */
+      }
+    }
+    const tail = pluginRoot.split('/').filter(Boolean).pop()
+    return safeFolderName(tail || fallback || 'plugin')
+  }
+
+  /**
+   * 安装浏览器上传的 zip 插件包：
+   *   - data 是 base64（前端 FileReader 读取本地文件后上传，远程部署同样适用）；
+   *   - 默认拒绝覆盖已存在的插件目录，overwrite=true 时才整体替换；
+   *   - 路径、类型、体积都在这里做安全校验，只写入当前外部插件目录。
+   */
+  async function installZip({ base64 = '', filename = '', overwrite = false } = {}) {
+    const raw = String(base64 || '').replace(/^data:[^,]*,/, '')
+    if (!raw) return { ok: false, error: '缺少压缩包内容（data）' }
+    if (filename && !/\.zip$/i.test(String(filename))) return { ok: false, error: '只支持 .zip 插件压缩包' }
+    let buffer = null
+    try {
+      buffer = Buffer.from(raw, 'base64')
+    } catch (_) {
+      return { ok: false, error: '压缩包 base64 解码失败' }
+    }
+    if (!buffer.length) return { ok: false, error: '压缩包内容为空' }
+    if (buffer.length > MAX_ZIP_BYTES) return { ok: false, error: `压缩包超过 ${Math.round(MAX_ZIP_BYTES / 1024 / 1024)}MB 限制` }
+
+    let entries = []
+    try {
+      entries = listZipEntries(buffer)
+    } catch (err) {
+      return { ok: false, error: err?.message || 'zip 解析失败' }
+    }
+    const roots = findPluginRoots(entries)
+    if (!roots.length) return { ok: false, error: '压缩包里没有找到 index.mjs；请把插件目录（内含 index.mjs）压缩后再上传' }
+
+    const rootDir = externalDir()
+    await mkdir(rootDir, { recursive: true }).catch(() => {})
+    const fallback = String(filename || '').replace(/\.zip$/i, '')
+
+    // 先算出所有目标目录并检查冲突，避免多个插件时装一半又失败。
+    const planned = roots.map(pluginRoot => {
+      const name = resolvePluginName(pluginRoot, entries, fallback)
+      return { pluginRoot, name, target: resolve(rootDir, name) }
+    })
+    for (const item of planned) {
+      if (!isInside(rootDir, item.target) || item.target === rootDir) return { ok: false, error: '插件安装目录不合法' }
+      let exists = false
+      try {
+        exists = (await stat(item.target)).isDirectory()
+      } catch (_) {
+        /* 不存在 */
+      }
+      if (exists) {
+        if (!overwrite) return { ok: false, exists: true, pluginId: item.name, error: `插件目录「${item.name}」已存在，确认覆盖后可重试` }
+        await rm(item.target, { recursive: true, force: true })
+      }
+    }
+
+    const installed = []
+    const blocked = []
+    for (const item of planned) {
+      await mkdir(item.target, { recursive: true })
+      const prefix = item.pluginRoot ? `${item.pluginRoot}/` : ''
+      let fileCount = 0
+      for (const entry of entries) {
+        if (entry.directory || !isSafeZipEntryName(entry.name)) continue
+        if (prefix) {
+          if (!entry.name.startsWith(prefix)) continue
+        } else if (roots.some(root => root && (entry.name === root || entry.name.startsWith(`${root}/`)))) {
+          continue // 属于其它插件根，交给对应轮次
+        }
+        const rel = prefix ? entry.name.slice(prefix.length) : entry.name
+        if (!rel || !isSafeZipEntryName(rel)) continue
+        if (BLOCKED_INSTALL_EXTENSIONS.has(extname(rel).toLowerCase())) {
+          blocked.push(`${item.name}/${rel}`)
+          continue
+        }
+        const dest = resolve(item.target, rel)
+        if (!isInside(item.target, dest)) continue
+        await mkdir(dirname(dest), { recursive: true })
+        await writeFile(dest, entry.data)
+        fileCount += 1
+      }
+      installed.push({ id: item.name, dir: item.target, files: fileCount })
+    }
+
+    const next = await scan({ force: true })
+    hub.broadcast('plugins/changed', { action: 'installed', ids: installed.map(item => item.id) })
+    return {
+      ok: true,
+      installed,
+      blocked: blocked.length ? blocked : undefined,
+      plugins: publicSnapshot(next).plugins,
+      dirs: publicDirs(next),
+    }
+  }
+
   const service = {
     name: 'plugin-registry',
     builtinDir: () => builtinDir,
@@ -294,6 +435,7 @@ export function apply(ctx, config = {}) {
     resetExternalDir: () => setExternalDir(''),
     removeExternal,
     readExternalFile,
+    installZip,
     openExternalDir,
     pickDirectory: () => instance.pickDirectory({ description: '选择插件的存放目录' }),
   }

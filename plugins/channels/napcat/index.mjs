@@ -119,6 +119,21 @@ const STATUS_COLOR = {
   error: '#c65b5b',
 }
 
+/**
+ * 判断一条入站消息是否属于“启动前积压”：
+ *   - receivedAt 是 NapCat 桥收到消息的时间戳（毫秒，本地时钟）；
+ *   - time 是消息本身的发送时间（ISO 字符串，可能来自 QQ 服务器）；
+ *   - 二者任一明显早于本次前端启动时间，就视为积压消息，只写上下文不自动回复；
+ *   - napcat.replyBacklog = true 可恢复旧行为（积压也回复）。
+ */
+export function isBacklogMessage(message, { sessionStartedAt = 0, graceMs = 15000, replyBacklog = false } = {}) {
+  if (replyBacklog) return false
+  const receivedAt = Number(message?.receivedAt) || 0
+  const sentAt = Date.parse(message?.time || '') || 0
+  const cutoff = Number(sessionStartedAt) - Math.max(0, Number(graceMs) || 0)
+  return (receivedAt > 0 && receivedAt < cutoff) || (sentAt > 0 && sentAt < cutoff)
+}
+
 export function apply(ctx) {
   const base = ctx.inject('channel-base')
   const channels = ctx.inject('channel-registry')
@@ -145,6 +160,15 @@ export function apply(ctx) {
   const instanceWaiters = new Set()
   const closing = []
   let backendEvents = null
+  /**
+   * 本次前端启动时间：启动前积压在 NapCat / 收件箱里的消息只补写上下文，
+   * 不自动触发模型回复，避免“重开程序后把历史消息全部回一遍”。
+   * 如确需回复启动前的积压消息，可把 napcat.replyBacklog 设为 true。
+   */
+  const sessionStartedAt = Date.now()
+  const BACKLOG_GRACE_MS = 15000
+  const replyBacklogEnabled = () => config.get('napcat.replyBacklog', false) === true
+  const backlogOf = message => isBacklogMessage(message, { sessionStartedAt, graceMs: BACKLOG_GRACE_MS, replyBacklog: replyBacklogEnabled() })
 
   /* ---------------- 基础工具 ---------------- */
 
@@ -764,6 +788,12 @@ export function apply(ctx) {
     const decision = triggerDecision(channel, message)
     const permissions = permissionsOf(channel)
     const sender = senderIdentityFor(channel, message)
+    // 启动前积压的消息：只写上下文，不触发模型回复（避免重启后批量刷屏）。
+    const backlog = backlogOf(message)
+    if (backlog && decision.trigger) {
+      decision.trigger = false
+      decision.reason = 'backlog'
+    }
 
     if (decision.ignore) {
       await ackInbox(channel.id, [message.id])
@@ -809,6 +839,7 @@ export function apply(ctx) {
         images: Array.isArray(message.images) ? message.images : [],
         triggered: decision.trigger === true,
         triggerReason: decision.reason,
+        backlog: backlog || undefined,
         replyRules: { quote: decision.rules.quote !== false, mention: decision.rules.mention !== false },
       }
       if (store?.append) {

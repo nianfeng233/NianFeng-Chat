@@ -79,7 +79,7 @@ export function apply(ctx) {
             <button class="plugin-sort-order" data-sort-order title="切换正序 / 倒序">↑</button>
           </div>
         </div>
-        <div id="pluginDirsContainer"></div>
+        <div id="pluginDirsContainer" class="plugin-dirs"></div>
           <div data-plugin-summary class="plugin-summary"></div>
         <div id="pluginListContainer" data-plugin-list></div>
         <div class="plugin-footnote">外部插件放进「插件目录」里的子文件夹（每个插件一个目录，包含 index.mjs），点「重新扫描」并刷新页面后生效；内置插件随版本发布，升级 exe 时会被替换。</div>`)
@@ -394,15 +394,20 @@ export function apply(ctx) {
       dirsEl.innerHTML = section('插件目录', card(
         row('内置插件目录', '随版本发布，升级 exe 时会被整体替换；不要在这里长期放自己的插件',
           `<span class="mono plugin-path">${escapeHtml(dirsInfo.builtinDir || '—')}</span>`) +
-        row('外部插件目录',
-          dirsInfo.envOverride
-            ? '当前由环境变量 NIANFENG_PLUGINS_DIR 指定，设置页的修改不会生效'
-            : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs）；升级 exe / 应用不会删除此目录',
-          `<input class="setting-input plugin-dir-input" id="pluginDirInput" value="${escapeHtml(external)}" style="width:260px" />
-           <button class="outline-btn" data-dir-action="pick">选择目录</button>
-           <button class="outline-btn" data-dir-action="apply">应用并刷新</button>
-           <button class="outline-btn" data-dir-action="open">打开目录</button>
-           <button class="outline-btn" data-dir-action="rescan">重新扫描</button>`) +
+        `<div class="setting-row plugin-dir-item">
+          <div class="setting-main">
+            <div class="setting-name">外部插件目录</div>
+            <div class="setting-help">${dirsInfo.envOverride ? '当前由环境变量 NIANFENG_PLUGINS_DIR 指定，设置页的修改不会生效' : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs），也可以直接上传插件 zip 安装'}</div>
+          </div>
+          <div class="setting-control plugin-dir-controls">
+            <input class="setting-input plugin-dir-input" id="pluginDirInput" value="${escapeHtml(external)}" />
+            <button class="outline-btn plugin-upload-btn" data-dir-action="upload">添加插件</button>
+            <button class="outline-btn" data-dir-action="pick">选择目录</button>
+            <button class="outline-btn" data-dir-action="apply">应用并刷新</button>
+            <button class="outline-btn" data-dir-action="open">打开目录</button>
+            <button class="outline-btn" data-dir-action="rescan">重新扫描</button>
+          </div>
+        </div>` +
         row('扫描结果', '外部插件数量 / 插件总数', `<span class="mono">外部 ${dirsInfo.externalCount ?? 0} 个 / 共 ${dirsInfo.count ?? 0} 个</span>`) +
         (warnings ? row('扫描提示', escapeHtml(warnings), '') : ''),
       ))
@@ -449,6 +454,53 @@ export function apply(ctx) {
           toast.error(`重新扫描失败：${err.message}`)
         }
       })
+      /* 添加插件：浏览器选择本机 zip -> 上传到后端 -> 解压到外部插件目录。
+         部署在远程服务器时，文件选择器依然读取“用户本机”的文件，再通过 HTTP 上传。 */
+      const uploadBtn = dirsEl.querySelector('[data-dir-action="upload"]')
+      if (uploadBtn) {
+        const fileInput = document.createElement('input')
+        fileInput.type = 'file'
+        fileInput.accept = '.zip,application/zip'
+        fileInput.style.display = 'none'
+        uploadBtn.parentElement?.appendChild(fileInput)
+        const fileToBase64 = file =>
+          new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => {
+              const text = String(reader.result || '')
+              resolve(text.includes(',') ? text.slice(text.indexOf(',') + 1) : text)
+            }
+            reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
+            reader.readAsDataURL(file)
+          })
+        const uploadFile = async (file, overwrite = false) => {
+          try {
+            if (!api.supports?.('plugin-upload')) {
+              toast.error('当前后端不支持上传安装插件，请升级并重启念风后再试。')
+              return
+            }
+            toast.info(`正在上传 ${file.name}…`)
+            const data = await fileToBase64(file)
+            const result = await api.uploadPlugin({ filename: file.name, data, overwrite })
+            const names = (result?.installed || []).map(item => item.id).join('、')
+            toast.success(`插件已安装：${names || file.name}，正在刷新页面…`)
+            reloadPage()
+          } catch (err) {
+            if (err?.status === 409) {
+              const confirmed = await modal.confirm('插件已存在', `${err.message} 覆盖安装会先删除服务器上同名的外部插件目录，是否继续？`)
+              if (confirmed) return uploadFile(file, true)
+              return
+            }
+            toast.error(`安装失败：${err?.message || err}`)
+          }
+        }
+        uploadBtn.addEventListener('click', () => fileInput.click())
+        fileInput.addEventListener('change', () => {
+          const file = fileInput.files?.[0]
+          fileInput.value = ''
+          if (file) uploadFile(file, false)
+        })
+      }
     }
     const loadPluginDirs = async () => {
       const api = ctx.inject('api')
