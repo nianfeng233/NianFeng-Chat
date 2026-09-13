@@ -22,6 +22,9 @@ export const SESSION_LIST_CSS = `
   .list-pane.compact .pane-head .icon-btn{display:none;}
 
   .batch-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 8px 8px;padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.78);border:1px solid rgba(0,0,0,.06);font-size:11.5px;color:var(--text-3);}
+  /* .batch-bar 自带 display:flex，会覆盖浏览器对 [hidden] 的默认 display:none；
+     这里补一条，避免没进批量模式时批量工具条一直挂在列表上方。 */
+  .batch-bar[hidden]{display:none !important;}
   .batch-bar span{flex:1 1 auto;min-width:60px;}
   .batch-bar button{border:1px solid rgba(0,0,0,.09);background:#fff;border-radius:7px;padding:3px 8px;font:inherit;font-size:11.5px;color:var(--text-2);cursor:pointer;}
   .batch-bar button:hover{background:#f7f8f6;color:var(--text);}

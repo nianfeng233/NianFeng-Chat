@@ -15,7 +15,7 @@ a Windows desktop application.
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
 
-- Current version: v1.1.1
+- Current version: v1.1.4
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -50,8 +50,11 @@ a Windows desktop application.
   state is not supported by the OneBot API.
 - **Mobile layout**: mobile browsers automatically get a single-column layout with a back bar and a
   bottom navigation for Chat / Channels / Settings; use `?mobile=1` or `?mobile=0` to debug.
-- **Runtime logs**: Settings → System → Runtime Logs shows model start / done / timeout, tool
-  timings, confirmation results, outbound delivery, and backend request timings.
+- **Runtime logs**: Settings → System → Runtime Logs is backed by the same persistent
+  terminal log stream (`runtime.log`) and shows DEBUG-level model start / done / timeout, tool
+  timings, confirmation results, outbound delivery, HTTP requests, and frontend chat-flow logs.
+  SSE pushes updates in real time with polling fallback; refreshing the page or restarting the
+  backend keeps the history.
 - **Languages**: Simplified Chinese is provided by the built-in `lang-zh-cn` language-pack plugin;
   copy that plugin and edit its translation table to add another language.
 

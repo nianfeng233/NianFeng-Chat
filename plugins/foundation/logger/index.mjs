@@ -47,6 +47,87 @@ export function apply(ctx) {
     return value
   }
 
+  /* ---------- WebUI 终端日志：把前端日志批量转发给后端统一落盘 ---------- */
+  const FORWARD_LEVEL = { 0: 'error', 1: 'warn', 2: 'info', 3: 'debug' }
+  const MAX_FORWARD_QUEUE = 800
+  const forwardQueue = []
+  let forwardTimer = null
+  let forwarding = false
+
+  const canForward = () => {
+    try {
+      return (
+        typeof window !== 'undefined' &&
+        typeof document !== 'undefined' &&
+        typeof fetch === 'function' &&
+        typeof EventSource !== 'undefined'
+      )
+    } catch (_) {
+      return false
+    }
+  }
+
+  const backendBase = () => {
+    try {
+      return String(config?.get?.('backend.url', '/api') || '/api').replace(/\/+$/, '')
+    } catch (_) {
+      return '/api'
+    }
+  }
+
+  const normalizeForwardLevel = value => {
+    if (typeof value === 'number' && Number.isFinite(value)) return FORWARD_LEVEL[value] || 'info'
+    const text = String(value || '').trim().toLowerCase()
+    if (text === 'warning') return 'warn'
+    return ['error', 'warn', 'info', 'debug'].includes(text) ? text : 'info'
+  }
+
+  const scheduleForward = () => {
+    if (forwardTimer || !canForward()) return
+    forwardTimer = setTimeout(() => {
+      forwardTimer = null
+      flushForwardQueue()
+    }, 250)
+  }
+
+  const flushForwardQueue = async () => {
+    if (forwarding || !forwardQueue.length || !canForward()) return
+    const batch = forwardQueue.splice(0, 200)
+    forwarding = true
+    try {
+      const res = await fetch(`${backendBase()}/logs/client`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lines: batch }),
+        credentials: 'same-origin',
+        keepalive: true,
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    } catch (_) {
+      // 后端还没起来 / 暂时离线：放回队列稍后重试，最多保留最近 800 条。
+      forwardQueue.unshift(...batch)
+      if (forwardQueue.length > MAX_FORWARD_QUEUE) forwardQueue.splice(0, forwardQueue.length - MAX_FORWARD_QUEUE)
+    } finally {
+      forwarding = false
+      if (forwardQueue.length) scheduleForward()
+    }
+  }
+
+  const enqueueForward = message => {
+    if (!canForward()) return
+    const args = Array.isArray(message?.args) ? message.args : []
+    const text = args.map(formatArg).join(' ').trim()
+    if (!text) return
+    forwardQueue.push({
+      at: Number(message?.ts ?? message?.timestamp ?? Date.now()) || Date.now(),
+      level: normalizeForwardLevel(message?.type ?? message?.level),
+      name: String(message?.name || 'frontend').slice(0, 120),
+      text: text.slice(0, 8000),
+    })
+    if (forwardQueue.length > MAX_FORWARD_QUEUE) forwardQueue.splice(0, forwardQueue.length - MAX_FORWARD_QUEUE)
+    scheduleForward()
+  }
+
   // 真实接入 cordis：所有 ctx.logger 的输出都会经过这里
   // 注意 ctx.logger 是带名字的 Logger 实例，exporter 方法在 LoggerService 上（root.logger）
   const dispose = ctx.root.logger.exporter({
@@ -63,12 +144,19 @@ export function apply(ctx) {
           /* ignore */
         }
       }
+      enqueueForward(message)
       if (message.level > (LEVELS[consoleLevel] ?? LEVELS.info)) return
       const fn = message.type === 'error' ? console.error : message.type === 'warn' ? console.warn : console.log
       fn(`%c[${message.name || 'app'}]`, 'color:#8b919c', ...message.args.map(formatArg))
     },
   })
   ctx.effect(dispose)
+  ctx.effect(() => {
+    if (forwardTimer) clearTimeout(forwardTimer)
+    forwardTimer = null
+    // 卸载 / 刷新前尽量把最后一批前端日志送到后端；失败也不阻塞页面。
+    void flushForwardQueue()
+  })
 
   const service = {
     name: 'logs',

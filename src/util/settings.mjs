@@ -65,23 +65,36 @@ export function input(key, value, { placeholder = '', width = 160, type = 'text'
 export function bindConfigControls(container, ctx, { onChange } = {}) {
   const config = ctx.inject('config')
   const offs = []
+  const isEditing = el => (typeof document !== 'undefined' ? document.activeElement === el : false)
 
   for (const el of container.querySelectorAll('[data-config-toggle]')) {
-    let value = config.get(el.dataset.configToggle, el.classList.contains('on'))
-    el.classList.toggle('on', !!value)
+    const key = el.dataset.configToggle
+    let value = config.get(key, el.classList.contains('on'))
+    const apply = next => {
+      value = !!next
+      el.classList.toggle('on', value)
+    }
+    apply(value)
     const fn = () => {
       value = !value
       el.classList.toggle('on', value)
-      config.set(el.dataset.configToggle, value)
-      onChange?.(el.dataset.configToggle, value)
+      config.set(key, value)
+      onChange?.(key, value)
     }
     el.addEventListener('click', fn)
     offs.push(() => el.removeEventListener('click', fn))
+    // 电脑 / 手机任意一端改设置后，后端 SSE 会把新值广播过来；控件跟着实时刷新。
+    offs.push(config.watch(key, apply))
   }
 
   for (const el of container.querySelectorAll('[data-config-segmented]')) {
     const key = el.dataset.configSegmented
     let value = String(config.get(key, el.querySelector('.active')?.dataset.value ?? ''))
+    const apply = next => {
+      value = String(next ?? '')
+      el.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.value === value))
+    }
+    apply(value)
     const fn = e => {
       const btn = e.target.closest('button[data-value]')
       if (!btn) return
@@ -92,6 +105,7 @@ export function bindConfigControls(container, ctx, { onChange } = {}) {
     }
     el.addEventListener('click', fn)
     offs.push(() => el.removeEventListener('click', fn))
+    offs.push(config.watch(key, apply))
   }
 
   for (const el of container.querySelectorAll('[data-config-select]')) {
@@ -103,6 +117,12 @@ export function bindConfigControls(container, ctx, { onChange } = {}) {
     }
     el.addEventListener('change', fn)
     offs.push(() => el.removeEventListener('change', fn))
+    offs.push(
+      config.watch(key, next => {
+        if (isEditing(el)) return
+        el.value = String(next ?? '')
+      }),
+    )
   }
 
   for (const el of container.querySelectorAll('[data-config-input]')) {
@@ -114,6 +134,12 @@ export function bindConfigControls(container, ctx, { onChange } = {}) {
     }
     el.addEventListener('change', fn)
     offs.push(() => el.removeEventListener('change', fn))
+    offs.push(
+      config.watch(key, next => {
+        if (isEditing(el)) return
+        el.value = String(next ?? '')
+      }),
+    )
   }
 
   return () => offs.forEach(off => off())

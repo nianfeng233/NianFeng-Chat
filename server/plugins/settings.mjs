@@ -78,6 +78,9 @@ const DEFAULTS = {
   // 前端界面偏好（签名 / 玻璃参数等），由 WebUI config 服务同步进来，
   // 与模型配置放在同一个 config.json 中，跨浏览器 / 桌面宿主都可恢复。
   preferences: {},
+  // 每个偏好键的最近更新时间（毫秒）与修改来源。用于多端实时同步时
+  // 避免旧页面的整包推送覆盖另一个端刚改的新值。
+  preferencesMeta: {},
   // 外部插件目录；为空则跟随当前数据目录下的 plugins/（见 server/plugins/plugin-registry.mjs）
   plugins: { dir: '' },
   logLevel: 'info',
@@ -95,6 +98,56 @@ function deepMerge(base, patch) {
     out[key] = value && typeof value === 'object' && !Array.isArray(value) ? deepMerge(base?.[key] ?? {}, value) : value
   }
   return out
+}
+
+function deepEqual(a, b) {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch (_) {
+    return false
+  }
+}
+
+function toPath(key) {
+  return String(key).split('.').filter(Boolean)
+}
+function hasPath(obj, key) {
+  let cur = obj
+  for (const part of toPath(key)) {
+    if (cur === null || typeof cur !== 'object' || !(part in cur)) return false
+    cur = cur[part]
+  }
+  return true
+}
+function getPath(obj, key) {
+  let cur = obj
+  for (const part of toPath(key)) {
+    if (cur === null || typeof cur !== 'object') return undefined
+    cur = cur[part]
+  }
+  return cur
+}
+function setPath(obj, key, value) {
+  const parts = toPath(key)
+  const last = parts.pop()
+  let cur = obj
+  for (const part of parts) {
+    if (cur[part] === null || typeof cur[part] !== 'object') cur[part] = {}
+    cur = cur[part]
+  }
+  cur[last] = value
+}
+function flattenValues(target, prefix = '', out = new Map()) {
+  for (const [key, value] of Object.entries(target || {})) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (value && typeof value === 'object' && !Array.isArray(value)) flattenValues(value, path, out)
+    else out.set(path, value)
+  }
+  return out
+}
+function cloneMetaEntry(entry) {
+  if (!entry || typeof entry !== 'object') return { at: Number(entry) || 0, by: '' }
+  return { at: Number(entry.at) || 0, by: String(entry.by || '') }
 }
 
 export function apply(ctx, config = {}) {
@@ -248,6 +301,54 @@ export function apply(ctx, config = {}) {
     return s.length <= 8 ? '••••' : `${s.slice(0, 3)}…${s.slice(-4)}`
   }
 
+  /**
+   * 按 per-key 时间戳合并前端偏好。
+   * 关键点：整包 preferences 里所有键都会来一遍，但没有 preferencesMeta 或
+   * 时间戳更旧的键不会覆盖后端已经更新的值，从而让旧页面 / 慢页面整包推送
+   * 无法把另一端刚改好的模型推理等级、temperature 等设置顶掉。
+   */
+  const mergePreferences = (preferences, incomingMeta = {}) => {
+    if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) return []
+    if (!data.preferences || typeof data.preferences !== 'object' || Array.isArray(data.preferences)) data.preferences = {}
+    if (!data.preferencesMeta || typeof data.preferencesMeta !== 'object' || Array.isArray(data.preferencesMeta)) data.preferencesMeta = {}
+    const metaMap = incomingMeta && typeof incomingMeta === 'object' ? incomingMeta : {}
+    const changed = []
+
+    // app.channels 是整份渠道数据，按 updatedAt 整体取新（与前端一致）。
+    const incomingChannels = preferences.app?.channels
+    if (incomingChannels && typeof incomingChannels === 'object' && !Array.isArray(incomingChannels)) {
+      const currentChannels = data.preferences.app?.channels
+      const incomingAt = Number(incomingChannels.updatedAt) || 0
+      const currentAt = Number(currentChannels?.updatedAt) || 0
+      if ((!currentChannels || incomingAt >= currentAt) && !deepEqual(currentChannels, incomingChannels)) {
+        setPath(data.preferences, 'app.channels', structuredClone(incomingChannels))
+        data.preferencesMeta['app.channels'] = cloneMetaEntry(metaMap['app.channels'])
+        changed.push('app.channels')
+      }
+    }
+
+    for (const [key, value] of flattenValues(preferences)) {
+      if (key === 'app.channels' || key.startsWith('app.channels.')) continue
+      const entry = cloneMetaEntry(metaMap[key])
+      const incomingAt = entry.at
+      const currentEntry = cloneMetaEntry(data.preferencesMeta[key])
+      const currentAt = currentEntry.at
+      const exists = hasPath(data.preferences, key)
+      const currentValue = exists ? getPath(data.preferences, key) : undefined
+      // 时间戳都为空（旧版本数据）时按“远端整包覆盖”处理，保证旧值能迁移；
+      // 任意一端有时间戳后，始终新值优先。
+      const shouldApply =
+        !exists ||
+        incomingAt > currentAt ||
+        (incomingAt === currentAt && (currentAt === 0 || !deepEqual(currentValue, value)))
+      if (!shouldApply) continue
+      setPath(data.preferences, key, structuredClone(value))
+      data.preferencesMeta[key] = { at: incomingAt || currentAt || 0, by: entry.by || currentEntry.by || '' }
+      changed.push(key)
+    }
+    return changed
+  }
+
   const service = {
     get file() {
       return file
@@ -267,7 +368,13 @@ export function apply(ctx, config = {}) {
         .map(([id, p]) => ({ id, ...structuredClone(p), apiKey: mask(p.apiKey) })),
     /** 合并写入（patch 可以包含明文 key，落盘时自动加密） */
     async update(patch) {
-      data = deepMerge(data, patch)
+      if (patch && typeof patch === 'object' && Object.prototype.hasOwnProperty.call(patch, 'preferences')) {
+        const { preferences, preferencesMeta, ...rest } = patch
+        if (Object.keys(rest).length) data = deepMerge(data, rest)
+        mergePreferences(preferences, preferencesMeta)
+      } else {
+        data = deepMerge(data, patch)
+      }
       await save()
       ctx.emit('settings/updated', patch)
       return service.get()

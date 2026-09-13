@@ -7,7 +7,7 @@
  * 后端 API 冒烟测试（真实 HTTP 调用，临时数据目录）
  * 用法：npm run test:backend
  */
-import { rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startBackend } from '../server/index.mjs'
@@ -32,7 +32,7 @@ const api = (base, path, options = {}) =>
 
 async function main() {
   console.log('\n① 启动后端')
-  const backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
+  let backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
   const base = backend.url
   check('后端监听成功', backend.port > 0, JSON.stringify({ port: backend.port, url: backend.url }))
 
@@ -52,6 +52,56 @@ async function main() {
   const config2 = await (await api(base, '/api/config')).json()
   check('配置写入生效', config2.network.timeoutMs === 12345)
   await api(base, '/api/config', { method: 'PUT', body: { network: { timeoutMs: 60000 } } })
+
+  console.log('\n③b 多端偏好同步（手机 / 电脑实时一致）')
+  const highAt = Date.now()
+  await api(base, '/api/config', {
+    method: 'PUT',
+    body: {
+      preferences: { chat: { reasoningEffort: 'high', temperature: 1 } },
+      preferencesMeta: { 'chat.reasoningEffort': { at: highAt, by: 'desktop' }, 'chat.temperature': { at: highAt, by: 'desktop' } },
+    },
+  })
+  let syncedConfig = await (await api(base, '/api/config')).json()
+  check(
+    '推理等级写入共享偏好（high）',
+    syncedConfig.preferences?.chat?.reasoningEffort === 'high',
+    JSON.stringify(syncedConfig.preferences?.chat),
+  )
+  check('返回 per-key 更新时间戳', Number(syncedConfig.preferencesMeta?.['chat.reasoningEffort']?.at) === highAt, JSON.stringify(syncedConfig.preferencesMeta))
+  // 模拟手机上仍是旧值的页面在稍后整包推送：旧时间戳不能覆盖电脑端刚改的 high。
+  await api(base, '/api/config', {
+    method: 'PUT',
+    body: {
+      preferences: { chat: { reasoningEffort: 'off', temperature: 1 } },
+      preferencesMeta: { 'chat.reasoningEffort': { at: highAt - 1000, by: 'mobile-stale' } },
+    },
+  })
+  syncedConfig = await (await api(base, '/api/config')).json()
+  check(
+    '旧页面整包推送不会覆盖更新的设置',
+    syncedConfig.preferences?.chat?.reasoningEffort === 'high',
+    JSON.stringify(syncedConfig.preferences?.chat),
+  )
+  // 连 preferencesMeta 都没有的旧版本页面（升级前缓存）整包推送，也不能顶掉新值。
+  await api(base, '/api/config', { method: 'PUT', body: { preferences: { chat: { reasoningEffort: 'off', temperature: 1 } } } })
+  syncedConfig = await (await api(base, '/api/config')).json()
+  check(
+    '旧版本无时间戳的整包推送不会覆盖新值',
+    syncedConfig.preferences?.chat?.reasoningEffort === 'high',
+    JSON.stringify(syncedConfig.preferences?.chat),
+  )
+  // 真正更新的手机修改可以正常覆盖，证明同步不是单向锁定。
+  await api(base, '/api/config', {
+    method: 'PUT',
+    body: {
+      preferences: { chat: { reasoningEffort: 'max', temperature: 1 } },
+      preferencesMeta: { 'chat.reasoningEffort': { at: highAt + 2, by: 'mobile-new' } },
+    },
+  })
+  syncedConfig = await (await api(base, '/api/config')).json()
+  check('更新的一端可以覆盖共享偏好', syncedConfig.preferences?.chat?.reasoningEffort === 'max', JSON.stringify(syncedConfig.preferences?.chat))
+  check('health 声明多端偏好同步能力', health.capabilities?.includes('preferences-sync'), JSON.stringify(health.capabilities))
 
   console.log('\n④ 提供商：真实连通性检测（本地无服务时应如实报错）')
   const providers = await (await api(base, '/api/providers')).json()
@@ -258,6 +308,32 @@ async function main() {
   const reader = events.body.getReader()
   const hello = new TextDecoder().decode((await reader.read()).value)
   check('收到 hello 事件', hello.includes('event: hello'))
+
+  // 真实链路：PUT /api/config -> hub.broadcast('settings/updated') -> SSE。
+  // 手机页面正是靠这条事件实时拿到电脑端刚改的偏好。
+  const ssePrefAt = Date.now() + 1000
+  const putOverSse = api(base, '/api/config', {
+    method: 'PUT',
+    body: {
+      preferences: { chat: { reasoningEffort: 'high' } },
+      preferencesMeta: { 'chat.reasoningEffort': { at: ssePrefAt, by: 'sse-test' } },
+    },
+  }).then(res => res.json())
+  let sseText = hello
+  for (let i = 0; i < 4 && !sseText.includes('event: settings/updated'); i++) {
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise(resolve => setTimeout(() => resolve({ done: true, value: null }), 2000)),
+    ])
+    if (!chunk || chunk.done) break
+    sseText += new TextDecoder().decode(chunk.value)
+  }
+  const putOverSseBody = await putOverSse
+  check(
+    'PUT /api/config 会实时广播 settings/updated（手机 / 电脑同步事件）',
+    sseText.includes('event: settings/updated') && sseText.includes('"reasoningEffort":"high"') && putOverSseBody.preferences?.chat?.reasoningEffort === 'high',
+    sseText.slice(-240),
+  )
   controller.abort()
 
   console.log('\n⑨ 数据落盘')
@@ -294,6 +370,69 @@ async function main() {
   const restored = await api(base, '/api/data-dir', { method: 'PUT', body: { dir: dataDir, migrate: false } })
   const restoredBody = await restored.json()
   check('切回原目录并加载原数据', restored.status === 200 && restoredBody.dataDir === dataDir && backend.ctx.sessions.count() === 1, JSON.stringify(restoredBody.current))
+
+  console.log('\n⑨c 运行日志：文件持久化 / 前端日志 / SSE 实时')
+  backend.ctx.logger.info('BACKEND_RUNTIME_PERSIST_TEST')
+  await api(base, '/api/logs/client', {
+    method: 'POST',
+    body: {
+      lines: [
+        { at: Date.now(), level: 'info', name: 'web-test', text: 'CLIENT_FORWARD_TEST' },
+        { at: Date.now() + 1, level: 'warn', name: 'web-test', text: 'CLIENT_FORWARD_WARN_TEST' },
+      ],
+    },
+  })
+  await new Promise(resolve => setTimeout(resolve, 120))
+
+  const runtime = await (await api(base, '/api/logs/runtime?limit=300')).json()
+  const runtimeLines = Array.isArray(runtime.lines) ? runtime.lines : []
+  check('运行日志接口返回日志文件路径', typeof runtime.file === 'string' && runtime.file.endsWith('runtime.log'), runtime.file || '')
+  check(
+    '后端日志进入运行日志接口',
+    runtimeLines.some(line => line.text === 'BACKEND_RUNTIME_PERSIST_TEST'),
+  )
+  check(
+    '前端日志进入统一日志流（origin=web）',
+    runtimeLines.some(line => line.text === 'CLIENT_FORWARD_TEST' && line.origin === 'web') &&
+      runtimeLines.some(line => line.text === 'CLIENT_FORWARD_WARN_TEST' && line.level === 'warn'),
+  )
+  const runtimeFileText = await readFile(join(dataDir, 'logs', 'runtime.log'), 'utf8').catch(() => '')
+  check(
+    '运行日志已追加写入 runtime.log',
+    runtimeFileText.includes('BACKEND_RUNTIME_PERSIST_TEST') && runtimeFileText.includes('CLIENT_FORWARD_TEST'),
+  )
+
+  const streamController = new AbortController()
+  const streamResponse = await fetch(`${base}/api/logs/runtime/stream`, { signal: streamController.signal })
+  check(
+    '运行日志 SSE 已建立',
+    streamResponse.status === 200 && (streamResponse.headers.get('content-type') || '').includes('text/event-stream'),
+    `HTTP ${streamResponse.status}`,
+  )
+  const streamReader = streamResponse.body.getReader()
+  const streamDecoder = new TextDecoder()
+  let streamText = ''
+  backend.ctx.logger.info('SSE_RUNTIME_TEST')
+  const sseDeadline = Date.now() + 3000
+  while (Date.now() < sseDeadline && !streamText.includes('SSE_RUNTIME_TEST')) {
+    const chunk = await Promise.race([
+      streamReader.read(),
+      new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 400)),
+    ])
+    if (chunk?.timeout) continue
+    if (chunk?.done) break
+    streamText += streamDecoder.decode(chunk.value, { stream: true })
+  }
+  check('运行日志 SSE 实时推送', streamText.includes('SSE_RUNTIME_TEST'), streamText.slice(0, 160))
+  streamController.abort()
+
+  await backend.close()
+  backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
+  const restoredRuntime = await (await api(backend.url, '/api/logs/runtime?limit=300')).json()
+  check(
+    '重启后端后仍会回读 runtime.log 历史',
+    (restoredRuntime.lines || []).some(line => line.text === 'BACKEND_RUNTIME_PERSIST_TEST'),
+  )
 
   console.log('\n⑩ 关闭')
   await backend.close()

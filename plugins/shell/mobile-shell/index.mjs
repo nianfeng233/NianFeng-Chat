@@ -110,6 +110,16 @@ export function apply(ctx) {
     backBtn.hidden = !settingsOpen && pane !== 'main'
   }
 
+  /** 设置页横向导航：打开 / 切换页面时把当前项滚到可视区域中间。 */
+  const syncSettingsNavScroll = () => {
+    const active = document.querySelector('.settings-nav-item.active')
+    try {
+      active?.scrollIntoView?.({ block: 'nearest', inline: 'center' })
+    } catch (_) {
+      /* 老浏览器没有 scrollIntoView 选项时忽略 */
+    }
+  }
+
   const setPane = next => {
     pane = next === 'main' ? 'main' : 'list'
     document.body.classList.toggle('mobile-pane-main', pane === 'main')
@@ -197,6 +207,10 @@ export function apply(ctx) {
       syncTitle()
       syncTabs()
       syncBack()
+      syncSettingsNavScroll()
+    }),
+    events.on('settings:page-changed', () => {
+      if (settingsOpen) syncSettingsNavScroll()
     }),
     events.on('settings:closed', () => {
       settingsOpen = false

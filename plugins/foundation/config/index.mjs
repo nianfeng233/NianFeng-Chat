@@ -23,6 +23,44 @@ export const provides = [{ name: 'config', type: 'singleton' }]
 
 const NS = 'config'
 const KEY = 'data'
+const META_KEY = 'meta'
+// 每次页面启动一个随机客户端 ID，用于偏好同步的冲突提示 / 调试。
+const CLIENT_ID = `c_${Math.random().toString(36).slice(2, 10)}`
+
+/**
+ * 只属于当前设备的偏好，不写入后端共享 preferences：
+ *  - backend.url：各端可能用不同后端地址 / 代理路径；
+ *  - chat.composerHeight：输入框高度由本机窗口尺寸决定；
+ *  - view.active / view.width.*：本机最后打开的视图与分栏宽度。
+ */
+function isLocalOnlyPreference(key) {
+  const path = String(key || '')
+  return (
+    path === 'backend.url' ||
+    path === 'chat.composerHeight' ||
+    path === 'view.active' ||
+    path.startsWith('view.width.')
+  )
+}
+
+/** 递归删除目标对象里的本机偏好，得到可上报后端的快照。 */
+function pruneLocalOnlyPreferences(target, prefix = '') {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return target
+  for (const key of Object.keys(target)) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (isLocalOnlyPreference(path)) {
+      delete target[key]
+      continue
+    }
+    pruneLocalOnlyPreferences(target[key], path)
+  }
+  return target
+}
+
+function cloneMetaEntry(entry) {
+  if (!entry || typeof entry !== 'object') return { at: Number(entry) || 0, by: '' }
+  return { at: Number(entry.at) || 0, by: String(entry.by || '') }
+}
 
 const DEFAULTS = {
   'app.name': '念风',
@@ -89,7 +127,9 @@ const DEFAULTS = {
   'napcat.inputState.intervalMs': 3000,
   'napcat.inputState.timeoutMs': 10 * 60 * 1000,
   'chat.requireToolCall': true,
-  'chat.toolRetryLimit': 2,
+  // 严格模式最多纠正一次；之后直接把正文当回复发出，避免 DeepSeek 等模型
+  // 不返回 tool_calls 时一次普通聊天连续等待数分钟。
+  'chat.toolRetryLimit': 1,
   'chat.emptyRetryLimit': 2,
   'chat.composerHeight': 0,
   'chat.userId': 'web-user',
@@ -126,7 +166,21 @@ export function apply(ctx) {
   }
   if (dirty) storage.set(NS, KEY, data)
 
+  let meta = storage.get(NS, META_KEY, null)
+  if (!meta || typeof meta !== 'object') meta = {}
+
   const persist = () => storage.set(NS, KEY, data)
+  const persistMeta = () => storage.set(NS, META_KEY, meta)
+
+  const syncablePreferences = () => pruneLocalOnlyPreferences(structuredClone(data))
+  const syncableMeta = () => {
+    const out = {}
+    for (const [key, entry] of Object.entries(meta)) {
+      if (isLocalOnlyPreference(key)) continue
+      out[key] = cloneMetaEntry(entry)
+    }
+    return out
+  }
 
   let syncTimer = null
   let syncing = false
@@ -136,12 +190,34 @@ export function apply(ctx) {
     const api = getApi()
     if (!api?.setConfig || !api?.configured?.()) return false
     try {
-      await api.setConfig({ preferences: data })
+      await api.setConfig({ preferences: syncablePreferences(), preferencesMeta: syncableMeta() })
       return true
     } catch (err) {
       ctx.logger.debug(`偏好写入后端失败：${err.message}`)
       return false
     }
+  }
+
+  /**
+   * 把远端共享偏好合并进本地：
+   *  - 远端带有更新的 per-key 时间戳时覆盖本机旧值；
+   *  - 本机本次会话刚改过、且比远端新的键保持不变，等推送完成后自然收敛；
+   *  - 不再使用“本地值是默认值才采纳远端”的旧规则，否则手机上默认 off 会
+   *    一直挡住电脑端同步过来的 high（旧版本推理等级显示不更新的根因）。
+   */
+  const applyRemotePreferences = (preferences, remoteMeta = {}, source = 'remote') => {
+    if (!preferences || typeof preferences !== 'object') return 0
+    const merged = mergePreferenceSnapshot(data, meta, preferences, remoteMeta, { isLocalOnly: isLocalOnlyPreference })
+    const metaChanged = !deepEqual(merged.meta, meta)
+    data = merged.data
+    meta = merged.meta
+    if (merged.changes.length || metaChanged) {
+      persist()
+      persistMeta()
+    }
+    for (const change of merged.changes) ctx.emit('config:changed', change)
+    if (merged.changes.length) ctx.logger.debug(`已应用远端偏好 ${merged.changes.length} 项（${source}）`)
+    return merged.changes.length
   }
 
   const schedulePush = () => {
@@ -154,9 +230,10 @@ export function apply(ctx) {
   }
 
   /**
-   * 后端上线后同步一次偏好：
-   * 本地已经设置过的键优先；本地仍是默认值、后端有历史值的键采用后端值。
-   * 这样既能把历史签名恢复回来，也不会覆盖当前设备上刚刚改过的设置。
+   * 后端上线 / 重连后同步一次偏好：
+   * 远端与本地都带 per-key 时间戳，按“谁更新听谁的”合并；合并完成后再把
+   * 本地快照推回后端，保证启动期默认值不会覆盖远端历史值，同时本机修改
+   * 也会尽快收敛到共享配置。
    */
   const syncFromBackend = async () => {
     const api = getApi()
@@ -166,13 +243,9 @@ export function apply(ctx) {
     try {
       const remote = await api.getConfig()
       const remotePrefs = remote?.preferences
+      const remoteMeta = remote?.preferencesMeta
       if (remotePrefs && typeof remotePrefs === 'object' && Object.keys(remotePrefs).length) {
-        const merged = mergeRemotePreferences(data, remotePrefs)
-        if (!deepEqual(merged, data)) {
-          data = merged
-          persist()
-          ctx.emit('config:changed', { key: '*', value: data })
-        }
+        applyRemotePreferences(remotePrefs, remoteMeta, 'pull')
       }
       pulled = true
       // 通知需要把本地数据合并到共享数据目录的插件（例如渠道注册中心）：
@@ -201,17 +274,31 @@ export function apply(ctx) {
     set(key, value) {
       if (key === undefined) return
       setPath(data, key, value)
+      if (isLocalOnlyPreference(key)) {
+        delete meta[key]
+        persist()
+        persistMeta()
+        ctx.emit('config:changed', { key, value })
+        return value
+      }
+      meta[key] = { at: Date.now(), by: CLIENT_ID }
       persist()
+      persistMeta()
       ctx.emit('config:changed', { key, value })
       schedulePush()
       return value
     },
     remove(key) {
       removePath(data, key)
+      delete meta[key]
       persist()
+      persistMeta()
       ctx.emit('config:changed', { key, value: undefined })
-      schedulePush()
+      if (!isLocalOnlyPreference(key)) schedulePush()
     },
+    /** 应用一次远端共享偏好；主要由 SSE settings/updated 与后端重连拉取调用。 */
+    applyRemote: (preferences, remoteMeta, source = 'remote') => applyRemotePreferences(preferences, remoteMeta, source),
+    meta: () => structuredClone(meta),
     has(key) {
       return hasPath(data, key)
     },
@@ -232,7 +319,14 @@ export function apply(ctx) {
     },
     reset() {
       data = structuredClone(DEFAULTS)
+      const at = Date.now()
+      meta = {}
+      for (const path of flattenValues(data).keys()) {
+        if (path === 'app.channels' || path.startsWith('app.channels.')) continue
+        if (!isLocalOnlyPreference(path)) meta[path] = { at, by: CLIENT_ID }
+      }
       persist()
+      persistMeta()
       ctx.emit('config:changed', { key: '*', value: data })
       schedulePush()
     },
@@ -242,6 +336,16 @@ export function apply(ctx) {
   ctx.effect(
     events.on('backend:status', payload => {
       if (payload?.online) syncFromBackend()
+    }),
+  )
+  // 后端 SSE settings/updated：任何一端的修改都会立即广播到所有在线页面，
+  // 这是手机 / 电脑设置实时同步的链路；真正的冲突取舍在合并函数里按时间戳处理。
+  ctx.effect(
+    events.on('backend:event', payload => {
+      if (payload?.event !== 'settings/updated') return
+      const remote = payload.data?.preferences
+      if (!remote || typeof remote !== 'object') return
+      applyRemotePreferences(remote, payload.data?.preferencesMeta, 'sse')
     }),
   )
   if (getApi()?.configured?.()) syncFromBackend()
@@ -291,16 +395,6 @@ function removePath(obj, key) {
   if (cur && typeof cur === 'object') delete cur[last]
 }
 
-/** 把 DEFAULTS 展开成叶子路径，便于只对“仍是默认值”的键采用远端历史值 */
-function flattenDefaults(obj, prefix = '', out = new Map()) {
-  for (const [key, value] of Object.entries(obj || {})) {
-    const path = prefix ? `${prefix}.${key}` : key
-    if (value && typeof value === 'object' && !Array.isArray(value)) flattenDefaults(value, path, out)
-    else out.set(path, value)
-  }
-  return out
-}
-
 function deepEqual(a, b) {
   try {
     return JSON.stringify(a) === JSON.stringify(b)
@@ -319,30 +413,57 @@ function flattenValues(target, prefix = '', out = new Map()) {
   return out
 }
 
-function mergeRemotePreferences(local, remote) {
-  const merged = structuredClone(local)
-  // app.channels 是整份渠道数据，按 updatedAt 整体取新：
-  // 否则本地浏览器的默认空渠道会挡住 exe / 其它端同步过来的渠道列表。
-  const remoteAppChannels = remote?.app?.channels
-  if (remoteAppChannels && typeof remoteAppChannels === 'object' && !Array.isArray(remoteAppChannels)) {
-    const localAppChannels = merged?.app?.channels
-    const remoteAt = Number(remoteAppChannels.updatedAt) || 0
-    const localAt = Number(localAppChannels?.updatedAt) || 0
-    if (!localAppChannels || remoteAt > localAt) {
-      setPath(merged, 'app.channels', structuredClone(remoteAppChannels))
+/**
+ * 纯函数版偏好合并，便于测试和复用：
+ *   local / localMeta    当前页面本地快照与 per-key 时间戳
+ *   remote / remoteMeta  后端共享快照与 per-key 时间戳
+ * 返回 { data, meta, changes }；changes 里是真正发生变化的键，供 watch / UI 更新。
+ *
+ * 时间戳规则：
+ *   1. 两端时间不同时，新的赢；
+ *   2. 都没有时间戳（旧版本数据）时远端优先，保证共享配置能修好旧页面上的本地默认值；
+ *   3. app.channels 仍然按整份渠道数据的 updatedAt 比较，避免把两组渠道搅在一起。
+ */
+export function mergePreferenceSnapshot(local, localMeta = {}, remote = {}, remoteMeta = {}, { isLocalOnly = isLocalOnlyPreference } = {}) {
+  const data = structuredClone(local && typeof local === 'object' ? local : {})
+  const meta = structuredClone(localMeta && typeof localMeta === 'object' ? localMeta : {})
+  const remoteObj = remote && typeof remote === 'object' ? remote : {}
+  const remoteMetaObj = remoteMeta && typeof remoteMeta === 'object' ? remoteMeta : {}
+  const changes = []
+
+  const remoteChannels = remoteObj.app?.channels
+  if (remoteChannels && typeof remoteChannels === 'object' && !Array.isArray(remoteChannels)) {
+    const localChannels = data.app?.channels
+    const remoteAt = Number(remoteChannels.updatedAt) || 0
+    const localAt = Number(localChannels?.updatedAt) || 0
+    if ((!localChannels || remoteAt >= localAt) && !deepEqual(localChannels, remoteChannels)) {
+      setPath(data, 'app.channels', structuredClone(remoteChannels))
+      meta['app.channels'] = cloneMetaEntry(remoteMetaObj['app.channels'])
+      changes.push({ key: 'app.channels', value: structuredClone(remoteChannels) })
     }
   }
-  // 不再只合并 DEFAULTS 里声明过的键：像 chat.composerHeight 这种运行时
-  // 动态偏好也必须能从后端恢复，否则换端口/换 origin/重装后界面状态会丢。
-  for (const [key, remoteValue] of flattenValues(remote)) {
-    // app.channels 已在上面按 updatedAt 整体处理，避免叶子级合并把两组渠道搅在一起。
+
+  for (const [key, remoteValue] of flattenValues(remoteObj)) {
+    // app.channels 已按整份渠道数据处理，避免叶子级合并把渠道数据搅乱。
     if (key === 'app.channels' || key.startsWith('app.channels.')) continue
-    const localHas = hasPath(merged, key)
-    const localValue = localHas ? getPath(merged, key) : undefined
-    const defaultValue = hasPath(DEFAULTS, key) ? getPath(DEFAULTS, key) : undefined
-    if (!localHas || deepEqual(localValue, defaultValue)) {
-      setPath(merged, key, remoteValue)
+    if (isLocalOnly(key)) continue
+    const localHas = hasPath(data, key)
+    const localValue = localHas ? getPath(data, key) : undefined
+    const localAt = Number(meta[key]?.at) || 0
+    const entry = cloneMetaEntry(remoteMetaObj[key])
+    const remoteAt = entry.at
+    const same = localHas && deepEqual(localValue, remoteValue)
+    if (!same) {
+      // 本机本次会话刚改过、且时间更新：先保留本机值，等待推送完成。
+      if (localHas && localAt > remoteAt) continue
+      setPath(data, key, structuredClone(remoteValue))
+      meta[key] = entry
+      changes.push({ key, value: structuredClone(remoteValue) })
+    } else if (remoteAt >= localAt) {
+      // 值虽然一样，也采用远端的更新时间，避免之后本机反向覆盖。
+      meta[key] = entry
     }
   }
-  return merged
+
+  return { data, meta, changes }
 }

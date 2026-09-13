@@ -19,7 +19,7 @@ export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
 export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0', 'event-bus': '^1.0.0' }
-export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?', 'user-identity?']
+export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?', 'user-identity?', 'channel-registry?']
 export const provides = [{ name: 'chat-permissions', type: 'singleton' }]
 
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
@@ -37,6 +37,35 @@ const normalizeConfirmText = value =>
     .trim()
     .toLowerCase()
 
+/**
+ * 身份标识兼容：NapCat / QQ 官方机器人可能使用 `qq:2428821907`、
+ * `qq:group:2428821907` 之类的带前缀 ID，而权限表和渠道配置里常常只写
+ * 纯数字，反之亦然。这里统一展开成可比较的变体，避免“明明是同一个人却
+ * 匹配不上确认请求”的问题。
+ */
+const identityVariants = value => {
+  const raw = String(value ?? '')
+    .trim()
+    .toLowerCase()
+  if (!raw) return []
+  const variants = new Set([raw])
+  const qqMatch = raw.match(/^qq:(?:group:|c2c:|guild:)?(.+)$/)
+  if (qqMatch?.[1]) variants.add(qqMatch[1])
+  if (/^\d{3,20}$/.test(raw)) {
+    variants.add(`qq:${raw}`)
+    variants.add(`qq:group:${raw}`)
+  }
+  return [...variants]
+}
+
+const identityMatches = (left, right) => {
+  const rightSet = new Set(identityVariants(right))
+  return identityVariants(left).some(value => rightSet.has(value))
+}
+
+const identityAllowed = (senderId, allowed) =>
+  Array.isArray(allowed) && allowed.some(value => identityMatches(senderId, value))
+
 export function apply(ctx) {
   const store = ctx.inject('chat-store')
   const sessions = ctx.inject('session-service')
@@ -53,7 +82,33 @@ export function apply(ctx) {
 
   /** confirmId -> { resolve, timer, ... } */
   const pending = new Map()
+  /** dedupeKey -> pending record：同一会话 / 同一动作 / 同一目标的确认请求只保留一个。 */
+  const pendingByKey = new Map()
   let confirmSeq = 0
+  /** setRolePolicy 更新渠道 / 会话 / chat-store 时防止事件回环。 */
+  let applyingRolePolicy = false
+
+  const channelRegistry = () => ctx.registry.get('channel-registry')
+  const roleIdOf = conv => String(conv?.meta?.roleId || conv?.id || '')
+  const roleChannels = roleId => store.channels().filter(record => String(record.roleId || record.conversationId || '') === String(roleId))
+
+  /**
+   * 渠道详情里的“跨渠道读取 / 发送 / 敏感确认”文案写的是“允许该角色…”，
+   * 所以按 roleId 聚合，而不是只看单个渠道记录。这样设置页、渠道详情和
+   * chat-permissions 校验看到的策略是一致的。
+   */
+  const rolePolicyFor = roleId => {
+    const records = roleChannels(roleId)
+    let crossReadable = false
+    let crossSendable = false
+    let sensitiveConfirm = true
+    for (const record of records) {
+      if (record.crossReadable === true) crossReadable = true
+      if (record.crossSendable === true) crossSendable = true
+      if (record.sensitiveConfirm === false) sensitiveConfirm = false
+    }
+    return { crossReadable, crossSendable, sensitiveConfirm }
+  }
 
   const recordAudit = entry => {
     data.audit.push({ at: new Date().toISOString(), ...entry })
@@ -77,17 +132,21 @@ export function apply(ctx) {
     const userId = String(config.get('chat.userId', 'web-user') || 'web-user')
     const identityUserId = String(identity.userId || userId)
     const userName = String(identity.userName || resolveUserNickname(config))
+    const roleId = String(conv.meta?.roleId || conv.id)
+    // 角色级策略：同角色所有渠道取“开启过就开启”的聚合，渠道详情里的
+    // “允许该角色跨渠道读取 / 发送”才和实际校验一致。
+    const rolePolicy = rolePolicyFor(roleId)
     // 确认主体：除网页端主人身份外，还要包含来源渠道自己声明的身份 / 信任名单。
     // 外部渠道（微信clawbot / NapCat / QQ 官方机器人）收到“确认”时，发送者标识来自
     // 渠道侧，不一定是网页端身份；这里在创建 pending 时一次性固化允许确认的 ID 列表，
     // 避免用户明明在自己的渠道里回复“确认”却被当成普通消息写入聊天记录。
     const confirmUserIds = []
     const addConfirmId = value => {
-      const id = String(value ?? '').trim()
-      if (!id || confirmUserIds.includes(id)) return
-      confirmUserIds.push(id)
-      // NapCat / QQ 群聊的发送者标识带 qq: 前缀，而渠道配置里的信任名单可能只写数字。
-      if (!id.includes(':') && /^\d{3,20}$/.test(id)) confirmUserIds.push(`qq:${id}`)
+      // 展开带前缀 / 纯数字的等价身份，确保渠道插件传入的 senderId 能匹配上。
+      for (const variant of identityVariants(value)) {
+        if (!variant || confirmUserIds.includes(variant)) continue
+        confirmUserIds.push(variant)
+      }
     }
     addConfirmId(userId)
     addConfirmId(identityUserId)
@@ -97,7 +156,7 @@ export function apply(ctx) {
     for (const trusted of Array.isArray(conv.meta?.trustedUserIds) ? conv.meta.trustedUserIds : []) addConfirmId(trusted)
     return {
       conversationId,
-      roleId: conv.meta?.roleId || conv.id,
+      roleId,
       channelId: channel.channelId,
       userId,
       identityUserId,
@@ -107,10 +166,10 @@ export function apply(ctx) {
       channel,
       channelGroup: channel.group || 'private',
       // 渠道插件在会话 meta 上声明的策略（clawbot 的“跨渠道读取 / 发送”开关）。
-      // 这些是真正随会话持久化的来源侧授权，不再依赖另外手工写入 grants 表。
-      crossReadable: conv.meta?.crossReadable === true,
-      crossSendable: conv.meta?.crossSendable === true,
-      sensitiveConfirm: conv.meta?.sensitiveConfirm !== false,
+      // 这里叠加同角色聚合策略，避免同一个角色的两个渠道一个全开一个显示全关。
+      crossReadable: rolePolicy.crossReadable === true || conv.meta?.crossReadable === true,
+      crossSendable: rolePolicy.crossSendable === true || conv.meta?.crossSendable === true,
+      sensitiveConfirm: conv.meta?.sensitiveConfirm !== false && rolePolicy.sensitiveConfirm !== false,
     }
   }
 
@@ -134,19 +193,30 @@ export function apply(ctx) {
     return `${kindLabel}渠道「${name}」（${channelId || 'unknown'}）`
   }
 
-  const requestConfirm = ({ action, confirmTarget, allowedUserIds = null }) =>
-    new Promise(resolve => {
-      const id = `confirm_${Date.now().toString(36)}${(++confirmSeq).toString(36)}`
-      const startedAt = Date.now()
-      const payload = {
-        id,
-        action,
-        conversationId: confirmTarget.conversationId,
-        sourceChannel: confirmTarget.channelId,
-        targetChannel: confirmTarget.targetChannelId,
-        targetName: confirmTarget.targetName || confirmTarget.targetChannelId,
-        createdAt: Date.now(),
-      }
+  const requestConfirm = ({ action, confirmTarget, allowedUserIds = null }) => {
+    const dedupeKey = `${confirmTarget.conversationId}\u0000${action}\u0000${String(confirmTarget.targetChannelId || '')}`
+    const existing = pendingByKey.get(dedupeKey)
+    if (existing?.promise) {
+      ctx.logger.debug?.(
+        `[chat-permissions] 复用未结束的确认请求：${action} → ${confirmTarget.targetName || confirmTarget.targetChannelId || ''}`,
+      )
+      return existing.promise
+    }
+    const deferred = {}
+    const promise = new Promise(resolve => {
+      deferred.resolve = resolve
+    })
+    const id = `confirm_${Date.now().toString(36)}${(++confirmSeq).toString(36)}`
+    const startedAt = Date.now()
+    const payload = {
+      id,
+      action,
+      conversationId: confirmTarget.conversationId,
+      sourceChannel: confirmTarget.channelId,
+      targetChannel: confirmTarget.targetChannelId,
+      targetName: confirmTarget.targetName || confirmTarget.targetChannelId,
+      createdAt: Date.now(),
+    }
       // 允许确认的主体：优先使用来源会话固化的 confirmUserIds（网页主人 + 渠道身份 /
       // 信任名单）；调用方也可以显式覆盖；空数组表示“谁都不能确认”。
       const defaultAllowed =
@@ -161,9 +231,13 @@ export function apply(ctx) {
             : null
       const finish = (approved, { timedOut = false } = {}) => {
         const record = pending.get(id)
-        if (!record) return
+        if (!record) {
+          deferred.resolve(approved)
+          return
+        }
         clearTimeout(record.timer)
         pending.delete(id)
+        if (record.dedupeKey && pendingByKey.get(record.dedupeKey) === record) pendingByKey.delete(record.dedupeKey)
         recordAudit({
           result: approved ? 'confirmed' : timedOut ? 'timeout' : 'rejected',
           action,
@@ -206,17 +280,20 @@ export function apply(ctx) {
             ctx.logger?.warn?.('[chat-permissions] 写入确认超时提示失败', err)
           }
         }
-        resolve(approved)
+        deferred.resolve(approved)
       }
       const timer = setTimeout(() => finish(false, { timedOut: true }), CONFIRM_TIMEOUT)
-      pending.set(id, { id, timer, finish, conversationId: confirmTarget.conversationId, allowedUserIds: allowed })
+      const record = { id, timer, finish, promise, dedupeKey, conversationId: confirmTarget.conversationId, allowedUserIds: allowed }
+      pending.set(id, record)
+      pendingByKey.set(dedupeKey, record)
       toast?.warn?.(
         `敏感操作需要确认：${action === 'read' ? '读取' : '向'} ${payload.targetName} ${action === 'read' ? '的聊天记录' : '发送消息'}。` +
           `请在输入框输入“确认”同意，输入其它内容视为拒绝。`,
       )
       ctx.logger.info(`[chat-permissions] 等待确认：${action} → ${payload.targetName}`)
       events.emit('chat:confirm-request', payload)
-    })
+    return promise
+  }
 
   /**
    * 校验一次工具操作。
@@ -298,11 +375,82 @@ export function apply(ctx) {
     return { ok: true, channelId: target.channelId, confirmed: true }
   }
 
+  /**
+   * 角色级设置跨渠道策略：
+   *   1. 更新该角色所有会话的 conv.meta（chat-permissions 校验直接读这里）；
+   *   2. 刷新 chat-store 渠道索引；
+   *   3. 同步外部渠道的 channel.meta.permissions，让渠道详情里的复选框
+   *      与设置页 / 实际校验保持一致。
+   */
+  const setRolePolicy = (roleId, patch = {}) => {
+    const wantedRole = String(roleId || '').trim()
+    if (!wantedRole) return false
+    const normalized = {}
+    if (Object.prototype.hasOwnProperty.call(patch, 'crossReadable')) normalized.crossReadable = patch.crossReadable === true
+    if (Object.prototype.hasOwnProperty.call(patch, 'crossSendable')) normalized.crossSendable = patch.crossSendable === true
+    if (Object.prototype.hasOwnProperty.call(patch, 'sensitiveConfirm')) normalized.sensitiveConfirm = patch.sensitiveConfirm !== false
+    if (!Object.keys(normalized).length) return false
+    if (applyingRolePolicy) return true
+    applyingRolePolicy = true
+    try {
+      for (const conv of sessions.list()) {
+        if (roleIdOf(conv) !== wantedRole) continue
+        const meta = { ...(conv.meta || {}) }
+        let changed = false
+        for (const [key, value] of Object.entries(normalized)) {
+          if (meta[key] === value) continue
+          meta[key] = value
+          changed = true
+        }
+        if (!changed) continue
+        // 保留 updatedAt：改权限不应把角色下所有渠道在会话列表顶部反复顶来顶去。
+        sessions.update(conv.id, { meta, updatedAt: conv.updatedAt })
+        store.channelForConversation(conv.id)
+      }
+
+      const registry = channelRegistry()
+      if (registry?.tabs && registry?.channels && registry?.updateChannel) {
+        for (const tab of registry.tabs()) {
+          for (const channel of registry.channels(tab)) {
+            const conv = channel.meta?.conversationId ? sessions.get(channel.meta.conversationId) : null
+            const channelRole = String(channel.meta?.roleId || conv?.meta?.roleId || '')
+            if (channelRole !== wantedRole) continue
+            const permissions = channel.meta?.permissions
+            if (!permissions || typeof permissions !== 'object') continue
+            const nextPermissions = { ...permissions }
+            let changed = false
+            if (Object.prototype.hasOwnProperty.call(normalized, 'crossReadable') && nextPermissions.crossRead !== normalized.crossReadable) {
+              nextPermissions.crossRead = normalized.crossReadable
+              changed = true
+            }
+            if (Object.prototype.hasOwnProperty.call(normalized, 'crossSendable') && nextPermissions.crossSend !== normalized.crossSendable) {
+              nextPermissions.crossSend = normalized.crossSendable
+              changed = true
+            }
+            if (Object.prototype.hasOwnProperty.call(normalized, 'sensitiveConfirm') && nextPermissions.confirm !== normalized.sensitiveConfirm) {
+              nextPermissions.confirm = normalized.sensitiveConfirm
+              changed = true
+            }
+            if (!changed) continue
+            registry.updateChannel(tab, channel.id, { meta: { ...channel.meta, permissions: nextPermissions } })
+          }
+        }
+      }
+
+      events.emit('chat:permission-changed', { roleId: wantedRole, ...normalized, grants: data.grants.length })
+      return true
+    } finally {
+      applyingRolePolicy = false
+    }
+  }
+
   const service = {
     name: 'chat-permissions',
     contextFor,
     authorize,
     can: authorize,
+    rolePolicy: roleId => rolePolicyFor(roleId),
+    setRolePolicy,
 
     hasPending: conversationId => [...pending.values()].some(item => item.conversationId === conversationId),
 
@@ -361,7 +509,11 @@ export function apply(ctx) {
                 ...(Array.isArray(item.allowedUserIds) ? item.allowedUserIds.map(value => String(value || '').trim()).filter(Boolean) : []),
               ]),
             ]
-      if (senderId && Array.isArray(allowed) && !allowed.includes(senderId)) {
+      // owner=true 用于“私聊把目标 QQ 视为主人”等场景：该私聊会话里只可能
+      // 出现主人本人，渠道身份可能因版本升级 / 改名与旧授权列表不一致，此时
+      // 不再拿 stale allowlist 把主人的确认挡掉。
+      const ownerTrusted = options.owner === true
+      if (!ownerTrusted && senderId && Array.isArray(allowed) && !identityAllowed(senderId, allowed)) {
         ctx.logger.debug?.(`[chat-permissions] 忽略未授权确认：sender=${senderId || '空'} allowed=${allowed.join(',') || '无'}`)
         return { handled: false, ignored: true }
       }
@@ -399,11 +551,51 @@ export function apply(ctx) {
     { owner: 'chat-permissions', interceptor: true },
   )
 
+  // 渠道详情里保存“跨渠道读取 / 发送 / 敏感确认”后，渠道注册中心会广播
+  // channel:permissions-changed；这里把它提升为角色级策略，保证同一个角色的
+  // 网页渠道、微信渠道、QQ 渠道在设置页和渠道详情里读到同一状态。
+  const offChannelPermissions = events.on('channel:permissions-changed', ({ channel, reason = 'update' } = {}) => {
+    if (applyingRolePolicy) return
+    const permissions = channel?.meta?.permissions
+    if (!permissions || typeof permissions !== 'object') return
+    const conv = channel?.meta?.conversationId ? sessions.get(channel.meta.conversationId) : null
+    const roleId = channel?.meta?.roleId || conv?.meta?.roleId
+    if (!roleId) return
+
+    // 新增渠道时，渠道插件通常在 channel:add 之后才创建 conversation /
+    // 执行 ensureConversation。此时不要拿新渠道的默认权限把整个角色关掉，
+    // 而是等同步栈结束后：角色已有的开启值保留，并把这套角色策略补到新渠道。
+    if (reason === 'add') {
+      const existing = rolePolicyFor(roleId)
+      const patch = {}
+      if (Object.prototype.hasOwnProperty.call(permissions, 'crossRead')) patch.crossReadable = existing.crossReadable === true || permissions.crossRead === true
+      if (Object.prototype.hasOwnProperty.call(permissions, 'crossSend')) patch.crossSendable = existing.crossSendable === true || permissions.crossSend === true
+      if (Object.prototype.hasOwnProperty.call(permissions, 'confirm')) patch.sensitiveConfirm = existing.sensitiveConfirm !== false && permissions.confirm !== false
+      if (Object.keys(patch).length) setTimeout(() => setRolePolicy(roleId, patch), 0)
+      return
+    }
+
+    const patch = {}
+    if (Object.prototype.hasOwnProperty.call(permissions, 'crossRead')) patch.crossReadable = permissions.crossRead === true
+    if (Object.prototype.hasOwnProperty.call(permissions, 'crossSend')) patch.crossSendable = permissions.crossSend === true
+    if (Object.prototype.hasOwnProperty.call(permissions, 'confirm')) patch.sensitiveConfirm = permissions.confirm !== false
+    if (Object.keys(patch).length) setRolePolicy(roleId, patch)
+  })
+
   ctx.provide('chat-permissions', service, { type: 'singleton' })
   ctx.effect(offConfirm)
+  ctx.effect(offChannelPermissions)
   ctx.effect(() => {
-    for (const item of pending.values()) clearTimeout(item.timer)
+    for (const item of pending.values()) {
+      clearTimeout(item.timer)
+      try {
+        item.finish?.(false)
+      } catch (_) {
+        /* 插件卸载时忽略 */
+      }
+    }
     pending.clear()
+    pendingByKey.clear()
   })
   ctx.logger.debug('聊天权限与敏感确认就绪')
 }

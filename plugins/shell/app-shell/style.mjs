@@ -6,6 +6,10 @@
 /** app-shell 样式：骨架、玻璃、面板容器、空状态（取自 demo 的骨架部分） */
 export const APP_SHELL_CSS = `
   *{box-sizing:border-box;}
+  /* 统一 hidden 语义：插件样式常写 display:flex/grid，会覆盖浏览器默认的
+     [hidden]{display:none}；全局补一条，避免批量工具条、返回键、附件栏等
+     在 hidden=true 时仍然显示。 */
+  [hidden]{display:none !important;}
   html,body{height:100%;margin:0;}
 
   body{

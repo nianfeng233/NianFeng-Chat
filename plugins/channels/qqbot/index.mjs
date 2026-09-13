@@ -706,7 +706,7 @@ export function apply(ctx) {
         ? { senderId: String(sender.userId || ''), allowedUserIds: trustedForGroup }
         : (binding?.identityMode || 'owner') === 'guest'
           ? { senderId: sender.userId, allowedUserIds: trustedForSender }
-          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean) }
+          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean), owner: true }
     const chatPermissions = ctx.registry.get('chat-permissions')
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text, confirmContext)
     if (pendingConfirm?.handled) {

@@ -237,6 +237,9 @@ export function apply(ctx) {
     if (['off', 'low', 'high', 'max'].includes(reasoningEffort)) options.reasoningEffort = reasoningEffort
     const conversationModel = conv.meta?.model
     if (conversationModel) options.model = conversationModel
+    // 全局 temperature 是默认值：用户在模型列表里单独设置过 temperature 时，
+    // 模型级参数优先，避免“模型参数页设置了却永远不生效”。
+    options.preferModelParams = true
     return options
   }
 
@@ -526,7 +529,10 @@ export function apply(ctx) {
       let ended = false
       let textualMode = false
       let toolRetries = 0
-      const toolRetryLimit = Math.max(0, Number(config.get('chat.toolRetryLimit', 2)) || 0)
+      // DeepSeek 官方适配器按 harness 约定不发 tool_choice，模型有时会直接输出正文。
+      // 严格模式最多纠正一次；再纠正下去会让一次普通聊天白等数分钟，所以之后直接
+      // 把正文当作最终回复发送（网页与外部渠道都能正常外发）。
+      const toolRetryLimit = Math.min(1, Math.max(0, Number(config.get('chat.toolRetryLimit', 1)) || 0))
       let emptyRetries = 0
       const emptyRetryLimit = Math.max(0, Number(config.get('chat.emptyRetryLimit', 2)) || 0)
       while (round < maxRounds && !entry.cancelled) {
@@ -558,7 +564,7 @@ export function apply(ctx) {
         }
         ctx.logger.info(
           `[chat-flow] 第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
-            `工具 ${(result.toolCalls || []).length} 个 · 正文 ${String(result.text || '').length} 字` +
+            `工具 ${(result.toolCalls || []).length} 个 · 正文 ${String(result.text || '').length} 字 · 推理 ${String(result.reasoning || '').length} 字` +
             `${result.reason ? ` · finish=${result.reason}` : ''}`,
         )
         let toolCalls = normalizeToolCalls(result.toolCalls)
@@ -627,33 +633,40 @@ export function apply(ctx) {
           }
           const strict = toolsEnabled() && config.get('chat.requireToolCall', true) !== false && !entry.toolUnsupported && options.toolChoice !== 'none'
           if (strict && toolRetries < toolRetryLimit) {
-            // 严格模式：模型直接输出正文时不展示，按系统纠错要求它改用工具
+            // 严格模式：模型直接输出正文时不展示，但也不要用“普通状态”再问一遍。
+            // 必须把“上一轮正文已被驳回、原因是没调工具”这条信息回传给模型，
+            // 让它在明确的驳回上下文里重试；否则模型容易把纠正当成新用户话题，
+            // 连续两次都继续直出正文。
             toolRetries += 1
             if (entry.draftId) removeDraft(entry, conversationId)
+            const rejectedText = String(result.text || '').trim().slice(0, 1200)
+            const rejectedAt = new Date().toLocaleTimeString()
             roundMessages.push({
               role: 'user',
               content:
-                `[系统纠正 ${toolRetries}/${toolRetryLimit}] 你刚才没有调用任何工具。` +
-                '请立刻调用工具（例如 chat_send）发送你想说的内容，不要直接输出面向用户的正文；需要结束本轮时 end=true。',
+                `[系统纠正 ${toolRetries}/${toolRetryLimit}] 系统消息：你上一轮的回复已被驳回，尚未发送给用户。\n` +
+                `驳回时间：${rejectedAt}\n` +
+                '驳回原因：当前是严格工具模式，只有工具调用（tool_calls）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
+                '被驳回的正文（仅用于让你知道上一轮生成了什么；不要把它当成本轮最终回复，也不要原样直接返回）：\n' +
+                `--- 被驳回正文开始 ---\n${rejectedText || '（空）'}\n--- 被驳回正文结束 ---\n` +
+                '请重新处理本轮用户请求：必须调用工具，优先调用 chat_send，把要发送给用户的内容放进 messages 数组，并在结束本轮时设置 end=true。\n' +
+                '不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
             })
-            ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文`)
+            ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
             continue
           }
           if (strict && toolRetries >= toolRetryLimit) {
+            // 纠错达到上限：不再终止本轮，也不让用户继续空等。直接把模型正文
+            // 作为最终回复发出；渠道基座会把它正常外发到 QQ / 微信等渠道。
             if (entry.draftId) removeDraft(entry, conversationId)
-            ctx.logger.warn('[chat-flow] 严格工具模式：模型多次未调用工具，本轮终止')
-            ctx.inject('toast')?.warn?.('模型没有按要求调用工具，本轮已停止。可在 设置 → 通用 → 聊天链路 调整工具策略。')
-            const notice = '（模型没有按要求调用工具，本轮已停止。可在 设置 → 通用 → 聊天链路 调整工具策略或更换模型。）'
-            entry.finalWire = { role: 'assistant', content: notice }
-            store.append(conversationId, {
+            ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已按普通正文继续（已纠正 ${toolRetries} 次）`)
+            ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文发送。')
+            entry.finalWire = {
               role: 'assistant',
-              content: notice,
-              sender_id: `role_${conv.id}`,
-              sender_name: conv.name,
-              is_bot: true,
-              source: 'nova',
-              meta: { fallback: 'strict-tools-failed', ...(callMeta(entry.lastRound) || {}) },
-            })
+              content: result.text,
+              ...(reasoning ? { reasoning_content: reasoning } : {}),
+            }
+            await finalizeFallback(entry, conversationId, result.text, reasoning)
             ended = true
             break
           }
@@ -670,12 +683,16 @@ export function apply(ctx) {
           break
         }
 
-        // 工具调用轮：assistant 正文按文档 §6.5 丢弃（文本协议模式下保留原文给模型）
+        // 工具调用轮：assistant 正文按文档 §6.5 丢弃（文本协议模式下保留原文给模型）。
+        // DeepSeek 思考模式要求带 tool_calls 的历史 assistant 必须回传
+        // reasoning_content；即使本轮模型没有返回推理（例如关闭思考后的兼容
+        // 网关），也显式写入空字符串，避免后续请求因字段缺失被 400。
         if (entry.draftId) removeDraft(entry, conversationId)
+        const reasoningField = { reasoning_content: reasoning || '' }
         roundMessages.push(
           roundTextual
-            ? { role: 'assistant', content: result.text || null, ...(reasoning ? { reasoning_content: reasoning } : {}) }
-            : { role: 'assistant', content: null, tool_calls: toolCalls, ...(reasoning ? { reasoning_content: reasoning } : {}) },
+            ? { role: 'assistant', content: result.text || null, ...reasoningField }
+            : { role: 'assistant', content: null, tool_calls: toolCalls, ...reasoningField },
         )
 
         let sendEnded = false

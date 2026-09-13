@@ -986,7 +986,9 @@ export function apply(ctx) {
         body: {
           ilink_user_id: toUserId,
           typing_ticket: ticket,
-          status: 2,
+          // Clawbot / ilink 协议：status=1 显示“正在输入”，status=0 取消。
+          // 参考 clawbot-manager 的 sendtyping：整轮模型调用结束后才发送 status=0。
+          status: 0,
           context_token: contextToken || undefined,
           base_info: BASE_INFO,
         },

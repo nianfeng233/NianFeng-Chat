@@ -772,7 +772,7 @@ export function apply(ctx) {
         ? { senderId: sender.userId, allowedUserIds: trustedForSender }
         : channel.meta?.identityMode === 'guest'
           ? { senderId: sender.userId, allowedUserIds: trustedForSender }
-          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean) }
+          : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean), owner: true }
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, text, confirmContext)
     if (pendingConfirm?.handled) {
       await ackInbox(channel.id, [message.id])

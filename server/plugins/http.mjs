@@ -119,6 +119,9 @@ export function apply(ctx, config = {}) {
       'Access-Control-Allow-Origin': '*',
       'X-Accel-Buffering': 'no',
     })
+    // 反向代理 / Windows 云服务器上让 SSE 首包立即下发，避免日志流被缓冲。
+    res.flushHeaders?.()
+    res.socket?.setNoDelay?.(true)
     res.write(': connected\n\n')
     handler(res)
   }
@@ -206,6 +209,7 @@ export function apply(ctx, config = {}) {
         capabilities: [
           'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
           'external-plugins', 'plugin-dirs', 'webui-auth', 'system-restart', 'plugin-http-routes',
+          'preferences-sync',
           ...extraCapabilities,
         ],
       dataDir: settings.dataDir,
@@ -591,8 +595,15 @@ export function apply(ctx, config = {}) {
         const hit = match(req.method, rawPathname)
         if (!hit) return sendError(res, 404, `接口不存在：${req.method} ${rawPathname}`)
         await hit.route.handler(req, res, hit.params, url)
-        requestLog.push({ at: Date.now(), method: req.method, path: rawPathname, status: res.statusCode, ms: Date.now() - started })
+        const ms = Date.now() - started
+        requestLog.push({ at: Date.now(), method: req.method, path: rawPathname, status: res.statusCode, ms })
         if (requestLog.length > 500) requestLog.shift()
+        // 轮询类接口（健康检查 / SSE / 日志读取自身）不写入日志，避免刷屏。
+        const noisy = /^\/api\/(health|events|logs)(\/|$)/.test(rawPathname)
+        if (!noisy) {
+          const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : rawPathname.startsWith('/api/chat') ? 'info' : 'debug'
+          ctx.logger[level](`HTTP ${req.method} ${rawPathname} → ${res.statusCode} · ${ms}ms`)
+        }
         return
       }
 

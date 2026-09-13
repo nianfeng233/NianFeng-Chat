@@ -149,7 +149,7 @@ async function main() {
     check('sendmessage 请求成功', send.ok === true, JSON.stringify(send))
 
     const typingCalls = calls.filter(call => call.path === '/ilink/bot/sendtyping')
-    check('typing 状态按 1 → 2 顺序发送', typingCalls.length >= 2 && typingCalls[0].body.status === 1 && typingCalls[1].body.status === 2, JSON.stringify(typingCalls.map(c => c.body.status)))
+    check('typing 状态按 1 → 0 顺序发送（整轮结束才取消）', typingCalls.length >= 2 && typingCalls[0].body.status === 1 && typingCalls[1].body.status === 0, JSON.stringify(typingCalls.map(c => c.body.status)))
     const sendCall = calls.find(call => call.path === '/ilink/bot/sendmessage')
     check('sendmessage 携带正确文本与目标', sendCall?.body?.msg?.to_user_id === 'mock-user-1' && sendCall?.body?.msg?.item_list?.[0]?.text_item?.text === '念风回复', JSON.stringify(sendCall?.body))
 

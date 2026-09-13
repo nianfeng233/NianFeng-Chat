@@ -525,7 +525,7 @@ async function main() {
   )
   config.set('chat.reasoningEffort', 'off')
 
-  console.log('\n⑩d 严格工具模式：直出正文被丢弃并纠错')
+  console.log('\n⑩d 严格工具模式：直出正文先纠错一次，仍不调用工具则按正文发送')
   await waitFor(() => registry.list().some(item => item.key === 'chatty/chatty-1'), { timeout: 4000 })
   check('直出正文模型已同步到前端注册表', registry.list().some(item => item.key === 'chatty/chatty-1'))
   registry.select('chatty/chatty-1')
@@ -535,18 +535,32 @@ async function main() {
   const conv7 = sessions.create({ name: '严格工具模式测试', meta: { roleId: 'role-chatty' } })
   sessions.activate(conv7.id)
   messages.requestSend(conv7.id, '你好')
-  const strictNotice = await waitFor(
-    () => sessions.messages(conv7.id).find(message => message.role === 'assistant' && message.content.includes('模型没有按要求调用工具')) || null,
+  const strictReply = await waitFor(
+    () => sessions.messages(conv7.id).find(message => message.role === 'assistant' && message.content.includes('我是直接输出的正文')) || null,
     { timeout: 6000 },
   )
-  check('多次未调用工具后终止并给出明确提示', !!strictNotice, JSON.stringify(sessions.messages(conv7.id).slice(-2)))
-  check('模型直出的正文没有进入聊天气泡', !sessions.messages(conv7.id).some(message => String(message.content || '').includes('我是直接输出的正文')))
+  check('纠正后仍未调用工具时按正文发送，不再空等或终止', !!strictReply, JSON.stringify(sessions.messages(conv7.id).slice(-2)))
+  check('模型直出的正文最终进入聊天气泡', !!strictReply)
   const strictRounds = chattyRequests.slice(beforeChatty)
-  check('严格模式触发了纠正重试', strictRounds.length >= 3, `模型调用 ${strictRounds.length} 次`)
+  check(
+    '严格模式最多只做一次纠错（响应速度优先）',
+    strictRounds.length === 2,
+    `模型调用 ${strictRounds.length} 次`,
+  )
+  const strictCorrection = (strictRounds[1] || []).find(
+    message => message.role === 'user' && String(message.content || '').includes('[系统纠正'),
+  )
   check(
     '纠正消息以 user 消息回传给模型',
-    strictRounds.slice(1).some(messages => messages.some(message => message.role === 'user' && String(message.content || '').includes('[系统纠正'))),
+    !!strictCorrection,
     JSON.stringify(strictRounds[1]?.slice(-2) || []),
+  )
+  check(
+    '纠正消息明确告知“上一轮被驳回”并携带驳回原因与被驳回正文',
+    String(strictCorrection?.content || '').includes('已被驳回') &&
+      String(strictCorrection?.content || '').includes('没有调用任何工具') &&
+      String(strictCorrection?.content || '').includes('我是直接输出的正文。'),
+    String(strictCorrection?.content || '').slice(0, 240),
   )
   config.set('chat.requireToolCall', false)
 

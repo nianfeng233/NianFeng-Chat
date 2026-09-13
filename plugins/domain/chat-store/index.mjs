@@ -79,7 +79,11 @@ function sanitizeProtocolMessage(message) {
         .join('\n')
     : message.content
   const out = { role, content: String(rawContent ?? '').slice(0, MAX_PROTOCOL_CONTENT) }
-  if (message.reasoning_content) out.reasoning_content = String(message.reasoning_content).slice(0, MAX_PROTOCOL_CONTENT)
+  // 空字符串同样保留：它代表“本轮思考模式没有产生可回传推理”，
+  // 与字段完全缺失不同，排查 DeepSeek reasoning_content 400 时很关键。
+  if (message.reasoning_content !== undefined && message.reasoning_content !== null) {
+    out.reasoning_content = String(message.reasoning_content).slice(0, MAX_PROTOCOL_CONTENT)
+  }
   if (role === 'tool') {
     out.tool_call_id = String(message.tool_call_id || message.toolCallId || '').slice(0, 200)
     if (message.name) out.name = String(message.name).slice(0, 100)

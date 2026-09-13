@@ -22,6 +22,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from '../server/index.mjs'
+import { mergePreferenceSnapshot } from '../plugins/foundation/config/index.mjs'
+import { resolveTemperature } from '../plugins/features/model-adapter-backend/index.mjs'
 
 const results = []
 let failed = 0
@@ -245,6 +247,57 @@ async function main() {
   check('诊断元素存在', !!diagnostics)
   check('诊断 error 为空', diagnostics?.dataset.errors === '[]', diagnostics?.dataset.errors)
   check('语义冲突检测已运行', typeof loader.warnings.length === 'number')
+
+  section('③a 偏好合并规则（手机 / 电脑同步核心）')
+  const newerAt = Date.now()
+  const legacyMerge = mergePreferenceSnapshot(
+    { chat: { reasoningEffort: 'off', temperature: 1 }, backend: { url: '/api' }, app: { channels: { updatedAt: 1, groups: {} } } },
+    {},
+    { chat: { reasoningEffort: 'high' }, backend: { url: 'http://other-device/api' } },
+    { 'chat.reasoningEffort': { at: newerAt, by: 'desktop' } },
+  )
+  check('远端新值会覆盖本地默认值（旧版刷新后仍显示“无”的根因）', legacyMerge.data.chat.reasoningEffort === 'high', JSON.stringify(legacyMerge.data.chat))
+  check('本机专属偏好不会被远端覆盖', legacyMerge.data.backend.url === '/api')
+  check('变化列表可供设置控件 watch 实时更新', legacyMerge.changes.some(change => change.key === 'chat.reasoningEffort'))
+  const localNewerMerge = mergePreferenceSnapshot(
+    { chat: { reasoningEffort: 'max' } },
+    { 'chat.reasoningEffort': { at: newerAt + 1000, by: 'mobile' } },
+    { chat: { reasoningEffort: 'high' } },
+    { 'chat.reasoningEffort': { at: newerAt, by: 'desktop' } },
+    { isLocalOnly: () => false },
+  )
+  check('本机刚改过的值不会被远端旧值顶掉', localNewerMerge.data.chat.reasoningEffort === 'max' && localNewerMerge.changes.length === 0)
+  const noMetaMerge = mergePreferenceSnapshot(
+    { chat: { reasoningEffort: 'off' } },
+    {},
+    { chat: { reasoningEffort: 'high' } },
+    {},
+    { isLocalOnly: () => false },
+  )
+  check('旧版本无时间戳数据按远端优先，升级后能纠正历史值', noMetaMerge.data.chat.reasoningEffort === 'high')
+  const channelsMerge = mergePreferenceSnapshot(
+    { app: { channels: { updatedAt: 10, groups: { old: true } } } },
+    {},
+    { app: { channels: { updatedAt: 20, groups: { new: true } } } },
+    {},
+    { isLocalOnly: () => false },
+  )
+  check('渠道数据仍按 updatedAt 整体取新', channelsMerge.data.app.channels.groups.new === true && channelsMerge.changes.some(change => change.key === 'app.channels'))
+  check(
+    'chat-flow 下模型级 temperature 优先于全局默认值',
+    resolveTemperature({ temperature: 1, preferModelParams: true }, { temperature: 0.3 }) === 0.3,
+    String(resolveTemperature({ temperature: 1, preferModelParams: true }, { temperature: 0.3 })),
+  )
+  check(
+    '模型未配置 temperature 时回退全局默认值',
+    resolveTemperature({ temperature: 1, preferModelParams: true }, {}) === 1,
+    String(resolveTemperature({ temperature: 1, preferModelParams: true }, {})),
+  )
+  check(
+    '非 chat-flow 的显式 temperature 保持优先',
+    resolveTemperature({ temperature: 1 }, { temperature: 0.3 }) === 1,
+    String(resolveTemperature({ temperature: 1 }, { temperature: 0.3 })),
+  )
 
   section('③b 外部插件目录')
   const externalRoot = join(ROOT, '.tmp', `smoke-plugins-${Date.now()}`)
@@ -662,16 +715,23 @@ async function main() {
       },
     })
     let confirmRequest = null
+    let confirmRequestCount = 0
     const offRequest = ctx.on('chat:confirm-request', payload => {
       confirmRequest = payload
+      confirmRequestCount += 1
     })
-    const pendingDecision = permissions.authorize({
+    const confirmArgs = {
       conversationId: clawConv.id,
       action: 'read',
       channel: `nova:web:${targetConv.id}`,
-    })
+    }
+    const pendingDecision = permissions.authorize(confirmArgs)
+    // 同一来源会话 + 同一动作 + 同一目标：并发的第二次请求应复用同一个 pending，
+    // 否则用户只回复一次“确认”，另一条会超时并把超时提示写进聊天记录。
+    const duplicateDecision = permissions.authorize(confirmArgs)
     await waitFor(() => confirmRequest, { timeout: 2000 })
     check('外部渠道跨渠道操作会创建敏感确认', !!confirmRequest && confirmRequest.conversationId === clawConv.id, JSON.stringify(confirmRequest))
+    check('同一会话 / 动作 / 目标的重复确认请求会合并', confirmRequestCount === 1, `confirm-request 次数 ${confirmRequestCount}`)
     const clawChannelId = `wechat-clawbot:${clawChannel.id}`
     const beforeConfirmMessages = store.messagesOf(clawChannelId).length
     ctx.emit('backend:event', {
@@ -687,8 +747,12 @@ async function main() {
         },
       },
     })
-    const confirmed = await Promise.race([pendingDecision, sleep(1500).then(() => null)])
+    const [confirmed, duplicateConfirmed] = await Promise.race([
+      Promise.all([pendingDecision, duplicateDecision]),
+      sleep(1500).then(() => [null, null]),
+    ])
     check('微信侧回复“确认”后放行跨渠道读取', confirmed?.ok === true && confirmed?.confirmed === true, JSON.stringify(confirmed))
+    check('重复确认请求被同一次“确认”一起放行', duplicateConfirmed?.ok === true && duplicateConfirmed?.confirmed === true, JSON.stringify(duplicateConfirmed))
     check(
       '渠道身份确认不会把“确认”写进聊天记录',
       store.messagesOf(clawChannelId).length === beforeConfirmMessages,
@@ -699,6 +763,67 @@ async function main() {
     sessions.remove(clawConv.id)
     sessions.remove(targetConv.id)
     sessions.remove(roleConv.id)
+  }
+
+  section('⑥d 角色级渠道权限同步（设置页 / 渠道详情同一份状态）')
+  {
+    const chatPermissions = ctx.inject('chat-permissions')
+    const chatStore = ctx.inject('chat-store')
+    const syncRoleId = 'role-perm-sync'
+    const syncConvA = smokeSessions.create({ name: '权限同步渠道 A', meta: { roleId: syncRoleId } })
+    const syncConvB = smokeSessions.create({ name: '权限同步渠道 B', meta: { roleId: syncRoleId } })
+    const recordA = chatStore.channelForConversation(syncConvA.id)
+    const recordB = chatStore.channelForConversation(syncConvB.id)
+    chatPermissions.setRolePolicy(syncRoleId, { crossReadable: true })
+    await sleep(30)
+    check(
+      '设置页角色级开关同步到同角色全部会话',
+      chatStore.channelRecord(recordA.channelId)?.crossReadable === true && chatStore.channelRecord(recordB.channelId)?.crossReadable === true,
+      JSON.stringify({ a: chatStore.channelRecord(recordA.channelId), b: chatStore.channelRecord(recordB.channelId) }),
+    )
+
+    const permGroup = channelRegistry.groups('private')[0] || channelRegistry.addGroup('private', '权限同步测试')
+    const externalChannel = channelRegistry.addChannel('private', permGroup.id, {
+      type: 'wechat-clawbot',
+      name: '权限同步外部渠道',
+      meta: {
+        roleId: syncRoleId,
+        conversationId: syncConvB.id,
+        permissions: { read: true, reply: true, context: true, crossRead: false, crossSend: false, confirm: true },
+      },
+    })
+    await sleep(50)
+    const externalAfterAdd = channelRegistry.findChannel('private', externalChannel.id)
+    check(
+      '新增渠道的默认关闭值不会把角色已有开启策略关掉，并会继承角色策略',
+      chatStore.channelRecord(recordA.channelId)?.crossReadable === true && externalAfterAdd?.meta?.permissions?.crossRead === true,
+      JSON.stringify(externalAfterAdd?.meta?.permissions || null),
+    )
+
+    channelRegistry.updateChannel('private', externalChannel.id, {
+      meta: { ...externalAfterAdd.meta, permissions: { ...externalAfterAdd.meta.permissions, crossRead: false } },
+    })
+    await sleep(50)
+    check(
+      '渠道详情关闭跨渠道读取后，同角色其它渠道同步关闭',
+      chatStore.channelRecord(recordA.channelId)?.crossReadable === false && chatStore.channelRecord(recordB.channelId)?.crossReadable === false,
+      JSON.stringify({ a: chatStore.channelRecord(recordA.channelId), b: chatStore.channelRecord(recordB.channelId) }),
+    )
+    check('角色聚合策略被 chat-permissions 用于实际校验', chatPermissions.contextFor(syncConvA.id)?.crossReadable === false)
+
+    chatPermissions.setRolePolicy(syncRoleId, { crossReadable: true, crossSendable: true })
+    await sleep(50)
+    const externalAfterSet = channelRegistry.findChannel('private', externalChannel.id)
+    check(
+      '设置页角色开关会回写渠道详情里的跨渠道读取 / 发送权限',
+      externalAfterSet?.meta?.permissions?.crossRead === true && externalAfterSet?.meta?.permissions?.crossSend === true,
+      JSON.stringify(externalAfterSet?.meta?.permissions || null),
+    )
+
+    channelRegistry.removeChannel('private', externalChannel.id)
+    smokeSessions.remove(syncConvA.id)
+    smokeSessions.remove(syncConvB.id)
+    await sleep(30)
   }
 
   // 角色下拉框回归：chat-store 会把普通会话登记为 nova 网页渠道，它们仍是角色；
@@ -1063,9 +1188,38 @@ async function main() {
   await sleep(30)
   check('temperature 支持 0-2 连续值', Number(ctx.inject('config').get('chat.temperature')) === 1.7, String(ctx.inject('config').get('chat.temperature')))
   check('temperature 不改变推理等级', ctx.inject('config').get('chat.reasoningEffort') === 'max')
+  // 多端实时同步：模拟后端 SSE settings/updated 广播电脑端刚改的推理等级，
+  // 当前已打开的手机模型页应该立即更新，而不是刷新后仍是“无”。
+  const configService = ctx.inject('config')
+  const remoteAt = Date.now() + 5000
+  ctx.emit('backend:event', {
+    event: 'settings/updated',
+    data: {
+      preferences: { chat: { reasoningEffort: 'high', stream: false } },
+      preferencesMeta: { 'chat.reasoningEffort': { at: remoteAt, by: 'desktop-smoke' }, 'chat.stream': { at: remoteAt, by: 'desktop-smoke' } },
+    },
+  })
+  await sleep(30)
+  const liveReasoningSlider = document.querySelector('.settings-content [data-slider="reasoning"]')
+  const liveReasoningRange = liveReasoningSlider?.querySelector('input[type="range"]')
+  const streamToggle = document.querySelector('.settings-content [data-config-toggle="chat.stream"]')
+  check('SSE 推送的电脑端偏好会实时写入本地配置', configService.get('chat.reasoningEffort') === 'high', String(configService.get('chat.reasoningEffort')))
+  check(
+    '已打开的推理滑块实时刷新，无需手动刷新页面',
+    liveReasoningSlider?.classList.contains('reasoning-high') &&
+      liveReasoningRange?.value === '2' &&
+      liveReasoningSlider.querySelector('[data-slider-value]')?.textContent === '高',
+    `${liveReasoningSlider?.className} / ${liveReasoningRange?.value} / ${liveReasoningSlider?.querySelector('[data-slider-value]')?.textContent}`,
+  )
+  check(
+    '普通设置开关也实时刷新（流式输出）',
+    !!streamToggle && !streamToggle.classList.contains('on'),
+    streamToggle?.className,
+  )
   // 恢复默认，避免影响后续对话测试
-  ctx.inject('config').set('chat.reasoningEffort', 'off')
-  ctx.inject('config').set('chat.temperature', 1)
+  configService.set('chat.reasoningEffort', 'off')
+  configService.set('chat.temperature', 1)
+  configService.set('chat.stream', true)
   check('关闭开关后切换为自定义提供商面板', !!document.querySelector('.settings-content .model-provider-layout'))
   check(
     '自定义提供商面板能看到后端提供商',
@@ -1195,6 +1349,28 @@ async function main() {
   settingsView.open('logs')
   await sleep(80)
   check('运行日志页已注册并可打开', !!document.querySelector('.logs-list'))
+  const logsRailBtn = document.getElementById('railLogsBtn')
+  const settingsRailBtn = document.getElementById('railSettingsBtn')
+  const railButtons = [...(settingsRailBtn?.parentNode?.childNodes || [])].filter(node => node.nodeType === 1)
+  check(
+    '侧栏有日志入口且位于设置按钮上方',
+    !!logsRailBtn &&
+      !!settingsRailBtn &&
+      logsRailBtn.parentNode === settingsRailBtn.parentNode &&
+      railButtons.indexOf(logsRailBtn) >= 0 &&
+      railButtons.indexOf(logsRailBtn) < railButtons.indexOf(settingsRailBtn),
+    JSON.stringify({
+      logs: !!logsRailBtn,
+      settings: !!settingsRailBtn,
+      siblings: railButtons.map(el => el.id || el.tagName),
+    }),
+  )
+  check(
+    '日志页默认只显示“信息及以上”，需要细节时再切全部',
+    document.querySelector('[data-logs-level] option[selected]')?.value === 'info',
+    JSON.stringify([...document.querySelectorAll('[data-logs-level] option')].map(option => option.getAttribute('value'))),
+  )
+  check('日志页有手动刷新按钮', !!document.querySelector('[data-logs-refresh]'))
   check(
     '运行日志页有级别 / 分类 / 搜索控件',
     !!document.querySelector('[data-logs-level]') &&
@@ -1209,6 +1385,20 @@ async function main() {
   settingsView.open('logs')
   const backendLogShown = await waitFor(() => document.querySelector('.logs-list')?.textContent?.includes('SMOKE_RUNTIME_LOG_LINE'), { timeout: 3000 })
   check('后端日志可进入运行日志页（历史拉取）', !!backendLogShown)
+  backend.ctx.logger.info('SMOKE_LOG_REFRESH_BUTTON')
+  await sleep(30)
+  const refreshLogsBtn = document.querySelector('[data-logs-refresh]')
+  refreshLogsBtn?.click()
+  const refreshedLogShown = await waitFor(() => document.querySelector('.logs-list')?.textContent?.includes('SMOKE_LOG_REFRESH_BUTTON'), { timeout: 2000 })
+  check(
+    '日志页“刷新”按钮能立即重新拉取后端日志',
+    !!refreshedLogShown,
+    JSON.stringify({
+      hasButton: !!refreshLogsBtn,
+      attr: refreshLogsBtn?.hasAttribute?.('data-logs-refresh'),
+      tail: String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
+    }),
+  )
   settingsView.close()
   await sleep(20)
 
@@ -1266,7 +1456,7 @@ async function main() {
   )
   check(
     'chat-flow 传递独立的推理等级与 temperature',
-    captured?.options?.reasoningEffort === 'off' && Number(captured?.options?.temperature) === 1,
+    captured?.options?.reasoningEffort === 'off' && Number(captured?.options?.temperature) === 1 && captured?.options?.preferModelParams === true,
     JSON.stringify(captured?.options || {}),
   )
 
@@ -1362,7 +1552,33 @@ async function main() {
   }
   const sessionStyleText = styles.find(s => s.getAttribute('data-plugin') === 'session-list')?.textContent || ''
   check('紧凑模式会隐藏会话行删除按钮（避免压住头像）', sessionStyleText.includes('.list-pane.compact .conv-del'))
+  check(
+    '批量工具条 [hidden] 会真正隐藏（避免没进批量模式也显示一排按钮）',
+    sessionStyleText.includes('.batch-bar[hidden]{display:none'),
+    sessionStyleText.slice(0, 120),
+  )
   check('全局搜索插件已注入样式', pluginNames.has('global-search'))
+  {
+    const { MOBILE_SHELL_CSS } = await import('../plugins/shell/mobile-shell/style.mjs')
+    check(
+      '手机端 app-main 使用全宽单列（避免 0px rail 列把会话 / 渠道压成空白）',
+      /\.app-main\{[^}]*grid-template-columns:minmax\(0,1fr\)/.test(MOBILE_SHELL_CSS) &&
+        !/\.app-main\{[^}]*grid-template-columns:0 minmax\(0,1fr\)/.test(MOBILE_SHELL_CSS),
+    )
+    check(
+      '手机端 app 使用单行布局（避免 app-main 落进 0px 高标题栏行）',
+      /\.app\{[^}]*grid-template-rows:minmax\(0,1fr\)/.test(MOBILE_SHELL_CSS) && !/\.app\{[^}]*grid-template-rows:0 1fr/.test(MOBILE_SHELL_CSS),
+    )
+    check(
+      '手机端设置项重置桌面 flex-basis（避免 150/240px 变成高度撑出大片空白）',
+      /\.setting-control\{[^}]*flex:0 0 auto !important/.test(MOBILE_SHELL_CSS) &&
+        /\.model-provider-main \.setting-main,[^{]*\{[^}]*flex:0 0 auto !important/.test(MOBILE_SHELL_CSS),
+    )
+    check(
+      '手机端模型页提供商改成横向可滑动选择条（避免占满首屏）',
+      /\.model-provider-list\{[^}]*flex-direction:row/.test(MOBILE_SHELL_CSS),
+    )
+  }
 
   const globalSearch = ctx.inject('global-search')
   check('侧栏有全局搜索入口', !!document.getElementById('globalSearchBtn'))

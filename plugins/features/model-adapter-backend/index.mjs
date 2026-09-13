@@ -21,6 +21,18 @@ export const depends = { 'model-registry': '^1.0.0', 'backend-client': '^1.0.0' 
 export const inject = ['api', 'model-registry', 'config', 'toast']
 export const provides = []
 
+/**
+ * 决定一次模型请求最终使用的 temperature：
+ *   - chat-flow 的 `preferModelParams=true` 表示全局值是默认值，模型级参数优先；
+ *   - 直接调用适配器（例如其它插件 / 测试）显式传 temperature 时保持显式值优先；
+ *   - 模型没有配置 temperature 时回退全局值。
+ */
+export function resolveTemperature(options = {}, params = {}) {
+  const preferModelParams = options?.preferModelParams === true
+  if (preferModelParams && params?.temperature !== undefined) return params.temperature
+  return options?.temperature ?? params?.temperature
+}
+
 export function apply(ctx) {
   const api = ctx.inject('api')
   const registry = ctx.inject('model-registry')
@@ -55,11 +67,12 @@ export function apply(ctx) {
         models,
         async stream({ messages, model, options, signal, onChunk, onToolCall, onReasoning, onDone, onError }) {
           const params = model?.params || {}
+          const temperature = resolveTemperature(options, params)
           await api.streamChat({
             provider: provider.id,
             model: model.id,
             messages,
-            temperature: options?.temperature ?? params.temperature,
+            temperature,
             maxTokens: options?.maxTokens ?? params.maxTokens,
             reasoningEffort: options?.reasoningEffort ?? params.reasoningEffort,
             extraBody: options?.extraBody ?? params.extraBody,

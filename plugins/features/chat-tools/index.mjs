@@ -389,7 +389,7 @@ export function apply(ctx) {
       'read_messages',
       {
         description:
-          '读取聊天记录。默认当前渠道；可用 query 关键词、seq 精确序号、relative 相对序号范围、time_start / time_end 时间段、semantic 语义检索、cursor 分页。图片默认以“[图片]”占位；一般不需要查看原图，确需时用 include_images 或 image_message_ids，并受 image_limit 约束。',
+          '读取聊天记录。只有确实缺少必要上下文时才调用，同一轮最多一次，不要为了“确认一下”反复读取。默认当前渠道；可用 query 关键词、seq 精确序号、relative 相对序号范围、time_start / time_end 时间段、semantic 语义检索、cursor 分页。图片默认以“[图片]”占位；一般不需要查看原图，确需时用 include_images 或 image_message_ids，并受 image_limit 约束。',
         parameters: {
           type: 'object',
           properties: {
@@ -425,7 +425,7 @@ export function apply(ctx) {
       'chat_send',
       {
         description:
-          '发送一条或多条聊天消息。只有通过本工具发送的内容才会展示给用户。end=true 表示发送后结束本轮，end=false 表示继续下一轮工具调用。',
+          '发送一条或多条聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。一次调用可发送多条，发完设置 end=true 结束本轮；end=false 表示继续下一轮工具调用。',
         parameters: {
           type: 'object',
           properties: {
@@ -433,7 +433,7 @@ export function apply(ctx) {
             messages: {
               type: 'array',
               items: { type: 'string' },
-              description: '要发送的消息文本列表。',
+              description: '要发送的自然回复文本列表；不需要加编号、前缀或解释。',
             },
             images: {
               type: 'array',

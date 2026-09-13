@@ -960,6 +960,9 @@ export function apply(ctx) {
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, message.text, {
       senderId: identity.userId,
       allowedUserIds: [identity.userId].filter(Boolean),
+      // 私聊渠道的身份就代表主人；旧渠道可能残留不同的 identityUserId，这里
+      // 以“主人确认”兜底，避免渠道改名 / 升级后主人被自己的授权列表挡在外面。
+      owner: (channel.meta?.category || 'private') !== 'group',
     })
     if (pendingConfirm?.handled) {
       await ackInbox(channel.id, [message.id])

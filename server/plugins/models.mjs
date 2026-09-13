@@ -169,18 +169,27 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
         temperature: options?.temperature !== undefined,
         streamOptions: true,
         thinking: deepseekMode,
+        // 400 明确提到 reasoning_content 时，降级为关闭思考 + 移除历史推理字段再试一次。
+        forceNoThinking: false,
+        stripReasoning: false,
       }
       const buildBody = current => {
+        const forceNoThinking = current.forceNoThinking === true
+        // 官方 harness 的序列化不按 thinking 开关删除历史 reasoning：只要历史 assistant
+        // 带有推理块就原样回传，缺少字段的 tool_calls 则补空字符串。DeepSeek 在
+        // 思考模式下会校验这个字段，缺失会直接 400。
+        const keepReasoning = deepseekMode && !forceNoThinking && current.stripReasoning !== true
+        const reasoningOptions = forceNoThinking ? { ...options, reasoningEffort: 'off' } : options
         const body = {
           model,
-          messages: toOpenAIMessages(messages, { keepReasoning: deepseekMode }),
+          messages: toOpenAIMessages(messages, { keepReasoning, padReasoning: keepReasoning }),
           stream: true,
           ...(current.streamOptions ? { stream_options: { include_usage: true } } : {}),
           ...(current.temperature ? { temperature: options.temperature } : {}),
           ...(options?.maxTokens !== undefined && current.maxTokensField ? { [current.maxTokensField]: options.maxTokens } : {}),
           ...(toolDefs.length ? { tools: toolDefs } : {}),
           ...(toolDefs.length && current.toolChoice ? { tool_choice: options.toolChoice } : {}),
-          ...(current.thinking ? deepseekThinkingBody(provider, model, options) : {}),
+          ...(current.thinking ? deepseekThinkingBody(provider, model, reasoningOptions) : {}),
           ...extraBody(options),
         }
         return body
@@ -246,6 +255,16 @@ async function postChatWithParamFallbacks(ctx, url, provider, buildBody, flags, 
       const status = Number(err?.status)
       const message = String(err?.message || err)
       if (status !== 400 && status !== 422) throw err
+      // DeepSeek 思考模式的 reasoning_content 校验：缺字段 / 历史字段冲突时，
+      // 不向用户抛 400，而是关闭思考并移除历史推理字段重试一次。
+      if (/reasoning_content/i.test(message)) {
+        if (!current.forceNoThinking) {
+          current = { ...current, forceNoThinking: true, stripReasoning: true }
+          ctx.logger?.warn?.('[models] DeepSeek 拒绝了 reasoning_content，已关闭思考并清理历史推理字段后重试')
+          continue
+        }
+        throw err
+      }
       if (current.toolChoice && /tool_choice/i.test(message)) {
         current = { ...current, toolChoice: false }
         continue
@@ -1561,7 +1580,7 @@ function normalizeArguments(args) {
 }
 
 /** 前端上下文 -> OpenAI 兼容 messages（保留 assistant.tool_calls / role=tool） */
-function toOpenAIMessages(messages = [], { keepReasoning = false } = {}) {
+function toOpenAIMessages(messages = [], { keepReasoning = false, padReasoning = false } = {}) {
   return (Array.isArray(messages) ? messages : []).map(message => {
     if (!message || typeof message !== 'object') return { role: 'user', content: '' }
     if (message.role === 'tool') {
@@ -1573,8 +1592,9 @@ function toOpenAIMessages(messages = [], { keepReasoning = false } = {}) {
     }
     if (message.role === 'assistant') {
       const reasoning = message.reasoning_content ?? message.meta?.reasoningContent
+      const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
       const out = { role: 'assistant', content: stringifyContent(message.content) }
-      if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
+      if (hasToolCalls) {
         out.tool_calls = message.tool_calls.map(call => ({
           id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`,
           type: call.type || 'function',
@@ -1584,9 +1604,13 @@ function toOpenAIMessages(messages = [], { keepReasoning = false } = {}) {
           },
         }))
       }
-      // DeepSeek thinking 模式要求把历史 assistant 的 reasoning_content 原样传回；
-      // 其它 OpenAI 兼容厂商不认这个字段，由适配器按需保留。
-      if (keepReasoning && reasoning) out.reasoning_content = String(reasoning)
+      // DeepSeek thinking 模式要求把历史 assistant 的 reasoning_content 回传；
+      // 如果历史里缺字段，带上空字符串也比整个字段缺失安全（官方校验只检查字段）。
+      // 关闭思考（off / 降级重试）时会整体移除，避免非思考请求携带历史推理。
+      if (keepReasoning) {
+        if (reasoning) out.reasoning_content = String(reasoning)
+        else if (padReasoning && hasToolCalls) out.reasoning_content = ''
+      }
       return out
     }
     const role = message.role || 'user'

@@ -24,6 +24,7 @@ import * as instancePlugin from './plugins/instance.mjs'
 import * as pluginRegistryPlugin from './plugins/plugin-registry.mjs'
 import * as httpPlugin from './plugins/http.mjs'
 import * as logsPlugin from './plugins/logs.mjs'
+import { attachRuntimeLogStore } from './plugins/logs.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -109,6 +110,10 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
         source: 'explicit',
       }
     : await resolveDataDir(ROOT)
+
+  // 尽早接入日志：后面的 settings / sessions / http / channel bridge 启动日志
+  // 都会同时进入终端、runtime.log 与 WebUI 日志页。
+  attachRuntimeLogStore(ctx, { dataDir: paths.dataDir, version: pkg.version })
 
   const plugins = [
     [settingsPlugin, { dataDir: paths.dataDir, logLevel }],

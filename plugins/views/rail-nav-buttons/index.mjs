@@ -93,21 +93,58 @@ export function apply(ctx) {
   }, { order: 10 })
 
   ctx.slots.register('rail:bottom', container => {
+    // 日志入口固定在设置按钮上方，常用日志排查不必再进设置页里翻。
     container.innerHTML = `
+      <button class="rail-btn" id="railLogsBtn" title="运行日志" data-action="logs">
+        ${icons.logs}
+      </button>
       <button class="rail-btn" id="railSettingsBtn" title="设置" data-action="settings">
         ${icons.settings}
       </button>`
+    const logsBtn = container.querySelector('#railLogsBtn')
+    const settingsBtn = container.querySelector('#railSettingsBtn')
+    const setSettingsActive = (logsActive, settingsActive) => {
+      logsBtn?.classList.toggle('active', !!logsActive)
+      settingsBtn?.classList.toggle('active', !!settingsActive)
+    }
     const onClick = e => {
+      if (e.target.closest('[data-action="logs"]')) {
+        ctx.emit('settings:open', { page: 'logs' })
+        return
+      }
       if (!e.target.closest('[data-action="settings"]')) return
       ctx.emit('settings:toggle', null)
     }
     container.addEventListener('click', onClick)
-    const off = ctx.on('settings:opened', () => container.querySelector('#railSettingsBtn')?.classList.add('active'))
-    const off2 = ctx.on('settings:closed', () => container.querySelector('#railSettingsBtn')?.classList.remove('active'))
+    // 其它插件（例如全局搜索）也会往 rail:bottom 追加按钮；每次插槽挂载后
+    // 重新保证日志按钮紧贴设置按钮上方。
+    const ensureOrder = () => {
+      if (!logsBtn || !settingsBtn) return
+      const parent = settingsBtn.parentNode
+      if (!parent) return
+      const elementNodes = [...parent.childNodes].filter(node => node.nodeType === 1)
+      const index = elementNodes.indexOf(settingsBtn)
+      if (index >= 0 && elementNodes[index - 1] === logsBtn) return
+      parent.insertBefore(logsBtn, settingsBtn)
+    }
+    ensureOrder()
+    const offOrder = ctx.on('slot:mounted', ({ slot } = {}) => {
+      if (slot === 'rail:bottom') ensureOrder()
+    })
+    // settings-view 默认高亮设置按钮；设置页切到 logs 时把高亮移到日志按钮。
+    const off = ctx.on('settings:page-changed', ({ id } = {}) => {
+      setSettingsActive(id === 'logs', id !== 'logs')
+    })
+    const off2 = ctx.on('settings:opened', () => {
+      if (settingsBtn?.classList.contains('active')) setSettingsActive(false, true)
+    })
+    const off3 = ctx.on('settings:closed', () => setSettingsActive(false, false))
     return () => {
       container.removeEventListener('click', onClick)
+      offOrder()
       off()
       off2()
+      off3()
       container.innerHTML = ''
     }
   }, { order: 10 })

@@ -232,6 +232,11 @@ export function apply(ctx) {
       group.expanded = true
       persist()
       events.emit('channel:add', { tab, groupId, channel })
+      // 渠道权限（跨渠道读取 / 发送 / 敏感确认）是角色级策略：通知权限服务
+      // 同步到该角色已有的其它渠道，避免“渠道详情全开、设置页却全关”。
+      if (partial.meta && Object.prototype.hasOwnProperty.call(partial.meta, 'permissions')) {
+        events.emit('channel:permissions-changed', { tab, channel, reason: 'add' })
+      }
       return channel
     },
     removeChannel(tab, channelId) {
@@ -249,8 +254,15 @@ export function apply(ctx) {
     updateChannel(tab, channelId, patch) {
       const channel = service.findChannel(tab, channelId)
       if (!channel) return null
+      const permissionsBefore = JSON.stringify(channel.meta?.permissions || null)
       Object.assign(channel, patch)
       persist()
+      const permissionsChanged =
+        !!patch?.meta &&
+        Object.prototype.hasOwnProperty.call(patch.meta, 'permissions') &&
+        JSON.stringify(channel.meta?.permissions || null) !== permissionsBefore
+      // 先发权限变化事件，让 chat-permissions 把角色级策略同步到其它渠道。
+      if (permissionsChanged) events.emit('channel:permissions-changed', { tab, channel, reason: 'update' })
       events.emit('channel:updated', { tab, channel })
       return channel
     },

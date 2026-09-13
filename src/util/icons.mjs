@@ -48,6 +48,7 @@ export const icons = {
   bolt: wrap('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'),
   save: wrap('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>'),
   grid: wrap('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>'),
+  logs: wrap('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
   check: `<svg class="check single" viewBox="0 0 12 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5.5 L4.5 8.8 L11 1.5"/></svg>`,
   checkDouble: `<svg class="check double" viewBox="0 0 18 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5.5 L4.5 8.8 L11 1.5"/><path d="M7 5.5 L10.5 8.8 L17 1.5"/></svg>`,
   checkDoubleRead: `<svg class="check double read" viewBox="0 0 18 10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 5.5 L4.5 8.8 L11 1.5"/><path d="M7 5.5 L10.5 8.8 L17 1.5"/></svg>`,

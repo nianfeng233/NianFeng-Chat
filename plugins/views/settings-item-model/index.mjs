@@ -119,6 +119,7 @@ export function apply(ctx) {
       let advancedOpen = false
       let refreshingProvider = ''
       let unbindConfig = null
+      let unbindSliderConfig = null
       let disposed = false
 
       /** 官方服务插件是否存在；禁用它后内置模型区域会整体消失 */
@@ -577,14 +578,14 @@ export function apply(ctx) {
               `<div class="setting-row">
                  <div class="setting-main">
                    <div class="setting-name">推理等级</div>
-                   <div class="setting-help">off / low / high / max，对应 DeepSeek thinking + reasoning_effort；当前：${escapeHtml(reasoningLevel.label)}（${escapeHtml(reasoningLevel.id)}）</div>
+                   <div class="setting-help" data-reasoning-help>off / low / high / max，对应 DeepSeek thinking + reasoning_effort；当前：${escapeHtml(reasoningLevel.label)}（${escapeHtml(reasoningLevel.id)}）</div>
                  </div>
                  <div class="setting-control">${reasoningSliderHtml()}</div>
                </div>
                <div class="setting-row">
                  <div class="setting-main">
                    <div class="setting-name">随机性 temperature</div>
-                   <div class="setting-help">0 - 2 连续可调，和推理等级相互独立（temperature 不等于思考强度）</div>
+                   <div class="setting-help">0 - 2 连续可调，和推理等级相互独立（temperature 不等于思考强度）；这里是全局默认值，模型列表里单独设置过 temperature 的模型优先使用模型参数</div>
                  </div>
                  <div class="setting-control">${temperatureSliderHtml()}</div>
                </div>` +
@@ -614,6 +615,7 @@ export function apply(ctx) {
         const backendOnline = !!health
         const staleBackend = backendOnline && !(health?.capabilities || []).includes('provider-crud')
         unbindConfig?.()
+        unbindSliderConfig?.()
         container.innerHTML = page(
           '模型',
           official
@@ -799,15 +801,23 @@ export function apply(ctx) {
       /**
        * 紧凑参数滑块：拖动只更新视觉，松手才写 config（不整页重渲染，交互顺滑）。
        * 推理等级 4 档；temperature 0-2 连续。
+       *
+       * 除了本机拖动，这里还订阅 config 的推理 / temperature：电脑端修改后
+       * 后端 SSE 推送过来时，手机页面上已经打开的参数面板会立刻更新，不再
+       * 需要刷新页面才看到新值。
        */
       const bindCompactSliders = () => {
+        unbindSliderConfig?.()
+        const offs = []
         const reasoning = container.querySelector('[data-slider="reasoning"]')
         if (reasoning) {
           const input = reasoning.querySelector('[data-slider-range]')
           const valueLabel = reasoning.querySelector('[data-slider-value]')
-          const preview = () => {
-            const index = Math.max(0, Math.min(REASONING_LEVELS.length - 1, Number(input.value) || 0))
+          const help = container.querySelector('[data-reasoning-help]')
+          const applyValue = effort => {
+            const index = reasoningIndexFor(effort)
             const level = REASONING_LEVELS[index]
+            input.value = String(index)
             const style = REASONING_CSS[level.id]
             const percent = (index / (REASONING_LEVELS.length - 1)) * 100
             reasoning.className = `param-slider reasoning-${level.id}`
@@ -816,32 +826,42 @@ export function apply(ctx) {
             reasoning.style.setProperty('--white', style.white)
             if (valueLabel) valueLabel.textContent = level.label
             input.title = level.hint
+            if (help) {
+              help.textContent = `off / low / high / max，对应 DeepSeek thinking + reasoning_effort；当前：${level.label}（${level.id}）`
+            }
           }
+          const preview = () => applyValue(REASONING_LEVELS[Number(input.value) || 0]?.id || 'off')
           input.addEventListener('input', preview)
           input.addEventListener('change', () => {
             const index = Math.max(0, Math.min(REASONING_LEVELS.length - 1, Number(input.value) || 0))
             config.set('chat.reasoningEffort', REASONING_LEVELS[index].id)
           })
+          offs.push(config.watch('chat.reasoningEffort', applyValue))
         }
 
         const temperature = container.querySelector('[data-slider="temperature"]')
         if (temperature) {
           const input = temperature.querySelector('[data-slider-range]')
           const valueLabel = temperature.querySelector('[data-slider-value]')
-          const preview = () => {
-            const value = Math.max(0, Math.min(2, Number(input.value) || 0))
+          const applyValue = next => {
+            const value = Math.max(0, Math.min(2, Number(next) || 0))
+            input.value = String(value)
             const { color, white } = temperatureColor(value)
             temperature.style.setProperty('--p', `${(value / 2) * 100}%`)
             temperature.style.setProperty('--c', color)
             temperature.style.setProperty('--white', white)
             if (valueLabel) valueLabel.textContent = value.toFixed(2)
           }
+          const preview = () => applyValue(input.value)
           input.addEventListener('input', preview)
           input.addEventListener('change', () => {
             const value = Math.max(0, Math.min(2, Number(input.value) || 0))
             config.set('chat.temperature', Number(value.toFixed(2)))
           })
+          offs.push(config.watch('chat.temperature', applyValue))
         }
+
+        unbindSliderConfig = () => offs.forEach(off => off?.())
       }
 
       const deleteProviderFlow = async id => {
@@ -1125,6 +1145,10 @@ export function apply(ctx) {
         ctx.on('models:synced', render),
         ctx.on('model:models-updated', render),
         ctx.on('backend:status', () => loadProviders()),
+        // 该开关不是 data-config-* 常规控件；电脑端修改后同样实时刷新手机上的模型页。
+        config.watch('model.useBuiltin', () => {
+          if (!disposed) render()
+        }),
         ctx.on('plugin:enabled', payload => {
           if (payload?.id !== 'official-service') return
           render()
@@ -1146,6 +1170,7 @@ export function apply(ctx) {
         disposed = true
         offs.forEach(off => off?.())
         unbindConfig?.()
+        unbindSliderConfig?.()
       }
     },
   })

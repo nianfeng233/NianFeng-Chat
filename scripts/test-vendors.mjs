@@ -120,6 +120,21 @@ async function startVendorServer() {
 
     if (path.includes('/deepseek/chat/completions')) {
       captured.deepseek.push(body)
+      const hasTrigger = (body.messages || []).some(message => String(message.content || '').includes('__reasoning_400__'))
+      const triggerAttempts = captured.deepseek.filter(item =>
+        (item.messages || []).some(message => String(message.content || '').includes('__reasoning_400__')),
+      ).length
+      if (hasTrigger && triggerAttempts === 1) {
+        // 模拟 DeepSeek 思考模式的 reasoning_content 400，用于验证适配器的降级重试。
+        return json(res, 400, {
+          error: {
+            message: 'The `reasoning_content` in the thinking mode must be passed back to the API.',
+            type: 'invalid_request_error',
+            param: null,
+            code: 'invalid_request_error',
+          },
+        })
+      }
       return sse(res, [
         {
           data: {
@@ -275,11 +290,71 @@ async function main() {
     { role: 'tool', tool_call_id: 'call_prev', name: 'chat_send', content: '{"ok":true}' },
     { role: 'user', content: '继续' },
   ]
-  await api(base, '/api/chat', { method: 'POST', body: { provider: 'deepseek', model: 'deepseek-v4-flash', messages: historyMessages, tools: TOOLS, reasoningEffort: 'low' } })
+  const historyResponse = await api(base, '/api/chat', {
+    method: 'POST',
+    body: { provider: 'deepseek', model: 'deepseek-v4-flash', messages: historyMessages, tools: TOOLS, reasoningEffort: 'low' },
+  })
+  // 必须消费完 SSE 流：fetch 只等响应头，mock 端记录请求体 / 适配器发请求
+  // 与后面的断言存在竞态，之前偶发拿不到最新 body（32/34）。
+  await historyResponse.text()
   const withHistory = vendor.captured.deepseek.at(-1)
   const assistantWire = withHistory.messages.find(message => message.role === 'assistant' && message.tool_calls)
   check('DeepSeek assistant 历史保留 reasoning_content', assistantWire?.reasoning_content === '历史推理内容', JSON.stringify(assistantWire))
   check('DeepSeek 历史工具结果保留 role=tool', withHistory.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call_prev'))
+
+  console.log('\n③b DeepSeek reasoning_content 缺失补全与 400 降级')
+  const missingReasoningMessages = [
+    { role: 'system', content: '你是测试角色' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_missing', type: 'function', function: { name: 'chat_send', arguments: '{"messages":["上一轮"],"end":true}' } }] },
+    { role: 'tool', tool_call_id: 'call_missing', name: 'chat_send', content: '{"ok":true}' },
+    { role: 'user', content: '继续' },
+  ]
+  await api(base, '/api/chat', {
+    method: 'POST',
+    body: { provider: 'deepseek', model: 'deepseek-v4-flash', messages: missingReasoningMessages, tools: TOOLS, reasoningEffort: 'high' },
+  }).then(response => response.text())
+  const paddedBody = vendor.captured.deepseek.findLast(body =>
+    (body.messages || []).some(message => message.tool_calls?.some(call => call.id === 'call_missing')),
+  )
+  const paddedAssistant = paddedBody?.messages.find(message => message.role === 'assistant' && message.tool_calls)
+  check(
+    'DeepSeek 工具历史缺少 reasoning_content 时自动补空字段',
+    paddedAssistant?.reasoning_content === '',
+    JSON.stringify(paddedAssistant),
+  )
+
+  const reasoningFallbackMessages = [
+    { role: 'system', content: '你是测试角色' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_retry', type: 'function', function: { name: 'chat_send', arguments: '{"messages":["上一轮"],"end":true}' } }], reasoning_content: '旧的推理内容' },
+    { role: 'tool', tool_call_id: 'call_retry', name: 'chat_send', content: '{"ok":true}' },
+    { role: 'user', content: '__reasoning_400__ 继续' },
+  ]
+  const reasoningFallbackResponse = await api(base, '/api/chat', {
+    method: 'POST',
+    body: { provider: 'deepseek', model: 'deepseek-v4-flash', messages: reasoningFallbackMessages, tools: TOOLS, reasoningEffort: 'high' },
+  })
+  const reasoningFallbackRaw = await reasoningFallbackResponse.text()
+  const reasoningAttempts = vendor.captured.deepseek.filter(body =>
+    (body.messages || []).some(message => String(message.content || '').includes('__reasoning_400__')),
+  )
+  const firstReasoningAttempt = reasoningAttempts[0]
+  const lastReasoningAttempt = reasoningAttempts.at(-1)
+  check(
+    'DeepSeek reasoning_content 400 会自动降级重试并完成',
+    reasoningAttempts.length >= 2 && reasoningFallbackRaw.includes('event: done') && !reasoningFallbackRaw.includes('event: error'),
+    reasoningFallbackRaw.slice(0, 240),
+  )
+  check(
+    '首次请求保留 thinking enabled 与历史 reasoning_content',
+    firstReasoningAttempt?.thinking?.type === 'enabled' && firstReasoningAttempt.messages.some(message => message.reasoning_content === '旧的推理内容'),
+    JSON.stringify(firstReasoningAttempt && { thinking: firstReasoningAttempt.thinking }),
+  )
+  check(
+    '降级请求关闭 thinking 并移除全部 reasoning_content',
+    lastReasoningAttempt?.thinking?.type === 'disabled' &&
+      !(lastReasoningAttempt.messages || []).some(message => message.reasoning_content !== undefined),
+    JSON.stringify(lastReasoningAttempt && { thinking: lastReasoningAttempt.thinking, messages: lastReasoningAttempt.messages?.slice(-3) }),
+  )
 
   console.log('\n④ Anthropic Claude 协议')
   const claudeMessages = [

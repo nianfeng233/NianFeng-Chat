@@ -155,6 +155,13 @@ export function apply(ctx) {
       if (channel) startLoop(conversationId, channel)
     }),
     events.on('chat:request-done', ({ conversationId } = {}) => stopLoop(conversationId, '整轮结束')),
+    // 兜底：request-start 因插件加载顺序 / 渠道会话尚未登记而错过时，
+    // chat-flow 的 thinking / typing 状态仍然可以拉起整轮保活。
+    events.on('chat:status', ({ conversationId, status } = {}) => {
+      if (status !== 'thinking' && status !== 'typing') return
+      const channel = findChannel(conversationId)
+      if (channel) startLoop(conversationId, channel)
+    }),
     events.on('chat:typing', ({ conversationId, typing } = {}) => {
       if (!typing) {
         const state = loops.get(conversationId)
@@ -163,6 +170,13 @@ export function apply(ctx) {
       }
       const channel = findChannel(conversationId)
       if (channel) startLoop(conversationId, channel, { short: true })
+    }),
+    // 渠道外发（包含 chat_send 写入即外发）会清空 NapCat 的输入状态；
+    // 整轮尚未结束时补报一次，保证“正在输入中”持续到本轮彻底完成。
+    events.on('channel:outbound', ({ conversationId, status } = {}) => {
+      if (status !== 'sent') return
+      const state = loops.get(conversationId)
+      if (state && !state.isShort) sendOnce(state)
     }),
     events.on('channel:removed', ({ channel } = {}) => {
       if (channel?.type !== 'napcat') return
