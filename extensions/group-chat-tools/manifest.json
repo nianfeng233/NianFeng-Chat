@@ -1,0 +1,33 @@
+{
+  "id": "group-chat-tools",
+  "name": "group-chat-tools",
+  "displayName": "群聊工具",
+  "version": "1.0.0",
+  "author": "念风扩展",
+  "description": "NapCat 群聊增强扩展：@成员 / @全体、群成员精确与模糊搜索、按 QQ 拉取资料、禁言 / 踢人 / 头衔 / 管理员 / 群公告（多参数）、群信息与入群申请审批。",
+  "entry": "./index.mjs",
+  "backend": "",
+  "icon": "🎯",
+  "color": "#0099ff",
+  "type": "extension",
+  "core": false,
+  "permissions": ["network"],
+  "depends": {
+    "channel-registry": "^1.0.0",
+    "config": ">=1.1.0",
+    "event-bus": "*",
+    "napcat": "^1.0.0",
+    "session-service": "^2.0.0",
+    "tool-registry": "^1.0.0"
+  },
+  "optionalDepends": {
+    "chat-permissions": "^1.0.0",
+    "chat-store": ">=1.0.0",
+    "plugin-manager": ">=1.0.0"
+  },
+  "provides": ["group-chat-tools"],
+  "distribution": {
+    "directory": "extensions/group-chat-tools",
+    "placement": "外部插件：<数据目录>/plugins/group-chat-tools/index.mjs；需与内置 NapCat 渠道插件配合使用"
+  }
+}

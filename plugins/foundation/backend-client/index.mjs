@@ -51,6 +51,9 @@ export function apply(ctx) {
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
+        // 允许部署时把后端地址配成绝对地址（如 http://127.0.0.1:8788/api）：
+        // 跨源请求也需要带上 WebUI 访问令牌 Cookie。
+        credentials: 'include',
         // 本地后端接口一律不走缓存：避免代理 / 浏览器把日志、会话等
         // 动态接口的旧响应当成新数据，导致界面看起来“刷新没反应”。
         cache: 'no-store',
@@ -184,6 +187,7 @@ export function apply(ctx) {
             ...(Array.isArray(tools) && tools.length ? { tools, toolChoice } : {}),
           }),
           signal: controller.signal,
+          credentials: 'include',
         })
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '')
@@ -244,7 +248,7 @@ export function apply(ctx) {
     subscribe() {
       if (eventSource || typeof EventSource === 'undefined') return false
       try {
-        eventSource = new EventSource(`${baseUrl()}/events`)
+        eventSource = new EventSource(`${baseUrl()}/events`, { withCredentials: true })
         eventSource.onmessage = e => {
           try {
             ctx.emit('backend:event', { event: 'message', data: JSON.parse(e.data) })

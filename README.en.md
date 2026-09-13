@@ -14,6 +14,9 @@ a Windows desktop application.
 
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
+> Project status: fast-moving iteration; `v1.x` marks feature milestones, not production maturity or a
+> security audit. It listens on localhost by default; before exposing it beyond localhost, read
+> “Security and Privacy” and configure an access token.
 
 - Current version: v1.1.7
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
@@ -171,7 +174,9 @@ On Windows you can also double-click `start.cmd`.
 - **Plugins**: the built-in plugin directory is read-only; the external plugin directory can be
   selected, opened, rescanned, and external plugins can be deleted.
 - **Network**: WebUI host, port, and access token. When a token is set, open
-  `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores a cookie.
+  `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores an HttpOnly cookie and strips
+  the token from the URL. Subsequent API requests use the cookie or the `X-NianFeng-Token` /
+  `Authorization` header.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
 - **Runtime logs**: independent full-width sidebar view (not inside Settings); free level checkboxes (error / warn / info / debug, remembered),
@@ -287,11 +292,25 @@ numbers, `user_data`, and similar content.
 
 - Listens on `127.0.0.1` by default; public access requires explicitly configuring the bind address
   and an access token.
+- The backend validates both `Host` and `Origin`; CORS echoes an explicit allow-list instead of `*`,
+  which blocks DNS rebinding and arbitrary web pages reading the local API.
+- With an access token configured, `/api/health` and `/api/version` expose liveness information
+  only; data directory, config path, provider state, and session statistics require the token
+  (cookie or request header).
+- `?token=` is only a first-navigation bootstrap: it exchanges the token for an HttpOnly cookie and
+  immediately redirects to a clean URL. API requests never accept the query token, and token
+  comparison is constant-time.
+- `/api/rss` blocks SSRF targets: localhost, loopback/private/link-local/metadata addresses, non-http(s)
+  schemes, plus per-hop DNS and redirect validation.
 - API keys and sensitive request headers are stored locally as AES-256-GCM ciphertext in the data
   directory.
 - When backing up data, copy the `.secret-key` file in the same directory as well.
 - User data and the external plugin directory are independent of the source tree; Git repositories
   never contain user data.
+
+> Non-default deployments (WebUI on another port, reverse proxy to a custom domain) can append
+> allow-list entries via `NIANFENG_ALLOWED_ORIGINS` / `NIANFENG_ALLOWED_HOSTS` (comma-separated).
+> Security regression test: `npm run test:security`.
 
 ## Directory Layout
 
@@ -322,5 +341,6 @@ numbers, `user_data`, and similar content.
 - [`docs/PLUGIN-GUIDE.md`](docs/PLUGIN-GUIDE.md) — plugin development guide
 - [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — plugin inventory
 - [`docs/RELEASING.md`](docs/RELEASING.md) — versioning and release process
+- [`docs/SECURITY-HARDENING.md`](docs/SECURITY-HARDENING.md) — security hardening log for the 2026-09 review
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows usage and troubleshooting
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — desktop shell build

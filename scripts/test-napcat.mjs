@@ -308,6 +308,110 @@ async function main() {
       JSON.stringify(privateAction?.params || {}),
     )
 
+    // 4c) 助手直接输出 CQ 码 / [at:qq] 简写时转换为真实消息段
+    const cqBefore = actions.length
+    const cqSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, text: '[CQ:at,qq=10002] 你好', quoteMsgId: '1001' },
+    })
+    check('CQ 码发送接口返回成功', cqSend.data?.ok === true, JSON.stringify(cqSend.data))
+    const cqAction = await waitFor(() => actions.slice(cqBefore).find(item => item.action === 'send_group_msg') || null)
+    const cqSegments = cqAction?.params?.message || []
+    check(
+      'CQ 码 [CQ:at] 被解析为 at segment（含引用）',
+      cqSegments.some(segment => segment.type === 'reply' && String(segment.data?.id) === '1001') &&
+        cqSegments.some(segment => segment.type === 'at' && String(segment.data?.qq) === '10002'),
+      JSON.stringify(cqSegments),
+    )
+    check(
+      'CQ 码后的文本保留 @ 后面的空格',
+      cqSegments.some(segment => segment.type === 'text' && segment.data?.text === ' 你好'),
+      JSON.stringify(cqSegments),
+    )
+
+    const shorthandBefore = actions.length
+    const shorthandSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, text: '[at:10002] 醒醒 [CQ:face,id=14]' },
+    })
+    check('at 简写发送接口返回成功', shorthandSend.data?.ok === true, JSON.stringify(shorthandSend.data))
+    const shorthandAction = await waitFor(() => actions.slice(shorthandBefore).find(item => item.action === 'send_group_msg') || null)
+    const shorthandSegments = shorthandAction?.params?.message || []
+    check(
+      '[at:qq] 简写与 CQ face 被解析',
+      shorthandSegments.some(segment => segment.type === 'at' && String(segment.data?.qq) === '10002') &&
+        shorthandSegments.some(segment => segment.type === 'face' && String(segment.data?.id) === '14'),
+      JSON.stringify(shorthandSegments),
+    )
+
+    const imageBefore = actions.length
+    const imageSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, text: '[CQ:image,file=https://example.com/a.png]' },
+    })
+    check('CQ image 发送接口返回成功', imageSend.data?.ok === true, JSON.stringify(imageSend.data))
+    const imageAction = await waitFor(() => actions.slice(imageBefore).find(item => item.action === 'send_group_msg') || null)
+    check(
+      'CQ image（http 图片源）透传为 image segment',
+      (imageAction?.params?.message || []).some(segment => segment.type === 'image' && segment.data?.file === 'https://example.com/a.png'),
+      JSON.stringify(imageAction?.params || {}),
+    )
+
+    const privateCqBefore = actions.length
+    const privateCqSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId: privateChannelId, text: '[CQ:at,qq=10002] 在吗' },
+    })
+    check('私聊 CQ at 发送接口返回成功', privateCqSend.data?.ok === true, JSON.stringify(privateCqSend.data))
+    const privateCqAction = await waitFor(() => actions.slice(privateCqBefore).find(item => item.action === 'send_private_msg') || null)
+    const privateCqSegments = privateCqAction?.params?.message || []
+    check(
+      '私聊没有 @ 语义：CQ at 降级为可读文本',
+      privateCqSegments.every(segment => segment.type !== 'at') &&
+        privateCqSegments.some(segment => segment.type === 'text' && String(segment.data?.text || '').includes('@10002')) &&
+        privateCqSegments.some(segment => segment.type === 'text' && String(segment.data?.text || '').includes('在吗')),
+      JSON.stringify(privateCqSegments),
+    )
+    check(
+      '私聊 CQ at 文本降级保留原 @ 与正文顺序',
+      privateCqSegments.findIndex(segment => segment.type === 'text' && String(segment.data?.text || '').includes('@10002')) <
+        privateCqSegments.findIndex(segment => segment.type === 'text' && String(segment.data?.text || '').includes('在吗')),
+      JSON.stringify(privateCqSegments),
+    )
+
+    const replyBefore = actions.length
+    const replySend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, text: '[CQ:reply,id=2002] 自定义引用', quoteMsgId: '1001' },
+    })
+    check('CQ reply 发送接口返回成功', replySend.data?.ok === true, JSON.stringify(replySend.data))
+    const replyAction = await waitFor(() => actions.slice(replyBefore).find(item => item.action === 'send_group_msg') || null)
+    const replySegments = replyAction?.params?.message || []
+    check(
+      '正文已带 CQ reply 时不再叠加渠道自动引用',
+      replySegments.filter(segment => segment.type === 'reply').length === 1 && String(replySegments.find(segment => segment.type === 'reply')?.data?.id) === '2002',
+      JSON.stringify(replySegments),
+    )
+
+    // 白名单外的 CQ 类型（本地文件）必须被拒绝，不能把本机路径交给 NapCat。
+    const dangerBefore = actions.length
+    const dangerSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, text: '[CQ:file,file=C:\\Windows\\win.ini]' },
+    })
+    check('白名单外 CQ 类型被拒绝且不发送', dangerSend.data?.ok === false, JSON.stringify(dangerSend.data))
+    await sleep(80)
+    check(
+      '白名单外 CQ 类型没有产生发送动作',
+      !actions.slice(dangerBefore).some(item => item.action === 'send_group_msg'),
+      JSON.stringify(actions.slice(dangerBefore)),
+    )
+    check(
+      'CQ 白名单外的内容不会作为纯文本原样发出',
+      dangerSend.data?.error?.includes('不被允许') || dangerSend.data?.error?.includes('为空'),
+      JSON.stringify(dangerSend.data),
+    )
+
     // 5) 重复 forward 实例自动复用
     const firstForward = await request('/napcat/instances', {
       method: 'POST',

@@ -71,9 +71,24 @@ async function loadChannelBridges(roots, ctx) {
   }
 }
 
-export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel, accessToken = '', onRestart = null } = {}) {
+export async function startBackend({
+  port = 8788,
+  host = '127.0.0.1',
+  dataDir,
+  staticDir,
+  logLevel,
+  accessToken = '',
+  onRestart = null,
+  allowedOrigins = [],
+  allowedHosts = [],
+} = {}) {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
   const ctx = new Context()
+  const envList = name =>
+    String(process.env[name] || '')
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean)
 
   ctx.provide('info', {
     name: '念风chat 后端',
@@ -122,7 +137,18 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [modelsPlugin, {}],
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
-    [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
+    [
+      httpPlugin,
+      {
+        port,
+        host,
+        staticDir: staticDir ? join(ROOT, staticDir) : null,
+        accessToken,
+        onRestart,
+        allowedOrigins: [...new Set([...allowedOrigins, ...envList('NIANFENG_ALLOWED_ORIGINS'), ...envList('FENGYU_ALLOWED_ORIGINS')])],
+        allowedHosts: [...new Set([...allowedHosts, ...envList('NIANFENG_ALLOWED_HOSTS'), ...envList('FENGYU_ALLOWED_HOSTS')])],
+      },
+    ],
     [logsPlugin, {}],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)

@@ -21,6 +21,7 @@
 | `scripts/sync-plugins.mjs` | 扫描 `plugins/**/index.mjs` 生成 `plugins/registry.mjs` | 增删插件后必须跑 `npm run sync-plugins` |
 | `scripts/smoke.mjs` | 前端端到端测试（248 项，会启动真实后端） | 加插件后补测试 |
 | `scripts/test-backend.mjs` | 后端 API 测试（65 项，含空回复重试与明确报错） | 改后端接口后补测试 |
+| `scripts/test-security.mjs` | 安全回归（39 项：Origin / Host / CORS、health 脱敏、SSRF、令牌、静态敏感路径、SSE 关闭） | 改 HTTP 安全边界或 /api/rss 后补测试 |
 | `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
 | `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
 | `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，25 项） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送后补测试 |

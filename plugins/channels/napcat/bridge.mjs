@@ -213,6 +213,128 @@ function segmentQuote(segments) {
   }
 }
 
+/**
+ * 出站 CQ 码支持（AI 直接输出 CQ 码 / `[at:qq]` 简写时转换为真实消息段）。
+ *
+ *  - `[at:123]`、`[at:all]` 是比 CQ 更短的写法，先统一展开成 `[CQ:at,qq=...]`；
+ *  - 白名单之外的 CQ 类型（file / record / video / node 等）会被丢弃，
+ *    避免模型通过直出 CQ 码让 NapCat 读取本机文件或转发任意内容；
+ *  - image 只允许 http(s) / base64 / data 图片源，本地路径一律拒绝。
+ */
+const OUTBOUND_CQ_TYPES = new Set(['text', 'at', 'image', 'face', 'music', 'json', 'xml', 'reply'])
+
+function expandAtShorthand(value) {
+  return String(value ?? '').replace(/\[at:(all|\d{3,20})\]/gi, (_, qq) => `[CQ:at,qq=${String(qq).toLowerCase() === 'all' ? 'all' : qq}]`)
+}
+
+function hasCqMarkup(value) {
+  return /\[CQ:[a-zA-Z0-9_]+(?=[,\]])/.test(expandAtShorthand(value))
+}
+
+function sanitizeOutboundSegments(segments) {
+  const out = []
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const type = String(segment?.type || '').toLowerCase()
+    if (!OUTBOUND_CQ_TYPES.has(type)) continue
+    const data = segment?.data && typeof segment.data === 'object' ? segment.data : {}
+    if (type === 'text') {
+      const text = String(data.text ?? '')
+      if (!text) continue
+      out.push({ type: 'text', data: { text } })
+      continue
+    }
+    if (type === 'at') {
+      const qq = normalizeQqId(data.qq)
+      if (!qq || (qq !== 'all' && !/^\d{3,20}$/.test(qq))) continue
+      out.push({ type: 'at', data: { qq } })
+      continue
+    }
+    if (type === 'image') {
+      const file = String(data.file || data.url || '').trim()
+      if (!/^(https?:\/\/|base64:\/\/|data:image\/)/i.test(file)) continue
+      out.push({ type: 'image', data: { file, ...(data.summary ? { summary: String(data.summary).slice(0, 200) } : {}) } })
+      continue
+    }
+    if (type === 'face') {
+      const id = String(data.id ?? '').trim()
+      if (!id) continue
+      out.push({ type: 'face', data: { id } })
+      continue
+    }
+    if (type === 'reply') {
+      const id = String(data.id ?? data.message_id ?? '').trim()
+      if (!id) continue
+      out.push({ type: 'reply', data: { id } })
+      continue
+    }
+    if (type === 'json' || type === 'xml') {
+      const value = String(data.data ?? data.value ?? '').trim()
+      if (!value) continue
+      out.push({ type, data: { data: value.slice(0, 20000) } })
+      continue
+    }
+    if (type === 'music') {
+      out.push({ type: 'music', data: { ...data } })
+    }
+  }
+  return out
+}
+
+/** 聊天正文 -> 出站 segment；不含 CQ 码时返回 null，走原来的纯文本分块逻辑。 */
+function parseOutboundSegments(text) {
+  const value = String(text ?? '')
+  if (!hasCqMarkup(value)) return null
+  return sanitizeOutboundSegments(normalizeSegments(expandAtShorthand(value)))
+}
+
+/** 与 splitText 相同，但保留首尾空格 / 换行（CQ 解析后的文本段需要保留 @ 后面的空格）。 */
+function splitTextPreserve(text, max = TEXT_CHUNK) {
+  const value = String(text ?? '')
+  if (!value.trim()) return value ? [value] : []
+  const parts = []
+  let current = ''
+  for (const line of value.split('\n')) {
+    const next = current ? `${current}\n${line}` : line
+    if (next.length <= max) {
+      current = next
+      continue
+    }
+    if (current) parts.push(current)
+    let rest = line
+    while (rest.length > max) {
+      parts.push(rest.slice(0, max))
+      rest = rest.slice(max)
+    }
+    current = rest
+  }
+  if (current) parts.push(current)
+  return parts
+}
+
+/** 把出站 segment 列表打包成若干批次，每个批次文本总长不超过 TEXT_CHUNK。 */
+function batchOutboundSegments(segments) {
+  const batches = []
+  let current = []
+  let currentText = 0
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    if (segment?.type === 'text') {
+      for (const chunk of splitTextPreserve(segment.data?.text ?? '')) {
+        if (current.length && currentText + chunk.length > TEXT_CHUNK) {
+          batches.push(current)
+          current = []
+          currentText = 0
+        }
+        current.push({ type: 'text', data: { text: chunk } })
+        currentText += chunk.length
+      }
+      continue
+    }
+    current.push(segment)
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
 /* ------------------------------------------------------------------ */
 /* 极简 RFC6455 服务端（NapCat reverse WebSocket）                       */
 /* ------------------------------------------------------------------ */
@@ -1462,22 +1584,44 @@ export function apply(ctx) {
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES) : []
     const quoteMsgId = String(body.quoteMsgId || '').trim()
     const mentionUserId = toNumericId(body.mentionUserId)
-    const chunks = splitText(text)
-    if (!chunks.length && !images.length) return { ok: false, code: 'EMPTY', error: '消息内容为空' }
+    // 含 CQ 码 / [at:qq] 时按消息段发送；纯文本保持原来的分块逻辑不变。
+    const richSegments = parseOutboundSegments(text)
+    if (richSegments === null && !splitText(text).length && !images.length) {
+      return { ok: false, code: 'EMPTY', error: '消息内容为空' }
+    }
+    if (richSegments !== null && !richSegments.length && !images.length) {
+      return { ok: false, code: 'EMPTY', error: '消息内容为空，或 CQ 类型不被允许' }
+    }
+
+    const batches = richSegments === null
+      ? splitText(text).map(chunk => [{ type: 'text', data: { text: chunk } }])
+      : batchOutboundSegments(richSegments)
+    if (!batches.length) batches.push([])
 
     const sent = []
-    let index = 0
-    for (const chunk of chunks.length ? chunks : ['']) {
-      const segments = []
-      if (index === 0 && quoteMsgId && targetType === 'group') segments.push({ type: 'reply', data: { id: quoteMsgId } })
-      if (index === 0 && mentionUserId && targetType === 'group') segments.push({ type: 'at', data: { qq: mentionUserId } })
-      if (chunk) segments.push({ type: 'text', data: { text: chunk } })
-      if (index === chunks.length - 1 || !chunks.length) {
+    for (let index = 0; index < batches.length; index += 1) {
+      const segments = [...batches[index]]
+      if (index === 0 && quoteMsgId && targetType === 'group' && !segments.some(segment => segment.type === 'reply')) {
+        segments.unshift({ type: 'reply', data: { id: quoteMsgId } })
+      }
+      if (index === 0 && mentionUserId && targetType === 'group') {
+        segments.splice(segments[0]?.type === 'reply' ? 1 : 0, 0, { type: 'at', data: { qq: mentionUserId } })
+      }
+      if (targetType !== 'group') {
+        // 私聊没有 @ 语义：CQ at 降级成可读文本，避免部分 NapCat 版本直接报错。
+        for (let i = 0; i < segments.length; i += 1) {
+          if (segments[i].type !== 'at') continue
+          const qq = String(segments[i].data?.qq || '')
+          segments[i] = { type: 'text', data: { text: `@${qq === 'all' ? '全体成员' : qq} ` } }
+        }
+      }
+      if (index === batches.length - 1) {
         for (const image of images) {
           const media = await resolveImageBase64(image)
           if (media) segments.push({ type: 'image', data: { file: `base64://${media.base64}` } })
         }
       }
+      if (!segments.length) continue
       const action = targetType === 'group' ? 'send_group_msg' : 'send_private_msg'
       const params = targetType === 'group' ? { group_id: Number(targetId), message: segments } : { user_id: Number(targetId), message: segments }
       const result = await sendAction(rt, action, params)
@@ -1485,8 +1629,8 @@ export function apply(ctx) {
         return { ok: false, code: result?.code || 'SEND_FAILED', error: result?.error || result?.message || 'NapCat 发送失败', data: result?.data || null }
       }
       sent.push(result.data?.message_id ?? result.data?.messageId ?? null)
-      index += 1
     }
+    if (!sent.length) return { ok: false, code: 'EMPTY', error: '消息内容为空或全部被过滤' }
     return { ok: true, messageIds: sent, messageId: sent[0] ?? null, count: sent.length }
   }
 

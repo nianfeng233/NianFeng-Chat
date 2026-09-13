@@ -79,7 +79,6 @@ export function apply(ctx) {
           'Content-Type': result.record.mime || 'application/octet-stream',
           'Content-Length': result.buffer.length,
           'Cache-Control': 'public, max-age=31536000, immutable',
-          'Access-Control-Allow-Origin': '*',
         })
         res.end(result.buffer)
       }),

@@ -205,5 +205,43 @@ session-service 在新增 / 更新消息后防抖写回 /api/sessions/:id
 | 样式 | `useStyle(ctx, css)` 注入 `<style data-plugin>`，卸载移除；颜色只取 CSS 变量；玻璃板透明度由 `--glass-alpha-*` 变量控制 |
 | 调试 | `__wind_debug`、`#wind-diag`、后端 `/api/logs` |
 | 敏感数据 | 只存后端本机文件；接口脱敏；API Key 与敏感请求头用 AES-256-GCM 加密 |
-| 测试 | `npm test`：模块检查 + 后端 63 项 + 前端 189 项 + 对话链路 13 项 + Nova 工具链路 101 项 + 厂商协议 30 项 |
+| 测试 | `npm test`：模块检查 + 后端 63 项 + 安全回归 39 项 + 前端 189 项 + 对话链路 13 项 + Nova 工具链路 101 项 + 厂商协议 30 项 |
+
+---
+
+## 八、cordis 兼容层与升级边界（已知架构债）
+
+前端 `src/runtime/compat.mjs` 在 cordis `Context` 上做了一层兼容视图，这是当前有意为之、
+但也必须正视的架构债：
+
+| 项目 | cordis 原生语义 | 念风兼容层语义 | 影响 |
+|---|---|---|---|
+| `ctx.effect(fn)` | 立即执行 `fn`，把返回值注册为 disposer | 把 `fn` 注册为卸载时才执行的清理函数 | 两边写法相反，迁移插件时必须逐个改 |
+| `ctx.inject(deps, cb)` | 仅回调形式 | 同时支持直接取值 / 返回对象 | 与 cordis 的 fiber 依赖时机不同 |
+| `ctx.provide(name, value)` | 随 fiber 自动释放 | 额外维护 owner / type 台账与冲突检测 | 台账逻辑要跟随 cordis 内部结构变化 |
+| 服务名 | 内置 `logger` / `events` / `registry` / `config` | 改用 `logs` / `event-bus` 等避免同名 | 生态插件按 cordis 命名接入时需要适配 |
+
+**升级策略（在完成整体迁移前）**：
+
+1. `package.json` 固定 cordis 版本，不跟随 `^` 自动跨 rc / 小版本升级；
+2. 每次升级 cordis 前先跑 `npm run check:kernels`、`npm test`（含 `test:security`）与桌面端烟测；
+3. 新插件优先使用与 cordis 语义一致的两层 `ctx.effect(() => () => cleanup())` 写法（后端
+   `server/plugins/*.mjs` 已经是这种写法），不要继续扩大兼容层面积；
+4. 中长期目标是把前端 93 个内置插件按“原生 `effect` / 原生 `inject` / 服务改名”分批迁移，
+   迁完一批删除一批兼容分支，而不是一次性重写。
+
+---
+
+## 九、安全模型（v1.1.7 加固后）
+
+- 默认只监听 `127.0.0.1`；开放监听必须同时处理访问令牌与白名单；
+- `Host` / `Origin` 双重校验；CORS 精确回显白名单 Origin；不返回通配 `*`，阻挡 DNS rebinding；
+- `?token=` 只作为 HTML 首屏换 Cookie 的引导，API 只认 Cookie / `X-NianFeng-Token` / `Authorization`；
+- `/api/health`、`/api/version` 作为探活入口；配置令牌后，health 的目录 / 配置 / 提供商 / 会话详情
+  只对通过校验的请求返回；
+- `/api/rss` 走 SSRF 安全网（私有 / 环回 / 链路本地 / 元数据地址、重定向与 DNS 逐跳校验）；
+- 令牌比较使用 SHA-256 + `timingSafeEqual` 常量时间实现；
+- 静态资源用 `path.relative` 做目录边界判断，`startsWith` 前缀绕过已移除。
+
+安全回归测试：`npm run test:security`。
 

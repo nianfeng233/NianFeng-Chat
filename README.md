@@ -11,6 +11,7 @@
 插件目录和数据目录都可以放在外部；同一套源码可以构建 Web 部署版和 Windows 桌面版。
 
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
+> 项目状态：仍处于快速迭代期，`v1.x` 版本号只表示功能里程碑，不代表生产级成熟度或安全审计结论。默认仅监听本机；如需开放监听或部署到公网，请先阅读「安全与隐私」并设置访问令牌。
 
 - 当前版本：v1.1.7
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
@@ -138,8 +139,8 @@ Windows 用户也可以直接双击 `start.cmd`。
 - **数据**：数据目录可在设置中切换；空目录为全新实例，已有 `config.json` / `sessions.json`
   的目录会直接加载。
 - **插件**：内置插件目录只读；外部插件目录可指定、打开、重新扫描，也可删除外部插件。
-- **网络**：WebUI 监听地址、端口、访问令牌；非空令牌时访问地址为
-  `http://<主机>:<端口>/?token=你的令牌`，验证通过后写入 Cookie。
+- **网络**：WebUI 监听地址、端口、访问令牌；非空令牌时首次访问
+  `http://<主机>:<端口>/?token=你的令牌`，校验通过后会写入 HttpOnly Cookie 并自动把地址栏清理为无令牌 URL；后续 API 请求只认 Cookie 或 `X-NianFeng-Token` / `Authorization` 请求头，不再接受查询串令牌。
 - **通知**：角色消息通知、声音、后台活动、系统通知权限、提示音与测试按钮。
 - **运行日志**：侧栏独立日志视图（全宽主面板，不在设置页内）；级别为错误 / 警告 / 信息 / 调试图标的自由勾选，另可按分类 / 关键词筛选，支持暂停、清空、复制与导出；选择会自动记住，成功 HTTP 访问日志不再展示，并会标红超时和失败外发。
 - **语言**：简体中文由 `lang-zh-cn` 语言包插件提供；复制该插件即可制作其他语言包。
@@ -257,14 +258,16 @@ npm run build:desktop   # 只构建桌面版
 ## 测试
 
 ```bash
-npm test              # 模块检查 + 依赖标注 + 后端 API + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
+npm test              # 模块检查 + 依赖标注 + 后端 API + 安全回归 + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
+npm run test:security # Origin / Host / CORS / health 脱敏 / SSRF / 令牌 / SSE 关闭（39 项）
 npm run test:deps     # 插件依赖字段 / 版本范围 / 无环 / inject 服务映射（208 项）
 npm run test:smoke    # 前端端到端（真实后端与 SSE，292 项）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 ```
 
-当前 `npm test` 全部通过；`scripts/smoke.mjs` 共 292 项通过，`scripts/test-dependencies.mjs` 共 208 项通过。
+当前 `npm test` 全部通过；`scripts/smoke.mjs` 共 292 项通过，`scripts/test-dependencies.mjs` 共 208 项通过，
+`scripts/test-security.mjs` 共 39 项通过。
 
 ## 版本管理与发布
 
@@ -278,9 +281,17 @@ npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 ## 安全与隐私
 
 - 默认只监听本机 `127.0.0.1`；开放访问需显式配置监听地址与访问令牌；
+- 后端对 `Host` 与 `Origin` 双重校验，CORS 只按白名单精确回显，不再返回 `Access-Control-Allow-Origin: *`，可阻挡 DNS rebinding 与任意网页直读本机 API；
+- 配置了访问令牌时，`/api/health`、`/api/version` 只返回存活探针信息；数据目录、配置文件路径、提供商状态、会话统计等详情需要携带令牌（Cookie / 请求头）才能读取；
+- `?token=` 仅用于浏览器首次打开页面换取 HttpOnly Cookie，兑换后立即 302 到无令牌地址；API 不接受查询串令牌，令牌比较使用常量时间算法；
+- `/api/rss` 内置 SSRF 防护：拒绝 `localhost`、环回 / 私有 / 链路本地 / 云元数据地址与非 http(s) 协议，并逐跳校验 DNS 与重定向；
 - API Key 与敏感请求头以 AES-256-GCM 密文保存在本机数据目录的配置文件中；
 - 备份数据时需要连同同目录的 `.secret-key` 一起复制；
 - 用户数据目录、插件目录与发布源码相互独立；Git 仓库不包含用户数据。
+
+> 非默认部署（例如把 WebUI 放到其它端口 / 反向代理到自定义域名）可通过
+> `NIANFENG_ALLOWED_ORIGINS` / `NIANFENG_ALLOWED_HOSTS` 显式追加白名单，多个值用英文逗号分隔。
+> 安全回归测试：`npm run test:security`。
 
 ## 目录结构
 
@@ -312,5 +323,6 @@ npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 - [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — 插件清单
 - [docs/wechat-clawbot-plugin.md](docs/wechat-clawbot-plugin.md) — 微信clawbot 渠道插件更新与本体改动说明
 - [`docs/RELEASING.md`](docs/RELEASING.md) — 版本管理与发布规范
+- [`docs/SECURITY-HARDENING.md`](docs/SECURITY-HARDENING.md) — 2026-09 审查反馈逐条结论与安全加固记录
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows 使用与排障
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — 桌面壳构建

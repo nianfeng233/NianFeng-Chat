@@ -15,11 +15,13 @@
 import { createServer } from 'node:http'
 import { readFile, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
-import { extname, join, normalize, resolve } from 'node:path'
+import { extname, join, resolve } from 'node:path'
+import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from './server/index.mjs'
 import { resolveDataDir } from './server/data-dir.mjs'
 import { ensurePortsFree } from './server/port-utils.mjs'
+import { timingSafeStringEqual, isInsideDir, isSensitiveStaticPath } from './server/security-utils.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
 const args = new Set(process.argv.slice(2))
@@ -57,39 +59,145 @@ function banner(lines) {
   console.log('')
 }
 
+/** 供后端 Origin 放行：本机常见主机名 + 当前机器网卡地址 + hostname。 */
+function webuiOriginList(host, port) {
+  const names = new Set(['127.0.0.1', 'localhost', '[::1]'])
+  if (host && host !== '0.0.0.0' && host !== '::') names.add(host)
+  try {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries || []) {
+        if (entry?.address) names.add(entry.address.includes(':') ? `[${entry.address}]` : entry.address)
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  const hostname = osHostname()
+  if (hostname) names.add(hostname)
+  return [...names]
+    .filter(Boolean)
+    .map(name => {
+      const text = String(name)
+      const formatted = text.includes(':') && !text.startsWith('[') ? `[${text}]` : text
+      return `http://${formatted}:${port}`
+    })
+}
+
 /** WebUI 静态服务器 + /api 反向代理（把 SSE 也原样透传） */
-function createWebServer({ backendPort, accessToken = '' }) {
+function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', allowedHosts = [] }) {
   const token = String(accessToken || '').trim()
+  const wildcardBind = !host || host === '0.0.0.0' || host === '::'
+  const normalizeHostName = value => {
+    let name = String(value || '').trim().toLowerCase()
+    if (!name) return ''
+    name = name.replace(/^\[|\]$/g, '')
+    if (name === '::1') return '[::1]'
+    return name
+  }
+  const hostNameFromConfig = value => {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    try {
+      return normalizeHostName(new URL(raw.includes('://') ? raw : `http://${raw}`).hostname)
+    } catch (_) {
+      return normalizeHostName(raw)
+    }
+  }
+  const hostNames = new Set(
+    ['localhost', '127.0.0.1', '[::1]', host, osHostname(), ...allowedHosts]
+      .map(hostNameFromConfig)
+      .filter(Boolean),
+  )
+  try {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries || []) {
+        if (entry?.address) hostNames.add(hostNameFromConfig(entry.address))
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  const isAllowedHost = rawHost => {
+    if (!rawHost) return true
+    if (wildcardBind) return true
+    try {
+      return hostNames.has(normalizeHostName(new URL(`http://${String(rawHost).trim()}`).hostname))
+    } catch (_) {
+      return false
+    }
+  }
+
   const cookieValue = (req, name) => {
     for (const part of String(req.headers.cookie || '').split(';')) {
       const [key, ...rest] = part.trim().split('=')
-      if (key === name) return decodeURIComponent(rest.join('='))
+      if (key !== name) continue
+      const raw = rest.join('=')
+      try {
+        return decodeURIComponent(raw)
+      } catch (_) {
+        return raw
+      }
     }
     return ''
   }
   const authPage = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>
 <body style="font-family:system-ui,sans-serif;padding:48px;color:#1a1d21"><h2>需要访问令牌</h2>
-<p>这是一个受保护的 WebUI。请在地址后加上访问令牌：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://<主机>:<端口>/?token=你的令牌</pre>
-<p>验证通过后会写入本机 Cookie，后续直接访问即可。</p></body></html>`
-  return createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
-    const pathname = decodeURIComponent(url.pathname)
+<p>这是一个受保护的 WebUI。请在地址后加上访问令牌完成首次引导：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://&lt;主机&gt;:&lt;端口&gt;/?token=你的令牌</pre>
+<p>验证通过后会写入本机 Cookie，随后地址栏会自动去掉令牌。</p></body></html>`
 
-    // 访问令牌：health / version 放行（供宿主探活），其余请求需要 query / cookie / header 中的 token
-    if (token && pathname !== '/api/health' && pathname !== '/api/version') {
+  const setSecurityHeaders = res => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+  }
+
+  return createServer(async (req, res) => {
+    setSecurityHeaders(res)
+    if (!isAllowedHost(req.headers.host)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
+      return
+    }
+    let url
+    try {
+      url = new URL(req.url, 'http://localhost')
+    } catch (_) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }).end('400 Bad Request')
+      return
+    }
+    let pathname = url.pathname
+    try {
+      pathname = decodeURIComponent(pathname)
+    } catch (_) {
+      /* 非法编码时保持原样 */
+    }
+
+    // 访问令牌：health / version 放行（供宿主探活）。
+    // ?token= 只允许用于首次 HTML 导航换 Cookie；API 请求只认 Cookie / 请求头。
+    if (token && req.method !== 'OPTIONS' && pathname !== '/api/health' && pathname !== '/api/version') {
       const queryToken = url.searchParams.get('token') || ''
       const cookieToken = cookieValue(req, 'nianfeng_token')
       const headerToken = String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-      const ok = queryToken === token || cookieToken === token || headerToken === token
-      if (!ok) {
+      const headerOk = !!headerToken && timingSafeStringEqual(headerToken, token)
+      const cookieOk = !!cookieToken && timingSafeStringEqual(cookieToken, token)
+      const canUseQuery =
+        req.method === 'GET' &&
+        !pathname.startsWith('/api/') &&
+        !pathname.startsWith('/user-plugins/') &&
+        String(req.headers.accept || '').includes('text/html')
+      const queryOk = canUseQuery && !!queryToken && timingSafeStringEqual(queryToken, token)
+      if (!headerOk && !cookieOk && !queryOk) {
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(authPage)
         return
       }
-      if (queryToken === token && cookieToken !== token && req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
+      if (queryOk && !cookieOk) {
+        const clean = new URL(req.url, 'http://localhost')
+        clean.searchParams.delete('token')
         res.writeHead(302, {
           'Set-Cookie': `nianfeng_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
-          Location: pathname || '/',
+          Location: `${clean.pathname || '/'}${clean.search}`,
+          'Cache-Control': 'no-store',
+          'Referrer-Policy': 'no-referrer',
         })
         res.end()
         return
@@ -121,20 +229,33 @@ function createWebServer({ backendPort, accessToken = '' }) {
       return
     }
 
-    // 2) 静态资源
-    let target = normalize(join(ROOT, pathname))
-    if (!target.startsWith(ROOT)) {
+    // 2) 静态资源；resolve + 目录边界校验，阻止 `..` 与 `public-backup` 之类兄弟目录越界；
+    //    同时不把 user_data / .git / config.json 等本机数据当静态文件发出去。
+    if (String(pathname).includes('\0') || isSensitiveStaticPath(pathname)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('404 Not Found')
+      return
+    }
+    let target = resolve(ROOT, `.${pathname}`)
+    if (!isInsideDir(ROOT, target)) {
       res.writeHead(403).end('403 Forbidden')
       return
     }
     try {
       const info = await stat(target)
-      if (info.isDirectory()) target = join(target, 'index.html')
+      if (info.isDirectory()) {
+        target = join(target, 'index.html')
+        if (!isInsideDir(ROOT, target)) {
+          res.writeHead(403).end('403 Forbidden')
+          return
+        }
+      }
+      const fileInfo = await stat(target)
+      if (!fileInfo.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOENT' })
       const body = await readFile(target)
       res.writeHead(200, {
         'Content-Type': MIME[extname(target).toLowerCase()] || 'application/octet-stream',
+        'Content-Length': body.length,
         'Cache-Control': 'no-store',
-        'Access-Control-Allow-Origin': '*',
       })
       res.end(body)
     } catch (_) {
@@ -142,6 +263,8 @@ function createWebServer({ backendPort, accessToken = '' }) {
     }
   })
 }
+
+export { createWebServer, webuiOriginList }
 
 function openBrowser(url) {
   if (!autoOpen) return
@@ -201,13 +324,41 @@ async function main() {
   let web = null
   let restarting = false
 
+  const closeWebServer = () =>
+    new Promise(resolve => {
+      if (!web) return resolve()
+      let done = false
+      let timer = null
+      const finish = () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve()
+      }
+      web.close(() => finish())
+      try {
+        web.closeIdleConnections?.()
+      } catch (_) {
+        /* ignore */
+      }
+      timer = setTimeout(() => {
+        try {
+          web.closeAllConnections?.()
+        } catch (_) {
+          /* 旧版 Node 没有该 API */
+        }
+        finish()
+      }, 250)
+      timer.unref?.()
+    })
+
   /** 一键重启：关闭当前服务后以相同参数拉起新进程（设置页保存监听地址后使用） */
   const restart = async () => {
     if (restarting) return
     restarting = true
     console.log('正在重启念风…')
     try {
-      if (web) await new Promise(resolveClose => web.close(resolveClose))
+      await closeWebServer()
     } catch (_) {
       /* ignore */
     }
@@ -229,10 +380,27 @@ async function main() {
     staticDir: singlePort ? '.' : null,
     accessToken,
     onRestart: restart,
+    // 开发模式下 WebUI 与 API 不同端口，需把 WebUI 的 Origin 显式放行给后端；
+    // 单端口模式也会包含同一端口，便于本机 IP / hostname 访问。
+    allowedOrigins: webuiOriginList(webuiHost, webPort),
   })
   let webUrl = backend.url
   if (!singlePort) {
-    web = createWebServer({ backendPort: backend.port, accessToken })
+    web = createWebServer({
+      backendPort: backend.port,
+      accessToken,
+      host: webuiHost,
+      allowedHosts: [
+        ...String(process.env.NIANFENG_ALLOWED_HOSTS || '')
+          .split(',')
+          .map(value => value.trim())
+          .filter(Boolean),
+        ...String(process.env.FENGYU_ALLOWED_HOSTS || '')
+          .split(',')
+          .map(value => value.trim())
+          .filter(Boolean),
+      ],
+    })
     await new Promise((resolve, reject) => {
       web.once('error', err =>
         reject(new Error(err?.code === 'EADDRINUSE' ? `WebUI 端口 ${webPort} 已被占用，请关闭占用程序或改用其他端口（WEB_PORT）` : err.message)),
@@ -255,7 +423,7 @@ async function main() {
   const shutdown = async () => {
     console.log('\n正在关闭念风…')
     try {
-      if (web) await new Promise(resolve => web.close(resolve))
+      await closeWebServer()
     } catch (_) {
       /* ignore */
     }

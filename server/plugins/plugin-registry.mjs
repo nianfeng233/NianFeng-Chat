@@ -21,6 +21,7 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { isInsideDir } from '../security-utils.mjs'
 
 export const name = 'plugin-registry'
 export const inject = ['settings', 'instance', 'hub']
@@ -53,11 +54,7 @@ export function apply(ctx, config = {}) {
 
   const externalDir = () => normalizeExternalDir(envDir() || configuredDir() || defaultExternalDir())
 
-  const isInside = (parent, child) => {
-    const p = resolve(parent)
-    const c = resolve(child)
-    return c === p || c.startsWith(p + sep)
-  }
+  const isInside = (parent, child) => isInsideDir(parent, child)
 
   const canWrite = async dir => {
     try {
