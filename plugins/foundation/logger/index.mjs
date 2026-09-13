@@ -29,11 +29,8 @@ export function apply(ctx) {
   const listeners = new Set()
   const MAX = 1000
   const config = ctx.inject('config')
-  let consoleLevel = config?.get?.('debug') ? 'debug' : 'info'
-  // 即使启动时 config 服务还没就绪，只要之后切换 debug 也应立即生效。
-  ctx.on('config:changed', ({ key, value } = {}) => {
-    if (key === 'debug') consoleLevel = value ? 'debug' : 'info'
-  })
+  // 控制台固定输出 info 及以上；debug 级仍会转发到运行日志页，由用户在日志页按需勾选查看。
+  let consoleLevel = 'info'
 
   const formatArg = value => {
     if (value instanceof Error) return `${value.message}\n${value.stack || ''}`

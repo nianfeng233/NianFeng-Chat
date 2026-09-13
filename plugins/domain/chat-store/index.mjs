@@ -411,6 +411,21 @@ export function apply(ctx) {
       return selected.flatMap(turn => turn.messages.map(sanitizeProtocolMessage).filter(Boolean))
     },
 
+    /**
+     * 返回按轮次分组的协议消息（保留每轮结束时间 at）。
+     * 渠道 / 重新生成等 skipUserAppend 轮次历史上可能没有写入 user wire，
+     * context-builder 需要按 at 把对应的可见用户消息补回对应轮次，避免模型失忆。
+     */
+    transcriptTurns(channelId, { limitTurns = 0 } = {}) {
+      const record = channelRecord(channelId)
+      const turns = record?.agentTurns || []
+      const selected = limitTurns > 0 ? turns.slice(-limitTurns) : turns
+      return selected.map(turn => ({
+        at: String(turn?.at || ''),
+        messages: (Array.isArray(turn?.messages) ? turn.messages : []).map(sanitizeProtocolMessage).filter(Boolean),
+      }))
+    },
+
     clearTranscript(channelId) {
       const record = channelRecord(channelId)
       if (!record || !record.agentTurns?.length) return false

@@ -50,10 +50,12 @@ a Windows desktop application.
   state is not supported by the OneBot API.
 - **Mobile layout**: mobile browsers automatically get a single-column layout with a back bar and a
   bottom navigation for Chat / Channels / Settings; use `?mobile=1` or `?mobile=0` to debug.
-- **Runtime logs**: Settings → System → Runtime Logs is backed by the same persistent
-  terminal log stream (`runtime.log`) and shows DEBUG-level model start / done / timeout, tool
-  timings, confirmation results, outbound delivery, HTTP requests, and frontend chat-flow logs.
-  SSE pushes updates in real time with polling fallback; refreshing the page or restarting the
+- **Runtime logs**: the sidebar log entry (also reachable through the settings route) is backed by the
+  same persistent terminal log stream (`runtime.log`). It defaults to INFO only and offers free
+  checkboxes for error / warn / info / debug; the selection is remembered. It focuses on model
+  start / done / timeout, tool timings, channel messages and confirmation results, and hides
+  successful HTTP access noise. SSE pushes updates in real time with polling fallback and an
+  automatic full resync when the backend instance changes; refreshing the page or restarting the
   backend keeps the history.
 - **Languages**: Simplified Chinese is provided by the built-in `lang-zh-cn` language-pack plugin;
   copy that plugin and edit its translation table to add another language.
@@ -101,8 +103,9 @@ On Windows you can also double-click `start.cmd`.
   `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores a cookie.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
-- **Runtime logs**: Settings → System → Runtime Logs; filter by level / category / keyword, pause,
-  clear, or copy, with timeouts and failed outbound deliveries highlighted in red.
+- **Runtime logs**: sidebar log entry; free level checkboxes (error / warn / info / debug, remembered),
+  category / keyword filters, pause, clear, copy and export, with timeouts and failed outbound
+  deliveries highlighted in red. Successful HTTP access lines are hidden.
 - **Language**: Simplified Chinese comes from the `lang-zh-cn` plugin; copy it to create another
   language pack.
 

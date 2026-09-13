@@ -1881,7 +1881,7 @@ export const plugins = [
     "id": "settings-item-logs",
     "version": "1.0.0",
     "displayName": "设置项 · 运行日志",
-    "description": "设置页 · 模型调用阶段、工具 / 外发 / 权限确认与后端请求日志。",
+    "description": "模型调用阶段、工具 / 外发 / 权限确认与后端运行日志。",
     "core": false,
     "enabled": true,
     "icon": "📝",

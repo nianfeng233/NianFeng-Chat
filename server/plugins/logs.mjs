@@ -20,6 +20,7 @@
  */
 import { appendFile, mkdir, readFile, rename, stat, truncate } from 'node:fs/promises'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 
 export const name = 'runtime-logs'
 export const inject = ['settings', 'hub', 'httpApi']
@@ -215,6 +216,9 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
   // 在重启后也能精确还原，不受人工阅读格式变化影响。
   const indexFile = join(logsDir, 'runtime.log.jsonl')
   const rotatedIndexFile = `${indexFile}.1`
+  // 每次后端进程启动生成一个新实例 ID：前端据此识别「后端重启 / 日志文件被换掉」。
+  // 单纯比较日志行 id 在重启后可能相等或复用，会让增量拉取永远漏日志。
+  const instanceId = `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`
 
   const lines = []
   const listeners = new Set()
@@ -351,6 +355,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
   const store = {
     name: 'runtimeLogs',
     version,
+    instanceId: () => instanceId,
     file: () => logFile,
     rotatedFile: () => rotatedFile,
     ready: () => ready,
@@ -363,7 +368,10 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
       const beforeId = Number(before) || 0
       if (afterId > 0) list = list.filter(item => item.id > afterId)
       if (beforeId > 0) list = list.filter(item => item.id < beforeId)
-      return list.slice(-max)
+      // after 用于从旧游标向前补日志：必须返回“最早的一段”，否则一次落后超过
+      // limit 时会被 slice(-max) 直接跳到最新，把中间行永久漏掉。无 after 时
+      // 保持原来的语义，返回最新一页。
+      return afterId > 0 ? list.slice(0, max) : list.slice(-max)
     },
     onLine(callback) {
       listeners.add(callback)
@@ -506,6 +514,7 @@ export function apply(ctx) {
       httpApi.sendJson(res, 200, {
         file: store.file(),
         version: store.version,
+        instance: store.instanceId(),
         lines: store.query({ limit, before, after }),
         total: store.total(),
         latestId: store.latestId(),

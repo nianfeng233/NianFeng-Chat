@@ -867,6 +867,134 @@ async function main() {
     JSON.stringify(builtGood.messages.map(message => message.role)),
   )
 
+  console.log('\n⑩j2 渠道 skipUserAppend：用户发言必须写进工具轨迹')
+  {
+    const channelEvents = ctx.inject('event-bus')
+    const convSkip = sessions.create({ name: '渠道轨迹测试', meta: { roleId: 'role-skip', channelType: 'qqbot' } })
+    const channelSkip = store.channelForConversation(convSkip.id)
+    const skipText = '渠道用户刚才说的话：暗号是青苹果'
+    store.append(convSkip.id, {
+      role: 'user',
+      content: skipText,
+      source: 'qqbot',
+      sender_name: '群友',
+      meta: { direction: 'inbound', via: 'qqbot' },
+    })
+    const originalSkipStream = modelService.stream
+    modelService.stream = function (modelMessages, options, callbacks) {
+      callbacks.onDone?.({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call-skip',
+            type: 'function',
+            function: { name: 'chat_send', arguments: JSON.stringify({ messages: ['收到'], end: true }) },
+          },
+        ],
+        reasoning: '',
+        reason: 'tool_calls',
+        usage: null,
+      })
+      return { abort() {} }
+    }
+    try {
+      channelEvents.emit('message:send', { conversationId: convSkip.id, text: skipText, skipUserAppend: true })
+      await waitFor(() => store.transcriptTurns(channelSkip.channelId).some(turn => turn.messages.some(message => message.role === 'user')), {
+        timeout: 3000,
+      })
+    } finally {
+      modelService.stream = originalSkipStream
+    }
+    const skipTurns = store.transcriptTurns(channelSkip.channelId)
+    check(
+      '渠道 skipUserAppend 轮次会把用户消息写入轨迹',
+      skipTurns.some(turn => turn.messages[0]?.role === 'user' && String(turn.messages[0].content || '').includes('青苹果')),
+      JSON.stringify(skipTurns.map(turn => turn.messages.map(message => message.role))),
+    )
+    const builtSkip = builder.build({ conversationId: convSkip.id, roleId: 'role-skip', persona: '', channelId: channelSkip.channelId })
+    check(
+      '渠道轨迹下一轮仍能读到用户消息',
+      builtSkip.messages.some(message => String(message.content || '').includes('青苹果')),
+      JSON.stringify(builtSkip.messages.map(message => message.role)),
+    )
+
+    // 旧版本轨迹（assistant/tool 但缺 user wire）也要能按时间把用户消息补回对应轮次。
+    const convLegacy = sessions.create({ name: '旧轨迹迁移测试', meta: { roleId: 'role-legacy', channelType: 'qqbot' } })
+    const channelLegacy = store.channelForConversation(convLegacy.id)
+    store.append(convLegacy.id, {
+      role: 'user',
+      content: '旧轨迹里的用户发言：暗号是蓝色柠檬',
+      source: 'qqbot',
+      sender_name: '群友',
+      meta: { direction: 'inbound', via: 'qqbot' },
+    })
+    store.appendTranscript(channelLegacy.channelId, [
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call-legacy', type: 'function', function: { name: 'chat_send', arguments: '{"messages":["旧回复"],"end":true}' } }] },
+      { role: 'tool', tool_call_id: 'call-legacy', name: 'chat_send', content: '{"ok":true,"end":true}' },
+    ])
+    const builtLegacy = builder.build({ conversationId: convLegacy.id, roleId: 'role-legacy', persona: '', channelId: channelLegacy.channelId })
+    check(
+      '旧轨迹缺少 user wire 时能按时间补回用户消息',
+      builtLegacy.messages.some(message => String(message.content || '').includes('蓝色柠檬')),
+      JSON.stringify(builtLegacy.messages.map(message => message.role)),
+    )
+  }
+
+  console.log('\n⑩j3 渠道连发：当前轮上下文不串入尚未处理的后续消息')
+  {
+    const channelEvents = ctx.inject('event-bus')
+    const convBurst = sessions.create({ name: '渠道连发测试', meta: { roleId: 'role-burst', channelType: 'qqbot' } })
+    const channelBurst = store.channelForConversation(convBurst.id)
+    store.append(convBurst.id, {
+      role: 'user',
+      content: '第一条来消息：暗号是青苹果',
+      source: 'qqbot',
+      sender_name: '群友',
+      meta: { direction: 'inbound', via: 'qqbot' },
+    })
+    // 模拟渠道连发：第二条已经落库，但当前模型轮次只应该处理第一条。
+    store.append(convBurst.id, {
+      role: 'user',
+      content: '第二条来消息：暗号是红苹果',
+      source: 'qqbot',
+      sender_name: '群友',
+      meta: { direction: 'inbound', via: 'qqbot' },
+    })
+    let burstContext = null
+    const originalBurstStream = modelService.stream
+    modelService.stream = function (modelMessages, options, callbacks) {
+      burstContext = JSON.parse(JSON.stringify(modelMessages))
+      callbacks.onDone?.({
+        text: '',
+        toolCalls: [
+          {
+            id: 'call-burst',
+            type: 'function',
+            function: { name: 'chat_send', arguments: JSON.stringify({ messages: ['收到第一条'], end: true }) },
+          },
+        ],
+        reasoning: '',
+        reason: 'tool_calls',
+        usage: null,
+      })
+      return { abort() {} }
+    }
+    try {
+      channelEvents.emit('message:send', { conversationId: convBurst.id, text: '第一条来消息：暗号是青苹果', skipUserAppend: true })
+      await waitFor(() => store.transcriptInfo(channelBurst.channelId).turns > 0, { timeout: 3000 })
+    } finally {
+      modelService.stream = originalBurstStream
+    }
+    const burstText = JSON.stringify(burstContext || [])
+    check(
+      '渠道连发时当前轮上下文不包含尚未轮到的用户消息',
+      burstText.includes('暗号是青苹果') && !burstText.includes('暗号是红苹果'),
+      JSON.stringify((burstContext || []).map(message => message.role)),
+    )
+  }
+
+
+
   console.log('\n⑩k 模型空回复：纠正重试后明确提示，不静默等待')
   {
     const originalStream = modelService.stream

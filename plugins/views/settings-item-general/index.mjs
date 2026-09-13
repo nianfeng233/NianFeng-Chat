@@ -5,7 +5,7 @@
  */
 /**
  * V17 · settings-item-general
- * 通用设置：启动行为、语言、调试开关。
+ * 通用设置：启动行为、语言与聊天链路。
  */
 export const name = 'settings-item-general'
 export const version = '1.0.0'
@@ -87,15 +87,11 @@ export function apply(ctx) {
             input('chat.typingMaxMs', config.get('chat.typingMaxMs', 5000), { type: 'number', width: 90 })) +
           row('每字延迟（毫秒）', '延迟按消息字数线性增长，默认 35ms/字',
             input('chat.typingPerCharMs', config.get('chat.typingPerCharMs', 35), { type: 'number', width: 80 })),
-        ))}
-        ${section('开发者', card(
-          row('调试日志', '在控制台输出 debug 级日志', switchBtn('debug', false)),
         ))}`)
 
       const unbind = bindConfigControls(container, ctx, {
         onChange(key, value) {
           if (key === 'ui.locale') i18n.setLocale(value)
-          if (key === 'debug') ctx.inject('logs')?.setLevel(value ? 'debug' : 'info')
           if (key === 'general.minimizeOnClose') window.windHost?.setMinimizeOnClose?.(value)
         },
       })

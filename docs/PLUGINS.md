@@ -153,7 +153,7 @@ export function apply(ctx) { /* ... */ }
 |---|---|---|---|
 | `settings-view` (V15) | `views/settings-view/` | 设置覆盖层、Esc 关闭 | 设置外壳 |
 | `settings-container` (V16) | `views/settings-container/` | 设置页注册表、分组导航、页面调度 | 新增设置页先看这里 |
-| `settings-item-general` (V17) | `views/settings-item-general/` | 通用设置、语言、调试日志 | 常规开关 |
+| `settings-item-general` (V17) | `views/settings-item-general/` | 通用设置、语言、聊天链路 | 常规开关 |
 | `settings-item-chat-auth` | `views/settings-item-chat-auth/` | 跨渠道读取 / 发送策略、手动授权记录与权限审计集中管理 | 渠道授权 |
 | `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理、当前模型、推理等级 / temperature、失败自动切换备用模型 | 模型页 |
 | `settings-item-theme` (V19) | `views/settings-item-theme/` | 主题/背景/强调色/界面细节 + `appearance-page.addSection()` | 外观页 |
@@ -167,7 +167,7 @@ export function apply(ctx) { /* ... */ }
 | `settings-item-privacy` | `views/settings-item-privacy/` | 权限开关 | 隐私设置 |
 | `settings-item-code-runner` | `views/settings-item-code-runner/` | JavaScript Web Worker 沙箱（无 DOM / 无网络 / 5s 超时） | 代码片段运行 |
 | `settings-item-unimplemented` | `views/settings-item-unimplemented/` | **未实现清单** | 新增未实现项在这里登记 |
-| `settings-item-logs` | `views/settings-item-logs/` | 运行日志台：cordis 日志 + 模型阶段 / 工具 / 权限确认 / 渠道外发 / 后端请求，超时标红，支持筛选、暂停、清空、复制 | 排查模型调用与超时 |
+| `settings-item-logs` | `views/settings-item-logs/` | 运行日志台（入口在侧栏，设置导航不再重复）：cordis 日志 + 模型阶段 / 工具 / 权限确认 / 渠道消息收发，默认只勾 info、级别可自由组合并记住，成功 HTTP 访问日志不展示；超时标红，支持筛选、暂停、清空、复制、导出与刷新 | 排查模型调用与超时 |
 
 ---
 

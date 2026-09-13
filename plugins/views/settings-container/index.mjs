@@ -38,10 +38,13 @@ export function apply(ctx) {
   const sorted = () =>
     [...pages.values()].sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0) || a.order - b.order)
 
+  /** 入口已独立到侧栏 / 其它位置的页面可标记 hidden：仍能 open(id)，但不占用设置导航。 */
+  const navPages = () => sorted().filter(page => !page.hidden)
+
   const renderNav = () => {
     for (const host of navHosts.values()) {
       const groups = new Map()
-      for (const page of sorted()) {
+      for (const page of navPages()) {
         if (!groups.has(page.group)) groups.set(page.group, [])
         groups.get(page.group).push(page)
       }
@@ -77,7 +80,7 @@ export function apply(ctx) {
   }
 
   const openPage = id => {
-    const page = pages.get(id) || pages.get('account') || sorted()[0]
+    const page = pages.get(id) || pages.get('account') || navPages()[0] || sorted()[0]
     if (!page) return
     activeId = page.id
     cleanupCurrent?.()
@@ -112,7 +115,7 @@ export function apply(ctx) {
       }
       ctx.effect(disposer)
       renderNav()
-      if (!activeId) openPage(page.id)
+      if (!activeId) openPage(page.hidden ? pages.get('account')?.id || navPages()[0]?.id : page.id)
       events.emit('settings:page-registered', { id: page.id, label: page.label })
       return disposer
     },

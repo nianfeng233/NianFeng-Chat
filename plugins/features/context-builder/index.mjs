@@ -265,9 +265,9 @@ export function apply(ctx) {
 
     /**
      * 组装一次模型调用的上下文。
-     * @param {{conversationId:string, roleId:string, persona?:string, channelId?:string}} input
+     * @param {{conversationId:string, roleId:string, persona?:string, channelId?:string, currentMessageId?:string}} input
      */
-    build({ conversationId, roleId, persona = '', channelId = null } = {}) {
+    build({ conversationId, roleId, persona = '', channelId = null, currentMessageId = null } = {}) {
       const channel = channelId ? { channelId } : store.channelForConversation(conversationId)
       const useChannelId = channel?.channelId || channelId
       // 从渠道记录读取来源侧跨渠道策略，让模型知道“这个渠道已开启跨渠道权限”，
@@ -311,10 +311,101 @@ export function apply(ctx) {
       // 其它渠道仍用可见消息的工作记忆补齐。
       // channel-only 渠道（例如 NapCat 群聊）直接使用自己渠道的可见消息轮次，
       // 不再走工具协议 transcript，避免静默写入的群消息被 transcript 截掉。
-      const transcript =
-        channelOnly || typeof store.transcriptMessages !== 'function'
+      //
+      // 注意：旧版本升级上来的轨迹 / 渠道 skipUserAppend 轮次、重新生成轮次里可能
+      // 没有 user wire；这里按每轮 at 把对应的可见用户消息补回对应轮次，避免模型
+      // “前脚刚问、后脚就忘”式失忆。
+      const transcriptTurns =
+        channelOnly || typeof store.transcriptTurns !== 'function'
           ? []
-          : store.transcriptMessages(useChannelId, { limitTurns: maxRounds })
+          : store.transcriptTurns(useChannelId, { limitTurns: maxRounds })
+      const visible = transcriptTurns.length ? store.messagesOf(useChannelId) : []
+      const visibleUsers = visible.filter(message => message.role === 'user')
+      const parseWirePayload = wire => {
+        const text = String(wire?.content || '')
+        const candidates = [text, text.split('\n')[0]]
+        for (const candidate of candidates) {
+          if (!candidate.trim()) continue
+          try {
+            return JSON.parse(candidate)
+          } catch (_) {
+            /* 多模态 user wire 会以“JSON + [图片]”形式拼接，继续尝试第一行 */
+          }
+        }
+        return null
+      }
+      const wireMessageId = wire => {
+        const payload = parseWirePayload(wire)
+        return payload?.meta?.message_id || null
+      }
+      const wireTimestamp = wire => {
+        const payload = parseWirePayload(wire)
+        const parsed = Date.parse(payload?.meta?.timestamp || '')
+        return Number.isNaN(parsed) ? NaN : parsed
+      }
+      const currentIndex = currentMessageId
+        ? visible.findIndex(message => String(message.message_id || message.id || '') === String(currentMessageId))
+        : -1
+      const currentUser =
+        (currentIndex >= 0 ? visible[currentIndex] : null) || [...visible].reverse().find(message => message.role === 'user') || null
+      const currentUserId = String(currentUser?.message_id || currentUser?.id || '')
+      const currentSeq = Number(currentUser?.seq) || 0
+      // 外部渠道可能连续落库多条用户消息；只使用“当前轮到处理的那条”之前的消息，
+      // 避免把下一条还没轮到的消息误当成当前消息。
+      const relevantVisibleUsers =
+        currentSeq > 0 ? visibleUsers.filter(message => (Number(message.seq) || 0) <= currentSeq) : visibleUsers
+      // 每条轨迹轮次最多补一条对应用户消息；已有 user wire 的用户 id 先记为已使用。
+      const usedUserIds = new Set()
+      for (const turn of transcriptTurns) {
+        for (const wire of turn.messages) {
+          if (wire.role !== 'user') continue
+          const id = wireMessageId(wire)
+          if (id) {
+            usedUserIds.add(String(id))
+            continue
+          }
+          // 极旧轨迹里的 user wire 可能没有结构化 message_id（纯文本），按 at
+          // 标记它对应的可见用户消息，避免后面 tail 段重复补一遍。
+          const turnAt = Date.parse(turn.at) || 0
+          if (turnAt <= 0) continue
+          let candidate = null
+          for (const user of relevantVisibleUsers) {
+            const userId = String(user.message_id || user.id || '')
+            if (!userId || userId === currentUserId || usedUserIds.has(userId)) continue
+            const ts = Date.parse(user.timestamp) || 0
+            if (ts > turnAt) continue
+            if (!candidate || ts > (Date.parse(candidate.timestamp) || 0)) candidate = user
+          }
+          if (candidate) usedUserIds.add(String(candidate.message_id || candidate.id || ''))
+        }
+      }
+      for (const turn of transcriptTurns) {
+        if (turn.messages.some(message => message.role === 'user')) continue
+        const turnAt = Date.parse(turn.at) || 0
+        let candidate = null
+        if (turnAt <= 0) {
+          // 没有可靠的轨迹时间（异常 / 旧数据）：按可见消息顺序给缺失轮次补用户发言。
+          candidate =
+            relevantVisibleUsers.find(user => {
+              const id = String(user.message_id || user.id || '')
+              return id && id !== currentUserId && !usedUserIds.has(id)
+            }) || null
+        } else {
+          for (const user of relevantVisibleUsers) {
+            const id = String(user.message_id || user.id || '')
+            // 当前正在处理的最新用户消息绝不能拿去补旧轮次。
+            if (!id || id === currentUserId || usedUserIds.has(id)) continue
+            const ts = Date.parse(user.timestamp) || 0
+            if (ts > turnAt) continue
+            if (!candidate || ts > (Date.parse(candidate.timestamp) || 0)) candidate = user
+          }
+        }
+        if (!candidate) continue
+        usedUserIds.add(String(candidate.message_id || candidate.id || ''))
+        const wire = toModelMessage(candidate, contextForMessage(candidate))
+        if (wire) turn.messages = [wire, ...turn.messages]
+      }
+      const transcript = transcriptTurns.flatMap(turn => turn.messages)
       let history = []
       let totalRounds = 0
       let selectedRounds = 0
@@ -326,52 +417,65 @@ export function apply(ctx) {
             ? []
             : store.workingMessages({ roleId, limit: memoryRounds, excludeChannelId: useChannelId })
         const otherWire = others.map(message => toModelMessage(message, contextForMessage(message))).filter(Boolean)
-        const visible = store.messagesOf(useChannelId)
-        const info = store.transcriptInfo?.(useChannelId)
         const firstUserWire = transcript.find(message => message.role === 'user')
-        let firstTranscriptUserAt = NaN
-        try {
-          firstTranscriptUserAt = Date.parse(JSON.parse(String(firstUserWire?.content || '{}'))?.meta?.timestamp || '')
-        } catch (_) {
-          firstTranscriptUserAt = NaN
-        }
-        const cutoffAt = Number.isNaN(firstTranscriptUserAt)
-          ? info?.firstAt
-            ? Date.parse(info.firstAt)
+        const firstUserAt = wireTimestamp(firstUserWire)
+        const transcriptInfo = store.transcriptInfo?.(useChannelId)
+        const cutoffAt = Number.isNaN(firstUserAt)
+          ? transcriptInfo?.firstAt
+            ? Date.parse(transcriptInfo.firstAt)
             : NaN
-          : firstTranscriptUserAt
-        const legacyVisible = Number.isNaN(cutoffAt)
+          : firstUserAt
+        const legacySource = Number.isNaN(cutoffAt)
           ? []
-          : visible
-              .filter(message => (Date.parse(message.timestamp) || 0) < cutoffAt)
-              .map(message => toModelMessage(message, contextForMessage(message)))
-              .filter(Boolean)
-        const currentUser = [...visible].reverse().find(message => message.role === 'user')
-        const currentWire = currentUser ? toModelMessage(currentUser, contextForMessage(currentUser)) : null
-        const lastTranscriptUser = [...transcript].reverse().find(message => message.role === 'user')
-        let lastTranscriptUserId = null
-        try {
-          lastTranscriptUserId = JSON.parse(String(lastTranscriptUser?.content || '{}'))?.meta?.message_id || null
-        } catch (_) {
-          lastTranscriptUserId = null
+          : visible.filter(message => (Date.parse(message.timestamp) || 0) < cutoffAt)
+        // legacy 段已经包含的用户消息标记为已使用，避免后面的 tail 段重复补一遍。
+        for (const message of legacySource) {
+          if (message.role !== 'user') continue
+          const id = String(message.message_id || message.id || '')
+          if (id) usedUserIds.add(id)
         }
-        const currentVisibleId = currentUser?.message_id || currentUser?.id || null
+        const legacyVisible = legacySource
+          .map(message => toModelMessage(message, contextForMessage(message)))
+          .filter(Boolean)
+        const lastTranscriptUser = [...transcript].reverse().find(message => message.role === 'user')
+        const lastTranscriptUserId = wireMessageId(lastTranscriptUser)
+        const currentWire = currentUser ? toModelMessage(currentUser, contextForMessage(currentUser)) : null
+        // 还没进入协议轨迹、但比首条轨迹用户更新的用户消息（例如连续快速发言 /
+        // 上一次轨迹记录失败）：按时间顺序补回，放在轨迹之后、当前消息之前。
+        const tailUsers = relevantVisibleUsers
+          .filter(message => {
+            const id = String(message.message_id || message.id || '')
+            if (!id || id === currentUserId || usedUserIds.has(id)) return false
+            const ts = Date.parse(message.timestamp) || 0
+            return Number.isNaN(cutoffAt) || ts >= cutoffAt
+          })
+          .map(message => toModelMessage(message, contextForMessage(message)))
+          .filter(Boolean)
         history = [
           ...otherWire,
           ...legacyVisible,
           ...transcript,
-          ...(currentWire && currentVisibleId !== lastTranscriptUserId ? [currentWire] : []),
+          ...tailUsers,
+          ...(currentWire && currentUserId !== String(lastTranscriptUserId || '') ? [currentWire] : []),
         ]
-        totalRounds = transcript.length
+        totalRounds = transcriptTurns.length
       } else {
         // 隐私渠道 / 群聊 channel-only 渠道不使用角色级工作记忆，只用本渠道自己的历史。
         const working = memoryRounds <= 0 ? [] : store.workingMessages({ roleId, limit: memoryRounds })
         const fromChannel = store.rounds(useChannelId, channelRounds).flatMap(round => round.messages)
+        const currentMessage = currentMessageId
+          ? store.messageById?.(useChannelId, currentMessageId) ||
+            store.messagesOf(useChannelId).find(message => String(message.message_id || message.id || '') === String(currentMessageId)) ||
+            null
+          : null
+        const cutoffSeq = Number(currentMessage?.seq) || 0
 
         // message_id 去重；重叠部分以工作记忆为准，当前渠道记忆只补不重复
         const seen = new Set()
         const merged = []
         for (const message of [...working, ...fromChannel]) {
+          // 当前渠道若已连续落库多条消息，只纳入当前处理这条及更早的记录。
+          if (cutoffSeq && message.channel_id === useChannelId && (Number(message.seq) || 0) > cutoffSeq) continue
           const key = message.message_id || message.id
           if (seen.has(key)) continue
           seen.add(key)

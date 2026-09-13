@@ -388,6 +388,11 @@ async function main() {
   const runtimeLines = Array.isArray(runtime.lines) ? runtime.lines : []
   check('运行日志接口返回日志文件路径', typeof runtime.file === 'string' && runtime.file.endsWith('runtime.log'), runtime.file || '')
   check(
+    '运行日志接口返回实例 ID（后端重启识别用）',
+    typeof runtime.instance === 'string' && runtime.instance.includes('-') && runtime.instance.length >= 10,
+    String(runtime.instance || ''),
+  )
+  check(
     '后端日志进入运行日志接口',
     runtimeLines.some(line => line.text === 'BACKEND_RUNTIME_PERSIST_TEST'),
   )
@@ -400,6 +405,19 @@ async function main() {
   check(
     '运行日志已追加写入 runtime.log',
     runtimeFileText.includes('BACKEND_RUNTIME_PERSIST_TEST') && runtimeFileText.includes('CLIENT_FORWARD_TEST'),
+  )
+
+  // after 增量分页必须从旧到新返回；否则一次落后超过 limit 会直接跳到最新，漏掉中间日志。
+  const pagedBase = runtimeLines.find(line => Number(line.id) > 0)
+  const pagedBaseIndex = pagedBase ? runtimeLines.indexOf(pagedBase) : -1
+  const pagedNext = pagedBaseIndex >= 0 ? runtimeLines[pagedBaseIndex + 1] : null
+  const pagedData = pagedBase
+    ? await (await api(base, `/api/logs/runtime?limit=1&after=${pagedBase.id}`)).json()
+    : { lines: [] }
+  check(
+    'after 增量分页按从旧到新返回',
+    !!pagedNext && pagedData.lines?.[0]?.id === pagedNext.id,
+    JSON.stringify({ base: pagedBase?.id, next: pagedNext?.id, got: pagedData.lines?.[0]?.id }),
   )
 
   const streamController = new AbortController()
@@ -432,6 +450,11 @@ async function main() {
   check(
     '重启后端后仍会回读 runtime.log 历史',
     (restoredRuntime.lines || []).some(line => line.text === 'BACKEND_RUNTIME_PERSIST_TEST'),
+  )
+  check(
+    '后端重启后实例 ID 会变化（前端据此强制全量重拉）',
+    typeof restoredRuntime.instance === 'string' && restoredRuntime.instance !== runtime.instance,
+    JSON.stringify({ before: runtime.instance, after: restoredRuntime.instance }),
   )
 
   console.log('\n⑩ 关闭')

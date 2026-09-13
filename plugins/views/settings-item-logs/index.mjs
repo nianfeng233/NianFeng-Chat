@@ -13,24 +13,31 @@
 export const name = 'settings-item-logs'
 export const version = '1.0.0'
 export const displayName = '设置项 · 运行日志'
-export const description = '设置页 · 模型调用阶段、工具 / 外发 / 权限确认与后端请求日志。'
+export const description = '模型调用阶段、工具 / 外发 / 权限确认与后端运行日志。'
 export const author = '念风内核'
 export const icon = '📝'
 export const core = false
 export const depends = { 'settings-container': '^1.0.0', logger: '^1.0.0' }
-export const inject = ['settings-container', 'logs?', 'api?', 'event-bus', 'toast?']
+export const inject = ['settings-container', 'logs?', 'api?', 'event-bus', 'config?', 'toast?']
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { LOGS_CSS } from './style.mjs'
 
-const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 }
 const LEVEL_LABEL = { error: '错误', warn: '警告', info: '信息', debug: '调试' }
-const MAX_ENTRIES = 2000
-const MAX_RENDER = 900
+const LEVEL_ORDER = ['error', 'warn', 'info', 'debug']
+const DEFAULT_LEVELS = ['info']
+const MAX_ENTRIES = 4000
+const MAX_RENDER = 1200
+const PAGE_LIMIT = 2000
+const FULL_LIMIT = 4000
 
 const escapeHtml = value =>
   String(value ?? '')
     .replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m])
+
+/** HTTP 访问日志（如 `HTTP POST /api/xxx → 200 · 3ms`）对普通用户没有意义，日志页默认不展示。 */
+const isHttpAccessLog = text =>
+  /^HTTP\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s*→\s*\d{3}\s*·\s*\d+ms/i.test(String(text || '').trim())
 
 const pad = (value, len = 2) => String(value).padStart(len, '0')
 const formatTime = at => {
@@ -66,6 +73,7 @@ export function apply(ctx) {
   const logs = ctx.inject('logs?')
   const api = ctx.inject('api?')
   const events = ctx.inject('event-bus')
+  const config = ctx.inject('config?')
   const toast = ctx.inject('toast?')
 
   useStyle(ctx, LOGS_CSS)
@@ -77,29 +85,40 @@ export function apply(ctx) {
     label: '运行日志',
     icon: '📝',
     order: 70,
+    // 侧栏已有独立日志入口；这里只保留路由，不再占据设置左侧导航。
+    hidden: true,
     render(container) {
+      const readLevels = () => {
+        const saved = config?.get?.('logs.levels', undefined)
+        const list = Array.isArray(saved) ? saved : typeof saved === 'string' ? saved.split(',') : null
+        const normalized = (list || DEFAULT_LEVELS).map(level => String(level || '').trim()).filter(level => LEVEL_LABEL[level])
+        return new Set(normalized.length ? normalized : list ? [] : DEFAULT_LEVELS)
+      }
+      let selectedLevels = readLevels()
+      const levelOptions = LEVEL_ORDER.map(
+        level => `<label class="logs-level-option"><input type="checkbox" data-logs-level="${level}"${
+          selectedLevels.has(level) ? ' checked' : ''
+        } />${LEVEL_LABEL[level]}</label>`,
+      ).join('')
+
       container.innerHTML = `
         <div class="settings-title-row">
           <div>
             <div class="settings-title">运行日志</div>
-            <div class="settings-desc">终端同款日志流（实时 SSE + 轮询兜底）：模型、工具、权限确认、渠道外发、HTTP 请求都在这里；刷新页面或重启后端后历史仍保留。</div>
+            <div class="settings-desc">模型、工具、权限确认与渠道消息时间线（实时 SSE + 轮询兜底）；页面刷新或重启后端后历史仍保留。</div>
           </div>
         </div>
         <section class="settings-section">
           <div class="logs-toolbar">
-            <select data-logs-level title="最低级别">
-              <!-- 默认信息及以上：普通人日常排查够用；需要逐帧细节时再手动切到全部。 -->
-              <option value="debug">全部（含调试）</option>
-              <option value="info" selected>信息及以上</option>
-              <option value="warn">警告及以上</option>
-              <option value="error">仅错误</option>
-            </select>
+            <div class="logs-levels" data-logs-levels role="group" aria-label="日志级别" title="按类型自由勾选；默认只看信息">
+              ${levelOptions}
+            </div>
             <select data-logs-cat title="来源分类">
               <option value="">全部分类</option>
               <option value="模型">模型</option>
               <option value="工具">工具</option>
               <option value="权限">权限</option>
-              <option value="外发">外发</option>
+              <option value="外发">渠道</option>
               <option value="后端">后端</option>
               <option value="系统">系统</option>
             </select>
@@ -109,7 +128,7 @@ export function apply(ctx) {
             <button class="outline-btn" data-logs-clear>清空</button>
             <button class="outline-btn" data-logs-copy>复制</button>
             <button class="outline-btn" data-logs-export>导出日志</button>
-            <button class="outline-btn" data-logs-refresh title="立即重新拉取后端全部日志；SSE / 代理卡顿时可手动兜底">刷新</button>
+            <button class="outline-btn" data-logs-refresh title="重新从后端拉取完整日志并回到最新位置；SSE / 代理卡顿时可手动兜底">刷新</button>
             <button class="outline-btn" data-logs-jump hidden title="有新日志；点击回到底部">有新日志 ↓</button>
             <span class="logs-stats" data-logs-stats></span>
           </div>
@@ -118,7 +137,7 @@ export function apply(ctx) {
           </div>
           <div class="logs-note">
             WebUI 直接读取后端终端日志（<code>logs/runtime.log</code>）：模型请求开始 / 完成 / 错误、工具调用与耗时、敏感操作确认、
-            渠道消息外发、HTTP 请求都会实时出现；页面刷新不会清空，重启后端也会回读最近历史。
+            渠道消息收发都会实时出现；页面刷新不会清空，重启后端也会回读最近历史。
             <span data-logs-backend-file></span>
             <span data-logs-sync-hint></span>
           </div>
@@ -126,7 +145,9 @@ export function apply(ctx) {
 
       const listEl = container.querySelector('[data-logs-list]')
       const statsEl = container.querySelector('[data-logs-stats]')
-      const levelSelect = container.querySelector('[data-logs-level]')
+      const levelInputs = [...container.querySelectorAll('[data-logs-level]')]
+      // DOM 解析不会把 checked 属性同步到 property（测试环境 / 部分宿主），这里显式同步。
+      for (const input of levelInputs) input.checked = selectedLevels.has(input.dataset.logsLevel)
       const catSelect = container.querySelector('[data-logs-cat]')
       const searchInput = container.querySelector('[data-logs-search]')
       const autoBtn = container.querySelector('[data-logs-autoscroll]')
@@ -149,7 +170,11 @@ export function apply(ctx) {
       const entryKeys = new Set()
       // 后端 /api/logs/runtime/stream（SSE）状态；旧后端没有该接口时靠轮询兜底。
       let runtimeSource = null
+      let streamRestartTimer = null
       let runtimeAvailable = false
+      // 后端进程实例 ID：后端重启 / 换数据目录后即使日志 id 重新从 1 开始，
+      // 前端也能识别并强制重拉全量，避免增量 after 永远卡在旧 id 上。
+      let runtimeInstance = ''
       let latestRuntimeId = 0
       let streamOnline = false
       let active = true
@@ -167,6 +192,10 @@ export function apply(ctx) {
         const show = unseen > 0 && !autoScroll
         jumpBtn.hidden = !show
         if (show) jumpBtn.textContent = `有新日志 ${unseen > 999 ? '999+' : unseen} ↓`
+      }
+
+      const syncLevelChecks = () => {
+        for (const input of levelInputs) input.checked = selectedLevels.has(input.dataset.logsLevel)
       }
 
       const fingerprintOf = entry => {
@@ -207,16 +236,23 @@ export function apply(ctx) {
         return true
       }
 
+      const normalizeLevel = value => {
+        if (typeof value === 'number' && Number.isFinite(value)) return ['error', 'warn', 'info', 'debug'][value] || 'info'
+        const text = String(value || '').trim().toLowerCase()
+        if (text === 'warning') return 'warn'
+        return LEVEL_LABEL[text] ? text : 'info'
+      }
+
       const addRawLog = record => {
-        const level = LEVELS[record?.type] ?? LEVELS[record?.level] ?? (typeof record?.level === 'number' ? record.level : 2)
         const args = Array.isArray(record?.args) ? record.args : []
         const text = args.map(formatArg).join(' ').slice(0, 8000)
-        if (!text) return
+        if (!text) return false
+        if (isHttpAccessLog(text)) return false
         const source = String(record?.name || 'app')
         const cat = categoryOfSource(source)
-        add({
+        return add({
           at: Number(record?.ts ?? record?.timestamp ?? record?.time ?? Date.now()) || Date.now(),
-          level: level >= 3 ? 'debug' : level === 2 ? 'info' : level === 1 ? 'warn' : 'error',
+          level: normalizeLevel(record?.type ?? record?.level),
           cat,
           source,
           text,
@@ -225,27 +261,29 @@ export function apply(ctx) {
       }
 
       const addBackendRequest = request => {
-        const key = `${request?.at || ''}|${request?.method || ''}|${request?.path || ''}|${request?.status || ''}`
-        if (!request || backendSeen.has(key)) return
+        if (!request) return false
+        const status = Number(request.status) || 0
+        // 只有失败请求值得展示；2xx/3xx 访问日志属于噪音。
+        if (status < 400) return false
+        const key = `${request?.at || ''}|${request?.method || ''}|${request?.path || ''}|${status}`
+        if (backendSeen.has(key)) return false
         backendSeen.add(key)
-        const level = Number(request.status) >= 500 ? 'error' : Number(request.status) >= 400 ? 'warn' : 'debug'
-        add({
+        return add({
           at: Number(request.at) || Date.now(),
-          level,
+          level: status >= 500 ? 'error' : 'warn',
           cat: '后端',
           source: 'http',
-          text: `${request.method || 'GET'} ${request.path || ''} · HTTP ${request.status || '-'} · ${Number(request.ms) || 0}ms`,
+          text: `${request.method || 'GET'} ${request.path || ''} → HTTP ${status || '-'} · ${Number(request.ms) || 0}ms`,
         })
       }
 
       const render = () => {
         if (!active || !listEl) return
         const keepScrollTop = listEl.scrollTop
-        const minLevel = LEVELS[levelSelect?.value] ?? LEVELS.info
         const cat = catSelect?.value || ''
         const keyword = String(searchInput?.value || '').trim().toLowerCase()
         const visible = entries
-          .filter(item => (LEVELS[item.level] ?? LEVELS.info) <= minLevel)
+          .filter(item => selectedLevels.has(item.level))
           .filter(item => !cat || item.cat === cat)
           .filter(item => !keyword || `${item.source} ${item.text}`.toLowerCase().includes(keyword))
           .slice(-MAX_RENDER)
@@ -259,10 +297,17 @@ export function apply(ctx) {
                 </div>`,
               )
               .join('')
-          : '<div class="logs-empty">当前筛选条件下没有日志</div>'
+          : `<div class="logs-empty">${
+              selectedLevels.size ? '当前筛选条件下没有日志' : '请至少勾选一种日志类型'
+            }</div>`
         if (statsEl) {
           const streamText = streamOnline ? '实时流已连接' : runtimeAvailable ? '轮询更新中' : '后端未连接'
-          statsEl.textContent = `${entries.length} 条 · 显示 ${visible.length} 条 · ${streamText}${paused ? ' · 已暂停' : ''}`
+          const levelText = LEVEL_ORDER.filter(level => selectedLevels.has(level))
+            .map(level => LEVEL_LABEL[level])
+            .join('/')
+          statsEl.textContent = `${entries.length} 条 · 显示 ${visible.length} 条 · ${levelText || '未选级别'} · ${streamText}${
+            paused ? ' · 已暂停' : ''
+          }`
         }
         if (syncHintEl) {
           syncHintEl.textContent = runtimeAvailable
@@ -310,8 +355,14 @@ export function apply(ctx) {
         }
         const text = String(line.text || line.line || '').trim()
         if (!text) return false
-        const level = ['error', 'warn', 'info', 'debug'].includes(line.level) ? line.level : 'info'
         const name = String(line.name || 'backend')
+        let level = normalizeLevel(line.level)
+        if (isHttpAccessLog(text)) {
+          const status = Number((text.match(/→\s*(\d{3})/) || [])[1]) || 0
+          // 成功请求访问日志不展示；失败请求保留为告警 / 错误，便于排查接口异常。
+          if (status < 400) return false
+          level = status >= 500 ? 'error' : 'warn'
+        }
         return add({
           at: Number(line.at) || Date.now(),
           level,
@@ -323,44 +374,39 @@ export function apply(ctx) {
         })
       }
 
-      const pullBackendRuntime = async ({ force = false } = {}) => {
-        if (!active || !api) return { ok: false, error: '后端未连接' }
+      const closeRuntimeStream = () => {
+        streamOnline = false
+        if (!runtimeSource) return
+        const source = runtimeSource
+        runtimeSource = null
         try {
-          if (force) {
-            latestRuntimeId = 0
-            runtimeSeen = new Set()
-          }
-          const query = latestRuntimeId > 0 ? `?limit=800&after=${encodeURIComponent(latestRuntimeId)}` : '?limit=2000'
-          const data = await api.get(`/logs/runtime${query}`)
-          runtimeAvailable = true
-          const latest = Number(data?.latestId) || 0
-          // 后端重启 / 日志被清空后 latestId 会回退；此时重置本地偏移，重新拉全量。
-          if (latest > 0 && latest < latestRuntimeId) {
-            return pullBackendRuntime({ force: true })
-          }
-          backendFile = data?.file || backendFile
-          let added = 0
-          for (const line of data?.lines || []) {
-            if (addRuntimeLine(line)) added += 1
-          }
-          if (latest > latestRuntimeId) latestRuntimeId = latest
-          if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
-          scheduleRender()
-          return { ok: true, added, latest }
-        } catch (err) {
-          // 旧后端没有该接口时保留本地日志订阅兜底。
-          runtimeAvailable = false
-          scheduleRender()
-          return { ok: false, error: err?.message || String(err) }
+          source.close?.()
+        } catch (_) {
+          /* ignore */
         }
       }
 
+      /**
+       * 后端重启后日志行 id 可能从 1 重新开始。EventSource 的自动重连会带上旧
+       * Last-Event-ID，导致新流一直收不到事件；这里主动关掉、稍后新建一个不带
+       * 旧游标的 EventSource，同时轮询会负责补历史。
+       */
+      const scheduleRuntimeReconnect = (delay = 3000) => {
+        if (streamRestartTimer || !active) return
+        streamRestartTimer = setTimeout(() => {
+          streamRestartTimer = null
+          if (active) openRuntimeStream()
+        }, Math.max(0, Number(delay) || 0))
+      }
+
       const openRuntimeStream = () => {
-        if (typeof EventSource === 'undefined' || !api) return
+        if (!active || typeof EventSource === 'undefined' || !api) return
+        closeRuntimeStream()
         try {
           const base = String(api.baseUrl?.() || '/api').replace(/\/+$/, '')
-          runtimeSource = new EventSource(`${base}/logs/runtime/stream`)
-          runtimeSource.addEventListener('log', event => {
+          const source = new EventSource(`${base}/logs/runtime/stream?_=${Date.now()}`)
+          runtimeSource = source
+          source.addEventListener('log', event => {
             streamOnline = true
             try {
               addRuntimeLine(JSON.parse(event.data))
@@ -369,18 +415,136 @@ export function apply(ctx) {
               /* 忽略坏帧 */
             }
           })
-          runtimeSource.onopen = () => {
+          source.onopen = () => {
             streamOnline = true
-            // 断线重连后补拉断连期间的历史，Last-Event-ID 由后端 SSE 补偿。
-            pullBackendRuntime()
+            // 新流只负责后续实时日志；断线期间的历史由轮询 / 全量拉取补齐。
+            queueRuntimePull().catch(() => {})
           }
-          runtimeSource.onerror = () => {
+          source.onerror = () => {
             streamOnline = false
-            // EventSource 会自动重连；同时由 3 秒轮询兜底。
+            try {
+              source.close?.()
+            } catch (_) {
+              /* ignore */
+            }
+            // 旧连接在新连接建立后才报错时直接忽略，避免无限重连风暴。
+            if (runtimeSource !== source) return
+            runtimeSource = null
+            scheduleRuntimeReconnect(3000)
           }
         } catch (_) {
           runtimeSource = null
+          scheduleRuntimeReconnect(3000)
         }
+      }
+
+      const fetchRuntimeOnce = async ({ force = false, allowRetry = true } = {}) => {
+        if (!active || !api) return { ok: false, error: '后端未连接' }
+        try {
+          if (force) {
+            latestRuntimeId = 0
+            runtimeSeen = new Set()
+          }
+          let added = 0
+          let latest = 0
+          let full = force || latestRuntimeId <= 0
+          // 一次接口最多 4000 行；如果刚好被 limit 截断，继续用 after 追下一段，
+          // 避免一次爆发的大量日志把中间行漏掉。
+          for (let page = 0; page < 6; page += 1) {
+            const params = new URLSearchParams()
+            params.set('limit', String(full ? FULL_LIMIT : PAGE_LIMIT))
+            if (!full) params.set('after', String(latestRuntimeId))
+            params.set('_', String(Date.now())) // 防止代理 / 浏览器缓存旧响应
+            const data = await api.get(`/logs/runtime?${params.toString()}`)
+            runtimeAvailable = true
+            backendFile = data?.file || backendFile
+            const instance = String(data?.instance || '')
+            const instanceChanged = !!(instance && runtimeInstance && instance !== runtimeInstance)
+            if (instance) runtimeInstance = instance
+            latest = Number(data?.latestId) || 0
+            // 后端进程换了，或日志被清空后 id 回退：清掉增量游标，从头完整拉取。
+            if (instanceChanged || (latest > 0 && latest < latestRuntimeId)) {
+              if (!allowRetry) return { ok: false, error: '后端日志实例已切换，请重试' }
+              latestRuntimeId = 0
+              runtimeSeen = new Set()
+              if (instanceChanged) scheduleRuntimeReconnect(0)
+              return fetchRuntimeOnce({ force: true, allowRetry: false })
+            }
+            const dataLines = Array.isArray(data?.lines) ? data.lines : []
+            for (const line of dataLines) {
+              if (addRuntimeLine(line)) added += 1
+            }
+            const pageLatest = dataLines.reduce((max, line) => Math.max(max, Number(line?.id) || 0), 0)
+            if (pageLatest > latestRuntimeId) latestRuntimeId = pageLatest
+            if (latest > latestRuntimeId) latestRuntimeId = latest
+            if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
+            const limit = full ? FULL_LIMIT : PAGE_LIMIT
+            // 拉满说明这段之后可能还有；若已经追平 latestId 则结束。
+            if (dataLines.length < limit || latest <= 0 || latestRuntimeId >= latest) break
+            full = false
+          }
+          scheduleRender()
+          return { ok: true, added, latest, instance: runtimeInstance }
+        } catch (err) {
+          // 旧后端没有该接口时保留本地日志订阅兜底。
+          runtimeAvailable = false
+          scheduleRender()
+          return { ok: false, error: err?.message || String(err) }
+        }
+      }
+
+      // 把全部 fetch 串起来，避免手动刷新和 3 秒轮询并发时互相覆盖游标。
+      let runtimePull = Promise.resolve()
+      const queueRuntimePull = options => {
+        const run = () => fetchRuntimeOnce(options)
+        const next = runtimePull.then(run, run)
+        runtimePull = next.then(
+          () => {},
+          () => {},
+        )
+        return next
+      }
+      const pullBackendRuntime = options => queueRuntimePull(options)
+
+      /** 手动刷新：重建本地视图后从后端完整重拉，确保和直接刷新浏览器看到的一致。 */
+      const resyncFromBackend = async ({ rebuild = true } = {}) => {
+        if (rebuild) {
+          entries = []
+          entryKeys.clear()
+          backendSeen.clear()
+          runtimeSeen = new Set()
+          latestRuntimeId = 0
+          seq = 0
+          // 先放回当前页面内存里的本地日志（可能还没来得及转发到后端）。
+          for (const record of logs?.history?.() || []) addRawLog(record)
+        }
+        const result = await pullBackendRuntime({ force: true })
+        await pullBackend()
+        if (!streamOnline) scheduleRuntimeReconnect(0)
+        scheduleRender()
+        return result
+      }
+
+      /** 渠道 ID / 会话记录 → 人类可读渠道名；日志页优先展示名称而不是内部 id。 */
+      const resolveChannelName = (conversationId, meta = {}) => {
+        const registry = ctx.registry.get('channel-registry')
+        const wanted = [meta.napcatChannelId, meta.qqbotChannelId, meta.clawbotChannelId, meta.channelId]
+          .map(value => String(value || ''))
+          .filter(Boolean)
+        if (registry?.tabs) {
+          try {
+            for (const tab of registry.tabs()) {
+              for (const channelId of wanted) {
+                const channel = registry.findChannel?.(tab, channelId)
+                if (channel?.name) return String(channel.name)
+              }
+            }
+          } catch (_) {
+            /* 渠道注册表不可用时退回会话名 */
+          }
+        }
+        const conversation = ctx.registry.get('session-service')?.get?.(conversationId)
+        return String(conversation?.name || meta.via || '渠道')
       }
 
       // 先导入日志服务里已有的历史，再订阅后续记录。
@@ -388,9 +552,32 @@ export function apply(ctx) {
       const offRecord = logs?.onRecord?.(addRawLog)
 
       const offs = [
-        events.on('chat:request-start', ({ conversationId } = {}) =>
-          add({ level: 'info', cat: '模型', source: 'chat-flow', text: `开始处理请求 · 会话 ${conversationId || '-'}` }),
-        ),
+        events.on('chat:request-start', payload => {
+          const { conversationId, text, senderName, channelName } = payload || {}
+          const from = channelName ? ` · 来自「${channelName}」${senderName ? `的 ${senderName}` : ''}` : ''
+          const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 140)
+          add({
+            level: 'info',
+            cat: '模型',
+            source: 'chat-flow',
+            text: `开始处理请求${from}${preview ? `：${preview}` : ` · 会话 ${conversationId || '-'}`}`,
+          })
+        }),
+        events.on('message:added', ({ conversationId, message } = {}) => {
+          if (!message || message.role !== 'user') return
+          const meta = message.meta || {}
+          if (meta.direction !== 'inbound') return
+          const senderName = String(
+            meta.wxSenderName || meta.senderNickname || meta.senderCard || meta.senderName || message.sender_name || '用户',
+          ).slice(0, 40)
+          const content = String(message.content || '').replace(/\s+/g, ' ').slice(0, 140)
+          add({
+            level: 'info',
+            cat: '外发',
+            source: message.source || meta.via || 'channel',
+            text: `收到「${resolveChannelName(conversationId, meta)}」${senderName} 的消息：${content || '[非文本消息]'}`,
+          })
+        }),
         events.on('chat:status', payload => {
           const { status, round, tool, label, conversationId } = payload || {}
           if (status === 'idle') {
@@ -452,13 +639,20 @@ export function apply(ctx) {
           }),
         ),
         events.on('channel:outbound', payload => {
-          const { status, channelType, channelId, ms, error } = payload || {}
+          const { status, channelType, channelName, channelId, ms, error, text } = payload || {}
+          const target = channelName || channelId || channelType || '渠道'
+          const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 120)
           if (status === 'pending') {
-            add({ level: 'debug', cat: '外发', source: channelType || 'channel', text: `排队外发 · ${channelId || ''}` })
+            add({ level: 'debug', cat: '外发', source: channelType || 'channel', text: `准备外发 · ${target}${preview ? `：${preview}` : ''}` })
           } else if (status === 'sent') {
-            add({ level: 'info', cat: '外发', source: channelType || 'channel', text: `外发成功 · ${Number(ms) || 0}ms · ${channelId || ''}` })
+            add({
+              level: 'info',
+              cat: '外发',
+              source: channelType || 'channel',
+              text: `已发送到「${target}」${preview ? `：${preview}` : ''} · ${Number(ms) || 0}ms`,
+            })
           } else if (status === 'failed') {
-            add({ level: 'error', cat: '外发', source: channelType || 'channel', text: `外发失败 · ${channelId || ''}：${error || '未知错误'}` })
+            add({ level: 'error', cat: '外发', source: channelType || 'channel', text: `外发失败 · ${target}：${error || '未知错误'}` })
           }
         }),
         events.on('chat-queue:start', ({ key, pending } = {}) =>
@@ -527,6 +721,7 @@ export function apply(ctx) {
         } else if (button.dataset.logsClear !== undefined) {
           entries = []
           entryKeys.clear()
+          backendSeen.clear()
           runtimeSeen = new Set()
           latestRuntimeId = 0
           logs?.clear?.()
@@ -560,7 +755,7 @@ export function apply(ctx) {
       }
 
       // 刷新按钮单独挂监听（不依赖容器的冒泡委托），SSE / 反代缓冲 / 旧后端
-      // 导致列表没跟上时，一按就强制重新拉取后端日志全量。
+      // 导致列表没跟上时，一键重建列表并回拉后端全量日志。
       const onRefresh = async event => {
         event?.stopPropagation?.()
         // 手动刷新意味着“我现在就要看最新日志”：取消暂停并强制回到底部。
@@ -570,13 +765,11 @@ export function apply(ctx) {
         autoScroll = true
         unseen = 0
         updateJumpBtn()
-        const result = await pullBackendRuntime({ force: true })
-        await pullBackend()
+        const result = await resyncFromBackend({ rebuild: true })
         render()
         listEl.scrollTop = listEl.scrollHeight
         if (result?.ok === false) toast?.error?.(`日志刷新失败：${result.error || '后端日志接口不可用'}`)
-        else if (Number(result?.added) > 0) toast?.success?.(`日志已刷新，新增 ${result.added} 条`)
-        else toast?.info?.('日志已刷新，没有新日志')
+        else toast?.success?.(`日志已刷新 · 当前 ${entries.length} 条`)
       }
       const refreshBtn = container.querySelector('[data-logs-refresh]')
       refreshBtn?.addEventListener('click', onRefresh)
@@ -591,6 +784,7 @@ export function apply(ctx) {
       }
       jumpBtn?.addEventListener('click', onJump)
       container.addEventListener('click', onClick)
+
       const onListScroll = () => {
         if (paused) return
         const atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 28
@@ -600,23 +794,60 @@ export function apply(ctx) {
         updateJumpBtn()
       }
       listEl?.addEventListener('scroll', onListScroll)
-      levelSelect?.addEventListener('change', render)
+
+      // 级别勾选：可任意组合（例如只勾错误 + 调试），默认只有 info；改动持久化，
+      // 下次打开 / 刷新页面（以及配置同步到其它端）后仍然保持。
+      const applyLevels = value => {
+        const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : null
+        const normalized = (list || []).map(level => String(level || '').trim()).filter(level => LEVEL_LABEL[level])
+        selectedLevels = new Set(normalized)
+      }
+      const onLevelChange = () => {
+        selectedLevels = new Set(levelInputs.filter(input => input.checked).map(input => input.dataset.logsLevel))
+        config?.set?.('logs.levels', [...selectedLevels])
+        render()
+      }
+      for (const input of levelInputs) input.addEventListener('change', onLevelChange)
+      const offLevelWatch = config?.watch?.('logs.levels', value => {
+        applyLevels(value)
+        syncLevelChecks()
+        render()
+      })
+
       catSelect?.addEventListener('change', render)
       searchInput?.addEventListener('input', render)
-      // 切回日志页 / 窗口重新聚焦时立刻补拉一次，避免后台标签页节流后看起来“没刷新”。
+
+      // 切回日志页 / 窗口重新聚焦时补拉。后台标签页计时器会被浏览器节流，
+      // 因此离开较久或实时流不在线时做一次完整重同步，避免“看起来没刷新”。
+      let lastHiddenAt = 0
       const onVisible = () => {
-        if (document.hidden === true) return
-        void pullBackendRuntime()
-        void pullBackend()
+        if (!active || document.hidden === true) return
+        const awayFor = lastHiddenAt ? Date.now() - lastHiddenAt : 0
+        lastHiddenAt = 0
+        if (!streamOnline || awayFor > 15000) {
+          void resyncFromBackend({ rebuild: awayFor > 15000 }).catch(() => {})
+        } else {
+          void pullBackendRuntime()
+          void pullBackend()
+        }
       }
-      document.addEventListener('visibilitychange', onVisible)
+      const onVisibilityChange = () => {
+        if (document.hidden === true) {
+          lastHiddenAt = Date.now()
+          return
+        }
+        onVisible()
+      }
+      document.addEventListener('visibilitychange', onVisibilityChange)
       window.addEventListener?.('focus', onVisible)
+
       // 实时优先：后端专用 SSE 推送；3 秒轮询作为代理 / 旧后端 / 断线兜底。
       backendTimer = setInterval(() => {
+        if (!active) return
         pullBackend()
-        pullBackendRuntime()
+        pullBackendRuntime().catch(() => {})
       }, 3000)
-      pullBackendRuntime()
+      pullBackendRuntime().catch(() => {})
       openRuntimeStream()
       render()
 
@@ -624,21 +855,19 @@ export function apply(ctx) {
         active = false
         if (renderTimer) clearTimeout(renderTimer)
         if (backendTimer) clearInterval(backendTimer)
-        try {
-          runtimeSource?.close?.()
-        } catch (_) {
-          /* ignore */
-        }
-        runtimeSource = null
-        document.removeEventListener('visibilitychange', onVisible)
+        if (streamRestartTimer) clearTimeout(streamRestartTimer)
+        streamRestartTimer = null
+        closeRuntimeStream()
+        document.removeEventListener('visibilitychange', onVisibilityChange)
         window.removeEventListener?.('focus', onVisible)
         offRecord?.()
+        offLevelWatch?.()
         offs.forEach(off => off?.())
         refreshBtn?.removeEventListener('click', onRefresh)
         jumpBtn?.removeEventListener('click', onJump)
         container.removeEventListener('click', onClick)
+        for (const input of levelInputs) input.removeEventListener('change', onLevelChange)
         listEl?.removeEventListener('scroll', onListScroll)
-        levelSelect?.removeEventListener('change', render)
         catSelect?.removeEventListener('change', render)
         searchInput?.removeEventListener('input', render)
       }

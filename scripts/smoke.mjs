@@ -1375,10 +1375,16 @@ async function main() {
       siblings: railButtons.map(el => el.id || el.tagName),
     }),
   )
+  const levelInput = lvl => document.querySelector(`[data-logs-level="${lvl}"]`)
   check(
-    '日志页默认只显示“信息及以上”，需要细节时再切全部',
-    document.querySelector('[data-logs-level] option[selected]')?.value === 'info',
-    JSON.stringify([...document.querySelectorAll('[data-logs-level] option')].map(option => option.getAttribute('value'))),
+    '日志页默认只勾选“信息”，其它类型不勾选',
+    levelInput('info')?.checked === true && ['error', 'warn', 'debug'].every(lvl => levelInput(lvl)?.checked === false),
+    JSON.stringify([...document.querySelectorAll('[data-logs-level]')].map(input => ({ level: input.dataset.logsLevel, checked: input.checked }))),
+  )
+  check(
+    '运行日志入口不再重复出现在设置导航',
+    !document.querySelector('.settings-nav-item[data-page="logs"]'),
+    String(!!document.querySelector('.settings-nav-item[data-page="logs"]')),
   )
   check('日志页有手动刷新按钮', !!document.querySelector('[data-logs-refresh]'))
   check('日志页有“有新日志”回到底部兜底按钮', !!document.querySelector('[data-logs-jump]'))
@@ -1389,6 +1395,33 @@ async function main() {
       !!document.querySelector('[data-logs-search]'),
   )
   check('运行日志页能显示已收集的日志', document.querySelectorAll('.logs-row').length > 0, String(document.querySelectorAll('.logs-row').length))
+
+  // 自由勾选：info + debug 的组合应写入 config，并在页面重开后保持。
+  const debugLevelInput = levelInput('debug')
+  if (debugLevelInput) {
+    debugLevelInput.checked = true
+    debugLevelInput.dispatchEvent({ type: 'change' })
+  }
+  await sleep(40)
+  check(
+    '日志级别勾选组合会持久化',
+    JSON.stringify(ctx.inject('config').get('logs.levels')) === JSON.stringify(['info', 'debug']),
+    JSON.stringify(ctx.inject('config').get('logs.levels')),
+  )
+  settingsView.open('logs')
+  await sleep(60)
+  check(
+    '重新打开日志页仍保留勾选组合',
+    levelInput('info')?.checked === true && levelInput('debug')?.checked === true && levelInput('warn')?.checked === false,
+    JSON.stringify([...document.querySelectorAll('[data-logs-level]')].map(input => ({ level: input.dataset.logsLevel, checked: input.checked }))),
+  )
+  // 还原默认，避免后续断言受日志噪音影响。
+  const debugLevelInputAfter = levelInput('debug')
+  if (debugLevelInputAfter) {
+    debugLevelInputAfter.checked = false
+    debugLevelInputAfter.dispatchEvent({ type: 'change' })
+  }
+  await sleep(20)
   backend.ctx.logger.info('SMOKE_RUNTIME_LOG_LINE')
   await sleep(150)
   settingsView.close()
@@ -1409,6 +1442,17 @@ async function main() {
       attr: refreshLogsBtn?.hasAttribute?.('data-logs-refresh'),
       tail: String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
     }),
+  )
+
+  // 访问日志噪音（HTTP POST /api/xxx → 200）不应出现在日志页。
+  backend.ctx.logger.info('HTTP POST /api/smoke-noise → 200 · 1ms')
+  await sleep(40)
+  refreshLogsBtn?.click()
+  await sleep(220)
+  check(
+    '日志页不展示 HTTP 访问日志噪音',
+    !String(document.querySelector('.logs-list')?.textContent || '').includes('/api/smoke-noise'),
+    String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
   )
   settingsView.close()
   await sleep(20)

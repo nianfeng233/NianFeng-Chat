@@ -86,7 +86,10 @@ export function apply(ctx) {
       conversationId,
       channelId: channel.id,
       channelType: channel.type,
+      channelName: String(channel.name || channel.type || ''),
       messageId,
+      // 日志页用：让“外发成功”能看出具体发出了什么，而不是只有渠道 id。
+      text: String(message.content || '').replace(/\s+/g, ' ').slice(0, 120),
     }
     events.emit('channel:outbound', { ...base, status: 'pending' })
     Promise.resolve(

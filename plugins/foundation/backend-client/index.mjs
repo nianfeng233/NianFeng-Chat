@@ -47,6 +47,9 @@ export function apply(ctx) {
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
+        // 本地后端接口一律不走缓存：避免代理 / 浏览器把日志、会话等
+        // 动态接口的旧响应当成新数据，导致界面看起来“刷新没反应”。
+        cache: 'no-store',
       })
       const text = await res.text()
       let data = null

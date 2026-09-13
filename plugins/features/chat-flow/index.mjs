@@ -497,9 +497,36 @@ export function apply(ctx) {
           timezone: builder.timezone?.(),
         })
         if (userWire) entry.protocol.push(userWire)
+      } else {
+        // 渠道插件已先写入入站消息（skipUserAppend=true），这里必须补一份 user wire，
+        // 否则工具协议轨迹只有 assistant/tool，下一轮构建上下文时会丢掉用户刚说的话。
+        const sessionMessages = sessions.messages?.(conversationId) || []
+        userMessage =
+          (text
+            ? [...sessionMessages].reverse().find(item => item?.role === 'user' && String(item.content || '') === String(text))
+            : null) ||
+          [...sessionMessages].reverse().find(item => item?.role === 'user') ||
+          null
+        const userWire = builder.toModelMessage(userMessage, {
+          roleId,
+          channelId: userMessage?.channel_id || channelId,
+          timezone: builder.timezone?.(),
+        })
+        if (userWire) entry.protocol.push(userWire)
       }
       emitStatus(conversationId, 'thinking', { round: 0, label: '正在思考' })
-      events.emit('chat:request-start', { conversationId, messageId: userMessage?.id })
+      // 日志页据此展示“谁 / 哪个渠道 / 说了什么”，而不是只有一串 conversationId。
+      const requestStartMessage =
+        userMessage || [...(sessions.messages?.(conversationId) || [])].reverse().find(item => item?.role === 'user')
+      const requestStartChannelType = String(conv.meta?.channelType || 'nova')
+      events.emit('chat:request-start', {
+        conversationId,
+        messageId: requestStartMessage?.id || userMessage?.id || '',
+        text: String(requestStartMessage?.content || text || '').slice(0, 160),
+        senderName: String(requestStartMessage?.sender_name || who.userName || '').slice(0, 40),
+        channelName: requestStartChannelType === 'nova' ? '' : String(conv.name || '').slice(0, 40),
+        channelType: requestStartChannelType,
+      })
 
       // 模型开始思考时先展示占位气泡（三点动画）；工具真正发出消息前会移除它，
       // 普通文本降级时则复用它继续流式输出。
@@ -517,7 +544,7 @@ export function apply(ctx) {
         ]).catch(() => {})
         if (entry.cancelled) throw abortError()
       }
-      const base = builder.build({ conversationId, roleId, persona, channelId })
+      const base = builder.build({ conversationId, roleId, persona, channelId, currentMessageId: userMessage?.message_id || userMessage?.id || null })
       const options = toolOptions(conv)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
         warnedLegacyBackend = true
@@ -836,7 +863,16 @@ export function apply(ctx) {
         userMessage = messages.send(conversationId, text, { meta: images.length ? { images } : undefined })
         entry.protocol.push({ role: 'user', content: text })
       } else {
-        userMessage = [...sessions.messages(conversationId)].reverse().find(message => message.role === 'user') || null
+        const sessionMessages = sessions.messages(conversationId)
+        userMessage =
+          (text
+            ? [...sessionMessages].reverse().find(message => message.role === 'user' && String(message.content || '') === String(text))
+            : null) ||
+          [...sessionMessages].reverse().find(message => message.role === 'user') ||
+          null
+        // 渠道 / 重新生成等 skipUserAppend 路径：把已有用户消息补进协议轨迹，避免下一轮丢用户上下文。
+        const userWire = builder?.toModelMessage?.(userMessage) || { role: 'user', content: text }
+        if (userWire) entry.protocol.push(userWire)
       }
       emitStatus(conversationId, 'thinking', { round: 1, label: '正在思考' })
       const modelMessages = sessions.context(conversationId, 30)
@@ -844,7 +880,15 @@ export function apply(ctx) {
       if (persona) modelMessages.unshift({ role: 'system', content: persona })
       const placeholder = messages.placeholder(conversationId)
       entry.draftId = placeholder?.id || null
-      events.emit('chat:request-start', { conversationId, messageId: userMessage?.id || placeholder?.id })
+      const requestStartChannelType = String(conv.meta?.channelType || 'nova')
+      events.emit('chat:request-start', {
+        conversationId,
+        messageId: userMessage?.id || placeholder?.id || '',
+        text: String(userMessage?.content || text || '').slice(0, 160),
+        senderName: String(userMessage?.sender_name || who.userName || '').slice(0, 40),
+        channelName: requestStartChannelType === 'nova' ? '' : String(conv.name || '').slice(0, 40),
+        channelType: requestStartChannelType,
+      })
       const roundStartedAt = Date.now()
       const result = await attemptStream(entry, conversationId, modelMessages, generationOptions(conv))
       const roundThinkingMs = Date.now() - roundStartedAt

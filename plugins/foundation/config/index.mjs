@@ -82,7 +82,8 @@ const DEFAULTS = {
   },
   'general.restore': false,
   'general.minimizeOnClose': false,
-  'debug': false,
+  // 运行日志页默认只勾选 info；用户勾选组合会通过 preferences 跨端 / 跨重启保留。
+  'logs.levels': ['info'],
   'plugins.disabled': [],
   'plugins.removed': [],
   'selectable.theme.activeId': 'light',
