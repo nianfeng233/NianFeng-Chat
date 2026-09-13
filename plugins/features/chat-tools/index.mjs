@@ -440,11 +440,6 @@ export function apply(ctx) {
               items: { type: 'string' },
               description: '可选图片列表：可以是 https 图片 URL 或 data:image/...;base64,... 数据。一般只在确实需要发图时使用，单次最多 4 张。',
             },
-            images: {
-              type: 'array',
-              items: { type: 'string' },
-              description: '可选图片列表：可以是 https 图片 URL 或 data:image/...;base64,... 数据。一般只在确实需要发图时使用，单次最多 4 张。',
-            },
             end: { type: 'boolean', description: 'true=发送后结束本轮；false=发送后继续下一步。' },
           },
           required: ['messages'],
