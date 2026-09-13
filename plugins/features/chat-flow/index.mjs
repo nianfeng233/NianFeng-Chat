@@ -402,6 +402,29 @@ export function apply(ctx) {
     })
   }
 
+  /**
+   * 严格模式的正文兜底：模型坚持不调工具时，不让裸 assistant 正文直接走渠道，
+   * 而是复用 chat_send 的标准发送链（零宽字符清理、去重、模拟输入、落库、渠道外发）。
+   */
+  async function fallbackViaChatSend(entry, conversationId, content, reasoning, contextBase = {}) {
+    const text = String(content ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+    if (!text) return { ok: false, error: '正文为空，无法兜底。' }
+    if (entry.draftId) removeDraft(entry, conversationId)
+    try {
+      const output = await tools.execute('chat_send', { messages: [text], end: true }, {
+        conversationId,
+        ...contextBase,
+        reasoningContent: reasoning || '',
+      })
+      if (output?.ok && Array.isArray(output.message_ids) && output.message_ids.length) {
+        attachCallInfo(conversationId, output.message_ids, entry.lastRound)
+      }
+      return output || { ok: false, error: 'chat_send 未返回结果。' }
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) }
+    }
+  }
+
   function handleTurnError(entry, conversationId, error) {
     const cancelled = entry.cancelled || error?.code === 'CHAT_ABORTED' || error?.name === 'AbortError'
     const draft = ensureDraft(entry, conversationId)
@@ -571,9 +594,10 @@ export function apply(ctx) {
       let textualMode = false
       let toolRetries = 0
       // DeepSeek 官方适配器按 harness 约定不发 tool_choice，模型有时会直接输出正文。
-      // 严格模式最多纠正一次；再纠正下去会让一次普通聊天白等数分钟，所以之后直接
-      // 把正文当作最终回复发送（网页与外部渠道都能正常外发）。
-      const toolRetryLimit = Math.min(1, Math.max(0, Number(config.get('chat.toolRetryLimit', 1)) || 0))
+      // 纠正次数由 chat.toolRetryLimit 控制（不再硬编码封顶为 1）；达到上限后走
+      // “经过发送链处理”的正文兜底，而不是把裸 assistant 正文直接丢给渠道。
+      const retryLimitRaw = Number(config.get('chat.toolRetryLimit', 1))
+      const toolRetryLimit = Number.isFinite(retryLimitRaw) ? Math.max(0, Math.floor(retryLimitRaw)) : 1
       let emptyRetries = 0
       const emptyRetryLimit = Math.max(0, Number(config.get('chat.emptyRetryLimit', 2)) || 0)
       while (round < maxRounds && !entry.cancelled) {
@@ -652,8 +676,9 @@ export function apply(ctx) {
                 content:
                   `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。\n` +
                   '当前是严格工具聊天模式，用户不会看到你的普通 assistant 正文，只有工具调用会被执行。\n' +
-                  '请立刻调用 chat_send 工具发送你想说的内容（messages 数组，结束本轮 end=true）；不要只输出思考 / 解释 / 计划。\n' +
-                  '如果接口不支持原生 function calling，请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
+                  '必须调用回复工具：日常回复用 chat_send（messages 数组，结束本轮 end=true）；长文本 / 资料 / 大段代码用 send_document。\n' +
+                  '不要只输出思考 / 解释 / 计划，也不要直接输出 assistant 正文。\n' +
+                  '如果接口不支持原生 function calling，chat_send 请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
               })
               ctx.logger.warn(`[chat-flow] 第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
               continue
@@ -690,29 +715,54 @@ export function apply(ctx) {
                 `[系统纠正 ${toolRetries}/${toolRetryLimit}] 系统消息：你上一轮的回复已被驳回，尚未发送给用户。\n` +
                 `驳回时间：${rejectedAt}\n` +
                 '驳回原因：当前是严格工具模式，只有工具调用（tool_calls）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
+                '请注意：无论是一句话还是长文本，你都必须调用回复工具进行回复；直接输出 assistant 正文永远会被驳回。\n' +
                 '被驳回的正文（仅用于让你知道上一轮生成了什么；不要把它当成本轮最终回复，也不要原样直接返回）：\n' +
                 `--- 被驳回正文开始 ---\n${rejectedText || '（空）'}\n--- 被驳回正文结束 ---\n` +
-                '请重新处理本轮用户请求，二选一：\n' +
-                '1）原生工具：调用 chat_send，参数为 {"messages":["要发送给用户的内容"],"end":true}；\n' +
-                '2）不支持原生工具：只输出 <tool_call>{"name":"chat_send","arguments":{"messages":["要发送给用户的内容"],"end":true}}</tool_call>\n' +
-                '必须使用上述 chat_send 工具，把回复内容放进 messages 数组，并在结束本轮时设置 end=true。\n' +
-                '不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
+                '请重新处理本轮用户请求，按内容长度二选一：\n' +
+                '1）日常短回复：必须调用回复工具 chat_send，参数为 {"messages":["要发送给用户的内容"],"end":true}；不支持原生工具时只输出 <tool_call>{"name":"chat_send","arguments":{"messages":["要发送给用户的内容"],"end":true}}</tool_call>\n' +
+                '2）长文本 / 资料 / 大段代码 / 文章：必须调用资料工具 send_document（title + content，或 summary），由资料库保存原文，不要再硬塞进 chat_send 或直接输出正文。\n' +
+                '无论哪种情况，都必须调用回复工具；不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
             })
             ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
             continue
           }
           if (strict && toolRetries >= toolRetryLimit) {
-            // 纠错达到上限：不再终止本轮，也不让用户继续空等。直接把模型正文
-            // 作为最终回复发出；渠道基座会把它正常外发到 QQ / 微信等渠道。
+            // 纠错达到上限：正文兜底仍然保留，但不把裸 assistant 正文直接丢给渠道，
+            // 而是复用 chat_send 的标准发送链处理（清理 / 去重 / 模拟输入 / 落库 / 外发）。
+            const fallbackText = String(result.text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
             if (entry.draftId) removeDraft(entry, conversationId)
-            ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已按普通正文继续（已纠正 ${toolRetries} 次）`)
-            ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文发送。')
-            entry.finalWire = {
-              role: 'assistant',
-              content: result.text,
-              ...(reasoning ? { reasoning_content: reasoning } : {}),
+            const fallbackOutput = await fallbackViaChatSend(entry, conversationId, fallbackText, reasoning, {
+              channelId,
+              roleId,
+              userId: who.userId,
+              userName: who.userName,
+              round,
+              sentContents,
+              delivery,
+              entry,
+            })
+            if (fallbackOutput?.ok) {
+              ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已通过 chat_send 发送链兜底（已纠正 ${toolRetries} 次）`)
+              ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文兜底发送。')
+              entry.finalWire = {
+                role: 'assistant',
+                content: fallbackText,
+                ...(reasoning ? { reasoning_content: reasoning } : {}),
+              }
+              ended = true
+              break
             }
-            await finalizeFallback(entry, conversationId, result.text, reasoning)
+            // chat_send 服务 / 权限异常时，退回原来的 finalizeFallback；此时正文已做清理
+            ctx.logger.warn(`[chat-flow] 严格工具模式：chat_send 兜底失败，退回普通正文（${fallbackOutput?.error || '未知错误'}）`)
+            ctx.inject('toast')?.warn?.(`模型未按工具协议返回，兜底发送失败：${fallbackOutput?.error || '未知错误'}`)
+            if (fallbackText) {
+              entry.finalWire = {
+                role: 'assistant',
+                content: fallbackText,
+                ...(reasoning ? { reasoning_content: reasoning } : {}),
+              }
+              await finalizeFallback(entry, conversationId, fallbackText, reasoning)
+            }
             ended = true
             break
           }

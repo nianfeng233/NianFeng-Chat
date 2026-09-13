@@ -32,7 +32,7 @@ export const provides = [{ name: 'context-builder', type: 'singleton' }]
 /** 固定追加在 system prompt 最底部的「聊天模式说明」，只列当前真实注册的工具。 */
 const CHAT_MODE_TOOL_HINTS = {
   chat_send: '发送聊天消息（所有面向用户的普通回复都必须通过它发送；messages 数组，结束本轮 end=true）',
-  send_document: '发送长资料 / 文件（原文进资料库，聊天里只留引用）',
+  send_document: '发送长文本 / 资料 / 文件（大段说明、代码、文章必须用它；原文进资料库，聊天里只留引用，不要用 chat_send 发大段正文）',
   read_document: '读取资料原文',
   read_messages: '读取历史聊天记录 / 图片',
   napcat_group_send: '群内 @成员 / @全体 / 发送群消息',
@@ -55,7 +55,7 @@ const chatModeGuide = (tools = [], { requireToolCall = true } = {}) => {
   for (const [name, hint] of Object.entries(CHAT_MODE_TOOL_HINTS)) {
     if (names.has(name)) lines.push(`- ${name}：${hint}`)
   }
-  lines.push('聊天回复优先 chat_send；长文 / 代码 / 文件用 send_document；需要结束本轮时按工具约定设置 end=true。')
+  lines.push('回复必须通过工具发送：日常聊天用 chat_send；长文 / 代码 / 文件用 send_document；需要结束本轮时按工具约定设置 end=true。不要直接输出 assistant 正文。')
   return lines.join('\n')
 }
 
