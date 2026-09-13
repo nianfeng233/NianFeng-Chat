@@ -62,9 +62,80 @@ export function apply(ctx) {
   }
   const withoutMessages = conv => {
     if (!conv) return conv
-    const { messages, ...meta } = conv
+    const { messages, localTruncated, ...meta } = conv
     meta.messageCount = messageCountOf(conv)
     return meta
+  }
+
+  /** 消息稳定的合并标识：优先 message_id / id，其次 seq，最后退化为时间 + 角色 + 文本。 */
+  const messageIdentity = message => {
+    if (!message || typeof message !== 'object') return ''
+    const id = String(message.message_id || message.id || '').trim()
+    if (id) return `id:${id}`
+    const seq = Number(message.seq)
+    if (Number.isFinite(seq) && seq > 0) return `seq:${seq}`
+    const at = Number(message.createdAt) || Date.parse(message.timestamp || '') || 0
+    return `at:${at}:${String(message.role || '')}:${String(message.content || '').slice(0, 120)}`
+  }
+
+  const messageAtOf = message => {
+    const createdAt = Number(message?.createdAt)
+    if (Number.isFinite(createdAt) && createdAt > 0) return createdAt
+    const parsed = Date.parse(message?.timestamp || '')
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
+  /** 渠道 seq 是权威顺序；没有 seq 的旧数据再按时间兜底。 */
+  const sortConversationMessages = messages => {
+    if (!Array.isArray(messages) || messages.length <= 1) return Array.isArray(messages) ? [...messages] : []
+    return [...messages].sort((a, b) => {
+      const sa = Number(a?.seq)
+      const sb = Number(b?.seq)
+      if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) return sa - sb
+      const ta = messageAtOf(a)
+      const tb = messageAtOf(b)
+      if (ta !== tb) return ta - tb
+      return String(messageIdentity(a)).localeCompare(String(messageIdentity(b)))
+    })
+  }
+
+  /**
+   * 合并本地缓存与后端消息。
+   * 关键点：localStorage 只缓存最近 20 条，在线权威数据始终是后端 SQLite。
+   * 不能整段二选一，否则本地截断缓存会在 updatedAt 较新时把后端全量历史“顶掉”。
+   * 这里以某一侧为底稿做并集，并保留本地尚未写回的新消息。
+   */
+  const mergeConversationMessages = (localConv, remoteConv) => {
+    const localMessages = Array.isArray(localConv?.messages) ? localConv.messages : []
+    const remoteMessages = Array.isArray(remoteConv?.messages) ? remoteConv.messages : []
+    // 后端只返回了元数据（未来 compact / 分页接口）时，绝不能用本地滚动缓存整段覆盖。
+    const remoteLooksMetadataOnly = !!remoteConv && remoteMessages.length === 0 && Number(remoteConv.messageCount) > 0
+    const localTruncated =
+      localConv?.localTruncated === true ||
+      messageCountOf(localConv) > localMessages.length ||
+      remoteLooksMetadataOnly ||
+      // 本地消息比后端少，说明本地只是部分缓存 / 缺历史，不能作为 replace 的依据。
+      localMessages.length < remoteMessages.length
+    const useRemoteAsBase =
+      !!remoteConv && (localTruncated || !isNewerConversation(localConv, remoteConv) || localMessages.length < remoteMessages.length)
+    const base = useRemoteAsBase ? remoteMessages : localMessages
+    const extra = useRemoteAsBase ? localMessages : remoteMessages
+    if (!base.length && !extra.length) return { messages: [], messageCount: 0, localTruncated }
+    const seen = new Set()
+    const messages = []
+    for (const message of base) {
+      const key = messageIdentity(message)
+      if (key && seen.has(key)) continue
+      if (key) seen.add(key)
+      messages.push(message)
+    }
+    for (const message of extra) {
+      const key = messageIdentity(message)
+      if (key && seen.has(key)) continue
+      if (key) seen.add(key)
+      messages.push(message)
+    }
+    return { messages: sortConversationMessages(messages), messageCount: messages.length, localTruncated }
   }
 
   /**
@@ -80,8 +151,10 @@ export function apply(ctx) {
     const conversations = data.conversations.map(conv => {
       const messages = Array.isArray(conv.messages) ? conv.messages : []
       // 离线兜底只保留最近 20 条；完整历史以 SQLite / 后端为准，避免 localStorage 走旧版爆掉。
+      // 判断截断必须看 messageCount，而不是当前数组长度：本地只剩 20 条但 messageCount=100 时，
+      // 旧逻辑会误标为完整，下一次启动可能把截断缓存当成全量。
       const keep = messages.slice(-20)
-      return { ...conv, messages: keep, messageCount: messageCountOf(conv), localTruncated: messages.length > keep.length }
+      return { ...conv, messages: keep, messageCount: messageCountOf(conv), localTruncated: messageCountOf(conv) > keep.length }
     })
     storage.set(NS, KEY, { conversations, activeId: data.activeId, removedIds: data.removedIds || [] })
   }
@@ -129,7 +202,7 @@ export function apply(ctx) {
   /**
    * 后端会话与本地会话合并：
    *   - 删除墓碑中的 id 不参与合并（避免已删除会话复活）
-   *   - 同一 id 取 updatedAt 更新 / 消息更多的一份
+   *   - 同一 id 的元数据取 updatedAt 更新的；消息记录做并集，本地截断缓存不能覆盖后端全量
    *   - 本地独有的会话保留，等待写回后端
    */
   const mergeServerConversations = (serverList = []) => {
@@ -141,7 +214,21 @@ export function apply(ctx) {
     const merged = new Map()
     for (const localConv of localKept) {
       const remote = serverById.get(localConv.id)
-      merged.set(localConv.id, !remote || isNewerConversation(localConv, remote) ? localConv : remote)
+      if (!remote) {
+        merged.set(localConv.id, localConv)
+        continue
+      }
+      const mergedMessages = mergeConversationMessages(localConv, remote)
+      const metaSource = isNewerConversation(localConv, remote) ? localConv : remote
+      merged.set(localConv.id, {
+        ...metaSource,
+        messages: mergedMessages.messages,
+        messageCount: mergedMessages.messageCount,
+        updatedAt: Math.max(Number(localConv.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || metaSource.updatedAt,
+        // 保留“本地缓存原本是否只有一部分”的标记，供写回时决定 replace 还是逐条 upsert；
+        // withoutMessages / 写盘都会剥掉这个内部字段，不会污染后端。
+        localTruncated: mergedMessages.localTruncated,
+      })
     }
     for (const remote of serverKept) if (!merged.has(remote.id)) merged.set(remote.id, remote)
     const conversations = [...merged.values()].sort(
@@ -184,19 +271,24 @@ export function apply(ctx) {
 
   /**
    * 离线重连后的补写：
-   *   - 本地只有截断缓存（localStorage 最近 20 条）时，只对本地消息逐条 upsert，
+   *   - 本地原本只有截断缓存（localStorage 最近 20 条）时，只对后端没有的本地消息逐条 upsert，
    *     绝不能用截断列表 replace，否则会把后端完整历史覆盖掉；
-   *   - 本地内存里有完整消息且确认比后端新时，才整段 replace。
+   *   - 本地内存里有完整消息且确认比后端新时，才整段 replace。此时的 conv.messages 已经过
+   *     mergeServerConversations 做并集，包含后端全量，因此不会造成截断。
    */
   const pushFullMessagesIfNeeded = async (conv, remote) => {
     if (!api || !conv || !Array.isArray(conv.messages) || !conv.messages.length) return
+    const remoteMessages = Array.isArray(remote?.messages) ? remote.messages : []
     if (remote && conv.localTruncated === true) {
+      const remoteKeys = new Set(remoteMessages.map(messageIdentity))
       for (const message of conv.messages) {
+        const key = messageIdentity(message)
+        if (key && remoteKeys.has(key)) continue
         await api.addMessage(conv.id, message).catch(() => {})
       }
       return
     }
-    const remoteCount = remote ? Number(remote.messageCount ?? remote.messages?.length ?? 0) : 0
+    const remoteCount = remote ? Number(remote.messageCount ?? remoteMessages.length ?? 0) : 0
     if (remote && remoteCount === conv.messages.length && !isNewerConversation(conv, remote)) return
     await api.replaceMessages(conv.id, conv.messages).catch(() => {})
   }

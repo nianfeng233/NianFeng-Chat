@@ -43,6 +43,11 @@ const MAX_IMAGES = 4
 const MAX_MEDIA_BYTES = 4 * 1024 * 1024
 const ACTION_TIMEOUT = 20000
 const TEXT_CHUNK = 3600
+// 应用层心跳：同机内网 WebSocket 也可能半开，readyState 无法发现“假在线”。
+const HEARTBEAT_PROBE_AFTER = 30000
+const HEARTBEAT_DEAD_AFTER = 90000
+const HEARTBEAT_CHECK_INTERVAL = 10000
+const HEARTBEAT_PROBE_TIMEOUT = 8000
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
 
@@ -586,6 +591,12 @@ export function apply(ctx) {
         pending: new Map(),
         seen: new Map(),
         lastEventAt: 0,
+        // 当前连接真正进入 online 的时间。前端用它区分“连接前的历史积压”和
+        // “连接后、前端重启期间漏收的实时消息”，避免把后者也静默掉。
+        connectedAt: 0,
+        heartbeatTimer: null,
+        heartbeatOwner: null,
+        heartbeatProbing: false,
         listsLoaded: false,
         versionInfo: '',
       }
@@ -623,6 +634,7 @@ export function apply(ctx) {
       versionInfo: String(run?.versionInfo || ''),
       channelIds: channelIdsOf(record.id),
       lastEventAt: run?.lastEventAt || 0,
+      connectedAt: Number(run?.connectedAt) || 0,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       endpoint: record.mode === 'reverse' ? `/api/napcat/ws?instance=${encodeURIComponent(record.id)}` : '',
@@ -645,8 +657,12 @@ export function apply(ctx) {
     if (rt.status === status && rt.error === nextError) {
       return
     }
+    const wasOnline = rt.status === 'online'
     rt.status = status
     rt.error = nextError
+    // 记录本次连接进入 online 的时间；断开时清空，重连时重新开始计时。
+    if (status === 'online' && !wasOnline) rt.connectedAt = Date.now()
+    else if (status !== 'online' && wasOnline) rt.connectedAt = 0
     const record = data.instances[rt.id]
     hub.broadcast('napcat:status', {
       instanceId: rt.id,
@@ -658,6 +674,57 @@ export function apply(ctx) {
     })
     broadcastInstances()
   }
+
+  function stopHeartbeatWatchdog(rt, owner = null) {
+    if (!rt) return
+    if (owner && rt.heartbeatOwner && rt.heartbeatOwner !== owner) return
+    if (rt.heartbeatTimer) {
+      clearInterval(rt.heartbeatTimer)
+      rt.heartbeatTimer = null
+    }
+    rt.heartbeatOwner = null
+    rt.heartbeatProbing = false
+  }
+
+  /**
+   * 内网连接也可能出现“假在线”：TCP/WS 的 readyState 仍是 OPEN，但 NapCat 已不再
+   * 推任何事件，上层会一直以为连接正常。这个看门狗在长时间没有 payload 时主动发
+   * get_status 探测；探测失败或沉默超时就关闭当前连接，交给原本的重连循环处理。
+   */
+  function startHeartbeatWatchdog(rt, close, owner) {
+    stopHeartbeatWatchdog(rt)
+    if (!rt || typeof close !== 'function') return
+    rt.heartbeatOwner = owner
+    rt.heartbeatTimer = setInterval(async () => {
+      if (rt.heartbeatOwner !== owner || !connectionAlive(rt)) return
+      if (rt.status !== 'online' || rt.heartbeatProbing) return
+      const last = Number(rt.lastEventAt) || Date.now()
+      const silent = Date.now() - last
+      if (silent < HEARTBEAT_PROBE_AFTER) return
+      if (silent >= HEARTBEAT_DEAD_AFTER) {
+        ctx.logger.warn(`[napcat] ${rt.id} 已 ${Math.round(silent / 1000)} 秒没有任何事件，主动重连`)
+        stopHeartbeatWatchdog(rt, owner)
+        try { close() } catch (_) { /* ignore */ }
+        return
+      }
+      rt.heartbeatProbing = true
+      let result = null
+      try {
+        result = await sendAction(rt, 'get_status', {}, HEARTBEAT_PROBE_TIMEOUT)
+      } catch (_) {
+        result = null
+      } finally {
+        rt.heartbeatProbing = false
+      }
+      if (!result?.ok && rt.heartbeatOwner === owner) {
+        ctx.logger.warn(`[napcat] ${rt.id} 心跳探测失败（${result?.error || '无响应'}），主动重连`)
+        stopHeartbeatWatchdog(rt, owner)
+        try { close() } catch (_) { /* ignore */ }
+      }
+    }, HEARTBEAT_CHECK_INTERVAL)
+    rt.heartbeatTimer?.unref?.()
+  }
+
 
   /* ---------------- OneBot action / 事件 ---------------- */
 
@@ -767,7 +834,13 @@ export function apply(ctx) {
 
   async function handlePayload(rt, payload) {
     if (!payload || typeof payload !== 'object') return
+    // 任何 payload（包括 get_status 探测响应 / 心跳 / 消息）都算连接活跃。
+    rt.lastEventAt = Date.now()
     if (payload.echo !== undefined && resolvePending(rt, payload.echo, payload)) return
+
+    // 某些 NapCat 版本第一条业务事件早于 get_login_info / heartbeat，先记下连接时间，
+    // 保证随后投递的消息带有 connectedAt，前端才能区分积压与实时消息。
+    if (!rt.connectedAt) rt.connectedAt = Date.now()
 
     const selfId = String(payload.self_id ?? '').trim()
     if (selfId && !rt.login.userId) {
@@ -775,8 +848,6 @@ export function apply(ctx) {
       setStatus(rt, 'online')
       ensureLoginInfo(rt).catch(() => {})
     }
-    rt.lastEventAt = Date.now()
-
     if (payload.post_type === 'meta_event') {
       if (payload.meta_event_type === 'lifecycle') {
         const sub = String(payload.sub_type || '')
@@ -987,6 +1058,8 @@ export function apply(ctx) {
         channelId: channel.channelId,
         channelTargetType: channel.targetType,
         channelTargetId: channel.targetId,
+        // 连接建立时间由后端桥提供，前端据此判断是否属于“连接前积压”。
+        connectedAt: Number(rt.connectedAt) || 0,
       }
       const record = {
         id: `${message.id}-${channel.channelId}`,
@@ -1065,6 +1138,7 @@ export function apply(ctx) {
 
   function stopRuntime(rt, { status = 'offline' } = {}) {
     if (!rt) return
+    stopHeartbeatWatchdog(rt)
     // epoch 让旧的重连循环在下一轮检查时主动退出，避免“断开后又被旧循环接回来”。
     rt.epoch = Number(rt.epoch || 0) + 1
     rt.stopping = true
@@ -1204,6 +1278,10 @@ export function apply(ctx) {
           if (!connectionAlive(rt)) throw new Error('NapCat WebSocket 已断开')
           setStatus(rt, 'online')
           rt.reconnectDelay = 1000
+          startHeartbeatWatchdog(rt, () => {
+            stopHeartbeatWatchdog(rt, ws)
+            try { ws.close(4000, 'heartbeat timeout') } catch (_) { /* ignore */ }
+          }, ws)
           await new Promise(resolve => {
             const timer = setInterval(() => {
               if (!connectionAlive(rt)) {
@@ -1216,10 +1294,12 @@ export function apply(ctx) {
               resolve()
             }, { once: true })
           })
+          stopHeartbeatWatchdog(rt, ws)
           ws.removeEventListener?.('message', onMessage)
           ws.removeEventListener?.('close', onClose)
           ws.removeEventListener?.('error', onError)
         } catch (err) {
+          stopHeartbeatWatchdog(rt, ws)
           try {
             ws?.close()
           } catch (_) {
@@ -1261,6 +1341,7 @@ export function apply(ctx) {
       },
       close() {
         if (closedSocket) return
+        stopHeartbeatWatchdog(rt, conn)
         closedSocket = true
         try {
           socket.write(encodeWsFrame(Buffer.alloc(0), 0x8))
@@ -1367,6 +1448,10 @@ export function apply(ctx) {
     socket.on('close', onClose)
 
     // 主动询问登录信息并刷新好友 / 群列表，让渠道面板能立刻选择目标。
+      startHeartbeatWatchdog(rt, () => {
+        stopHeartbeatWatchdog(rt, conn)
+        close()
+      }, conn)
     ensureLoginInfo(rt).catch(() => {})
   }
 

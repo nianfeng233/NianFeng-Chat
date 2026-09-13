@@ -24,6 +24,7 @@
     "test:security": "node scripts/test-security.mjs",
     "test:chat": "node scripts/test-chat.mjs",
     "test:chat-tools": "node scripts/test-chat-tools.mjs",
+    "test:memory": "node scripts/test-memory-same-session.mjs",
     "test:vendors": "node scripts/test-vendors.mjs",
     "test:clawbot": "node scripts/test-clawbot.mjs",
     "test:qqbot": "node scripts/test-qqbot.mjs",

@@ -235,7 +235,7 @@ export function apply(ctx) {
         // 每条 user 消息的都是结构化信封：不可信正文放 content，
         // 时间 / 渠道 / 角色等系统生成的元数据放 meta，保证前缀历史稳定可缓存。
         reply_policy: perMessageToolReminder
-          ? '必须调用工具回复：日常短消息用 chat_send，长文本 / 资料用 send_document；不允许直接输出 assistant 正文。'
+          ? '必须调用工具回复：日常短消息用 chat_send，大段内容用 send_document；不允许直接输出 assistant 正文。'
           : undefined,
         time: message.time || '',
         timestamp: message.timestamp || undefined,

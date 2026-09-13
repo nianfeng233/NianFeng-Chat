@@ -569,8 +569,8 @@ async function main() {
   check('模型直出的正文最终进入聊天气泡', !!strictReply)
   const strictRounds = chattyRequests.slice(beforeChatty)
   check(
-    '严格模式最多只做一次纠错（响应速度优先）',
-    strictRounds.length === 2,
+    '严格模式按 chat.toolRetryLimit 执行配置次数的纠错',
+    strictRounds.length === 3,
     `模型调用 ${strictRounds.length} 次`,
   )
   const strictCorrection = (strictRounds[1] || []).find(

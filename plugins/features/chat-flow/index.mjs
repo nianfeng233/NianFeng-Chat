@@ -480,12 +480,22 @@ export function apply(ctx) {
   /** 工具循环主路径 */
   async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      // 渠道侧的“本轮结束”回调依赖 chat:request-done；会话不存在时也必须发一次，
+      // 否则入站队列会一直等到超时，表现为“消息写进去了但机器人长时间不理人”。
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
     const startedAt = Date.now()
-    const channel = store.channelForConversation(conversationId)
-    const channelId = channel?.channelId || store.novaChannelId(conversationId)
+    let channel = null
+    try {
+      channel = store.channelForConversation(conversationId)
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+    }
+    const channelId = channel?.channelId || store?.novaChannelId?.(conversationId) || `nova:web:${conversationId}`
     entry.channelId = channelId
     entry.protocol = []
     entry.roundProtocol = []
@@ -493,11 +503,21 @@ export function apply(ctx) {
     entry.usage = null
     entry.thinkingMs = 0
     entry.lastRound = null
-    const identity = ctx.registry.get('user-identity')?.get?.() || {}
-    const who = permissions?.contextFor(conversationId) || {
-      userId: identity.userId || config.get('chat.userId', 'web-user'),
-      userName: identity.userName || resolveUserNickname(config),
-      identitySource: identity.source || 'local',
+    let who = null
+    try {
+      const identity = ctx.registry.get('user-identity')?.get?.() || {}
+      who = permissions?.contextFor(conversationId) || {
+        userId: identity.userId || config.get('chat.userId', 'web-user'),
+        userName: identity.userName || resolveUserNickname(config),
+        identitySource: identity.source || 'local',
+      }
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 读取用户身份失败，将使用默认身份：${err?.message || err}`)
+      who = {
+        userId: config.get('chat.userId', 'web-user'),
+        userName: resolveUserNickname(config),
+        identitySource: 'local',
+      }
     }
 
     try {
@@ -890,10 +910,18 @@ export function apply(ctx) {
   /** 兼容路径：工具链路被禁用或服务缺失时，保持旧版“直接流式回复”行为 */
   async function runLegacy(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
-    entry.channelId = store?.channelForConversation?.(conversationId)?.channelId || null
+    try {
+      entry.channelId = store?.channelForConversation?.(conversationId)?.channelId || null
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+      entry.channelId = null
+    }
     entry.protocol = []
     entry.roundProtocol = []
     entry.finalWire = null
@@ -997,7 +1025,12 @@ export function apply(ctx) {
     if (!conversationId || (!text && !images.length)) return
     if (payload.confirmHandled) return // 敏感确认已消费这次输入，不进入正常聊天
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      // 渠道侧依赖 chat:request-done 结束本轮等待；即使会话已不存在也要通知，
+      // 避免入站队列一直挂起到超时。
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
 
     const roleId = roleOf(conv)
     const agent = toolsEnabled()

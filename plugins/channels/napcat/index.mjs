@@ -120,17 +120,26 @@ const STATUS_COLOR = {
 }
 
 /**
- * 判断一条入站消息是否属于“启动前积压”：
+ * 判断一条入站消息是否属于“连接建立前的历史积压”：
+ *   - connectedAt 是 NapCat 后端桥本次连接进入 online 的时间（毫秒）；
  *   - receivedAt 是 NapCat 桥收到消息的时间戳（毫秒，本地时钟）；
- *   - time 是消息本身的发送时间（ISO 字符串，可能来自 QQ 服务器）；
- *   - 二者任一明显早于本次前端启动时间，就视为积压消息，只写上下文不自动回复；
- *   - napcat.replyBacklog = true 可恢复旧行为（积压也回复）。
+ *   - time 是消息本身的发送时间（ISO 字符串，可能来自 QQ 服务器）。
+ *
+ * 优先以 connectedAt 为基准：连接建立后、只是前端 WebUI 重启期间漏收的消息
+ * 仍属于实时消息，应当补写并触发回复；只有连接建立前就已经存在的历史消息才
+ * 静默写入上下文，避免“重开程序/重连后把历史消息全部回一遍”。
+ * 没有 connectedAt 的旧后端数据回退到 sessionStartedAt 判断。
+ * napcat.replyBacklog = true 可恢复旧行为（积压也回复）。
  */
-export function isBacklogMessage(message, { sessionStartedAt = 0, graceMs = 15000, replyBacklog = false } = {}) {
+export function isBacklogMessage(message, { sessionStartedAt = 0, graceMs = 15000, replyBacklog = false, connectedAt = 0 } = {}) {
   if (replyBacklog) return false
   const receivedAt = Number(message?.receivedAt) || 0
   const sentAt = Date.parse(message?.time || '') || 0
-  const cutoff = Number(sessionStartedAt) - Math.max(0, Number(graceMs) || 0)
+  const messageConnectedAt = Number(message?.connectedAt) || 0
+  const referenceAt =
+    (Number(connectedAt) > 0 ? Number(connectedAt) : 0) || (messageConnectedAt > 0 ? messageConnectedAt : 0) || Number(sessionStartedAt) || 0
+  if (!referenceAt) return false
+  const cutoff = referenceAt - Math.max(0, Number(graceMs) || 0)
   return (receivedAt > 0 && receivedAt < cutoff) || (sentAt > 0 && sentAt < cutoff)
 }
 
@@ -160,13 +169,21 @@ export function apply(ctx) {
   const instanceWaiters = new Set()
   const closing = []
   let backendEvents = null
+  /** 启动流程结束后才允许在 SSE 重连时主动补收件箱，避免和会话同步竞争。 */
+  let bootFinished = false
+  let pendingOpenDrain = false
+  /** SSE 静默失效时的兜底轮询：定时补收后端 inbox，避免消息永远躺在收件箱里。 */
+  let inboxPollTimer = null
   /**
-   * 本次前端启动时间：启动前积压在 NapCat / 收件箱里的消息只补写上下文，
-   * 不自动触发模型回复，避免“重开程序后把历史消息全部回一遍”。
-   * 如确需回复启动前的积压消息，可把 napcat.replyBacklog 设为 true。
+   * 本次前端启动时间：只作为旧后端（消息里没有 connectedAt）的兜底基准。
+   * 新后端会把 NapCat 连接进入 online 的时间随消息一起传下来，这样“连接后、
+   * 前端 WebUI 重启期间漏收的消息”不会被误判成历史积压。
+   * 如确需回复连接建立前的积压消息，可把 napcat.replyBacklog 设为 true。
    */
   const sessionStartedAt = Date.now()
-  const BACKLOG_GRACE_MS = 15000
+  // 连接切换 / 心跳抖动通常只有几秒到一两分钟；宽限设大一些，避免把刚收到
+  // 的实时消息误判成积压。真正几小时前的历史消息仍会被静默写入上下文。
+  const BACKLOG_GRACE_MS = 2 * 60 * 1000
   const replyBacklogEnabled = () => config.get('napcat.replyBacklog', false) === true
   const backlogOf = message => isBacklogMessage(message, { sessionStartedAt, graceMs: BACKLOG_GRACE_MS, replyBacklog: replyBacklogEnabled() })
 
@@ -546,6 +563,15 @@ export function apply(ctx) {
       for (const type of ['napcat:message', 'napcat:status', 'napcat:instances', 'napcat:discover', 'napcat:notice', 'napcat:request', 'napcat:recall']) {
         source.addEventListener(type, forward(type))
       }
+      // EventSource 断开重连后，断线期间的消息只会留在后端 inbox 里，不会自动
+      // 重放。这里在重连成功时主动补收一次，避免用户消息“后台收到了但前端没反应”。
+      source.addEventListener('open', () => {
+        if (!bootFinished) {
+          pendingOpenDrain = true
+          return
+        }
+        drainAllInboxes().catch(err => ctx.logger?.warn?.(`[napcat] 重连补收消息失败：${err?.message || err}`))
+      })
       backendEvents = source
     } catch (_) {
       backendEvents = null
@@ -559,6 +585,18 @@ export function apply(ctx) {
       for (const item of data?.messages || []) await handleInbound({ channelId: channel.id, instanceId: data?.instanceId, message: item.message || item })
     } catch (_) {
       /* ignore */
+    }
+  }
+
+  /** SSE 重连后补收所有 NapCat 渠道的 inbox；chat-flow 未就绪时留给 boot 首轮处理。 */
+  async function drainAllInboxes() {
+    if (!api || !ctx.registry.get('chat-flow')) return
+    for (const tab of channels.tabs()) {
+      for (const channel of channels.channels(tab)) {
+        if (!isNapcatChannel(channel)) continue
+        if (!instanceIdOf(channel)) continue
+        await drainInbox(channel)
+      }
     }
   }
 
@@ -2334,6 +2372,10 @@ export function apply(ctx) {
   })
 
   ctx.effect(() => () => {
+    if (inboxPollTimer) {
+      clearInterval(inboxPollTimer)
+      inboxPollTimer = null
+    }
     if (backendEvents) {
       try {
         backendEvents.close()
@@ -2357,6 +2399,7 @@ export function apply(ctx) {
     ensureBackendEvents()
     await refreshInstances()
     applyInstancesToChannels(instances)
+    const drains = []
     for (const tab of channels.tabs()) {
       for (const channel of channels.channels(tab)) {
         if (!isNapcatChannel(channel)) continue
@@ -2368,10 +2411,29 @@ export function apply(ctx) {
         if (!instanceIdOf(channel)) continue
         await syncChannelToBridge(channel)
         await refreshChannelStatus(channel)
-        drainInbox(channel).catch(() => {})
+        drains.push(drainInbox(channel).catch(() => {}))
       }
     }
+    await Promise.allSettled(drains)
+    bootFinished = true
+    if (pendingOpenDrain) {
+      pendingOpenDrain = false
+      drainAllInboxes().catch(err => ctx.logger?.warn?.(`[napcat] 启动后补收消息失败：${err?.message || err}`))
+    }
     pruneBridgeChannels().catch(() => {})
+    if (!inboxPollTimer) {
+      inboxPollTimer = setInterval(() => {
+        if (!bootFinished) return
+        // EventSource 处于 CLOSED 时浏览器通常会自动重连；这里兜底重建，避免只剩轮询。
+        if (backendEvents && typeof EventSource !== 'undefined' && backendEvents.readyState === EventSource.CLOSED) {
+          try { backendEvents.close() } catch (_) { /* ignore */ }
+          backendEvents = null
+          ensureBackendEvents()
+        }
+        drainAllInboxes().catch(() => {})
+      }, 60000)
+      inboxPollTimer?.unref?.()
+    }
   }
   const bootTimer = setTimeout(() => {
     boot().catch(err => ctx.logger?.warn?.(`[napcat] 启动同步失败：${err?.message || err}`))
