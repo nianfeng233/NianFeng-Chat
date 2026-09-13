@@ -34,8 +34,10 @@ built as cordis plugins. The points below are implemented today in code, with pa
   `(conversation_id, seq)`; environments without `node:sqlite` fall back to JSON persistence.
   `read_messages` can then recall history by keyword, exact `seq`, relative sequence range, time range,
   and cursor pagination.
-- The default context budget is only `chat.contextTokens = 4096`, but memory itself is not capped at
-  4096: only recent rounds are injected, and older history is retrieved on demand.
+- Input context is not truncated by tokens by default (`chat.contextTokens = 0`; a positive value acts as
+  a safety cap, and if the model defines a context length the budget becomes `context length - output
+  reserve`). Only recent rounds are injected and older history is retrieved on demand. Output is limited
+  by `chat.maxOutputTokens` (default 8192), overridable per model with `max_tokens`.
 - Long documents go into `document-service`: each document can hold up to 2M characters, while chat
   records keep only `doc_id + title + summary`. `read_document` reads it in chunks 100–4000 tokens at a
   time and returns `next_offset` so the model can continue to the end.

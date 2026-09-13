@@ -476,6 +476,43 @@ async function main() {
     check('没有 index.mjs 的压缩包被拒绝', noIndex.status === 400, JSON.stringify(noIndex.data))
 
 
+
+    console.log('\n⑨ /api/chat 请求体上限与原样报错')
+    await fetch(backend.url + '/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ network: { chatBodyLimitMB: 4 } }),
+    })
+    const bigChatBody = JSON.stringify({ provider: 'nope', model: 'nope', messages: [{ role: 'user', content: 'x'.repeat(5 * 1024 * 1024) }] })
+    const bigChatRes = await fetch(backend.url + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: bigChatBody,
+    })
+    const bigChatJson = await bigChatRes.json().catch(() => null)
+    check(
+      'chat 超限返回 413 且原样带出限制说明',
+      bigChatRes.status === 413 && String(bigChatJson?.error?.message || '').includes('请求体超过 4MB 限制'),
+      JSON.stringify({ status: bigChatRes.status, message: bigChatJson?.error?.message }),
+    )
+    await fetch(backend.url + '/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ network: { chatBodyLimitMB: 32 } }),
+    })
+    const midChatBody = JSON.stringify({ provider: 'nope', model: 'nope', messages: [{ role: 'user', content: 'y'.repeat(3 * 1024 * 1024) }] })
+    const midChatRes = await fetch(backend.url + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: midChatBody,
+    })
+    const midChatText = await midChatRes.text().catch(() => '')
+    check(
+      '3MB 图片级请求体已可进入模型链路（不再 413）',
+      midChatRes.status === 200 && midChatText.includes('event:'),
+      JSON.stringify({ status: midChatRes.status, head: midChatText.slice(0, 120) }),
+    )
+
   } finally {
     await backend.close().catch(() => {})
     await rm(TEMP, { recursive: true, force: true }).catch(() => {})

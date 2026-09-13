@@ -66,7 +66,8 @@ export function apply(ctx) {
         data = { raw: text }
       }
       if (!res.ok) {
-        const message = data?.error?.message || data?.message || `HTTP ${res.status} ${res.statusText}`
+        const detail = String(data?.error?.message || data?.message || data?.raw || '').trim()
+        const message = detail ? detail.slice(0, 1200) : `HTTP ${res.status} ${res.statusText}`
         const err = new Error(message)
         err.status = res.status
         throw err
@@ -192,13 +193,24 @@ export function apply(ctx) {
         })
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '')
-          let message = `HTTP ${res.status}`
+          let detail = ''
           try {
-            message = JSON.parse(text)?.error?.message || message
+            const parsed = text ? JSON.parse(text) : null
+            detail = String(parsed?.error?.message || parsed?.message || '').trim()
           } catch (_) {
-            /* ignore */
+            // 非 JSON（反向代理 HTML / 网关错误页）：原样保留响应正文，
+            // 不要只抛 “HTTP 502”，否则渠道里只能看到没有诊断信息的泛化错误。
+            detail = String(text || '').trim()
           }
-          throw new Error(message)
+          const statusText = res.statusText ? ` ${res.statusText}` : ''
+          const message = detail
+            ? detail.slice(0, 1200)
+            : res.body
+              ? `HTTP ${res.status}${statusText}`
+              : `HTTP ${res.status}${statusText}：响应没有可读取的正文`
+          const error = new Error(message)
+          error.status = res.status
+          throw error
         }
 
         const reader = res.body.getReader()

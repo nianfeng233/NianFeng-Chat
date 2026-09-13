@@ -190,7 +190,7 @@ export function apply(ctx) {
       })
       .filter(Boolean)
     if (!text.trim() && !images.length) return null
-    const perMessage = Math.max(0, Number(config.get('chat.imagesPerMessage', 4)) || 0)
+    const perMessage = Math.max(0, Number(config.get('chat.imagesPerMessage', 2)) || 0)
     const selected = images.slice(0, perMessage)
     const payload = {
       meta: {
@@ -232,12 +232,15 @@ export function apply(ctx) {
   }
 
   /**
-   * 图片预算保险：从最新往旧保留图片 part，超出预算的替换为 “[图片]” 文本，
-   * 避免一次涌入过多图片把上下文撑爆。当前用户消息在最后，因此优先保留。
+   * 图片预算保险：整次请求只保留“最近 N 张 + 总字节预算内”的原图，
+   * 其余图片 part 全部降级为 “[图片]” 文本占位。当前用户消息在最后，因此优先保留。
+   * 模型需要看更早 / 被省略的图时，必须显式调用 read_messages(include_images)。
    */
   const applyImageBudget = history => {
-    const maxImages = Math.max(0, Number(config.get('chat.imagesPerRequest', 4)) || 0)
+    const maxImages = Math.max(0, Number(config.get('chat.imagesPerRequest', 2)) || 0)
+    const maxBytes = Math.max(256 * 1024, Number(config.get('chat.imageBytesPerRequest', 8 * 1024 * 1024)) || 8 * 1024 * 1024)
     let remaining = maxImages
+    let remainingBytes = maxBytes
     for (let index = history.length - 1; index >= 0; index--) {
       const content = history[index]?.content
       if (!Array.isArray(content)) continue
@@ -250,9 +253,11 @@ export function apply(ctx) {
           next.push(part)
           continue
         }
-        if (kept < remaining) {
+        const url = String(part?.image_url?.url || '')
+        if (kept < remaining && url.length <= remainingBytes) {
           next.push(part)
           kept += 1
+          remainingBytes -= url.length
         } else {
           next.push({ type: 'text', text: '[图片]' })
         }
@@ -310,8 +315,26 @@ export function apply(ctx) {
         canCrossRead: policy?.crossReadable === true,
         canCrossSend: policy?.crossSendable === true,
       })
-      const budget = Math.max(512, Number(config.get('chat.contextTokens', 4096)) || 4096)
-      let available = Math.max(256, budget - estimateTokens(system) - 320)
+      // 输入预算：默认不按 token 截断（0 = 交给模型上下文窗口 + 轮数控制）。
+      // 如果所选模型在设置里填了「上下文长度」，就用它减去输出预留做自动安全上限。
+      const configuredInput = Math.max(0, Number(config.get('chat.contextTokens', 0)) || 0)
+      const outputReserve = Math.max(0, Number(config.get('chat.maxOutputTokens', 8192)) || 0)
+      const modelContextLength = (() => {
+        try {
+          const active = ctx.registry.get('model-registry')?.active?.()
+          return Math.max(0, Number(active?.model?.params?.contextLength) || 0)
+        } catch (_) {
+          return 0
+        }
+      })()
+      const effectiveInput =
+        configuredInput > 0
+          ? configuredInput
+          : modelContextLength > 0
+            ? Math.max(1024, modelContextLength - outputReserve)
+            : 0
+      const budget = effectiveInput > 0 ? effectiveInput : 0
+      let available = budget > 0 ? Math.max(256, budget - estimateTokens(system) - 320) : Number.MAX_SAFE_INTEGER
 
       // 当前渠道有工具协议轨迹时，用 assistant.tool_calls + role=tool 的真实历史；
       // 其它渠道仍用可见消息的工作记忆补齐。

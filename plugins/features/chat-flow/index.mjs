@@ -242,6 +242,9 @@ export function apply(ctx) {
     if (Number.isFinite(temperature)) options.temperature = temperature
     const reasoningEffort = config.get('chat.reasoningEffort', 'off')
     if (['off', 'low', 'high', 'max'].includes(reasoningEffort)) options.reasoningEffort = reasoningEffort
+    // 输出上限：全局默认值；模型设置里单独填了 max_tokens 时以模型级为准。
+    const maxOutputTokens = Math.max(0, Number(config.get('chat.maxOutputTokens', 8192)) || 0)
+    if (maxOutputTokens > 0) options.maxTokens = maxOutputTokens
     const conversationModel = conv.meta?.model
     if (conversationModel) options.model = conversationModel
     // 全局 temperature 是默认值：用户在模型列表里单独设置过 temperature 时，

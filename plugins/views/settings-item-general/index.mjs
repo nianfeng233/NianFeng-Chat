@@ -76,8 +76,10 @@ export function apply(ctx) {
             input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +
           row('最大工具轮次', '一轮回复内最多执行多少次“模型 → 工具 → 模型”循环（1-20）',
             input('chat.maxToolRounds', config.get('chat.maxToolRounds', 10), { type: 'number', width: 90 })) +
-          row('上下文 token 预算', '工作记忆 + 渠道记忆的粗略 token 上限，超出时整轮丢弃最旧内容',
-            input('chat.contextTokens', config.get('chat.contextTokens', 4096), { type: 'number', width: 110 })) +
+          row('输入上下文上限', '0 = 不按 token 截断（推荐），只受工作 / 渠道记忆轮数约束；填正数时才按预算丢弃最旧内容；模型参数里填了“上下文长度”时会自动用它减去输出预留',
+            input('chat.contextTokens', config.get('chat.contextTokens', 0), { type: 'number', width: 110 })) +
+          row('单次输出上限', '每次回复最多生成的 token 数，默认 8192；模型设置里单独填了 max_tokens 时以模型级为准',
+            input('chat.maxOutputTokens', config.get('chat.maxOutputTokens', 8192), { type: 'number', width: 110 })) +
           row('工作记忆轮数', '角色级普通私聊记忆保留轮数',
             input('chat.memoryRounds', config.get('chat.memoryRounds', 5), { type: 'number', width: 80 })) +
           row('渠道记忆轮数', '当前渠道最近消息保留轮数',

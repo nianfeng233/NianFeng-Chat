@@ -269,6 +269,7 @@ async function main() {
 
   check('模型请求带上了工具定义', Array.isArray(captured?.options?.tools) && captured.options.tools.some(tool => tool.function?.name === 'chat_send'), JSON.stringify(captured?.options?.tools?.map(tool => tool.function?.name)))
   check('system 段落包含人设与工具规则', captured?.messages?.[0]?.role === 'system' && captured.messages[0].content.includes('冒烟测试角色') && captured.messages[0].content.includes('chat_send'), captured?.messages?.[0]?.content?.slice(0, 80))
+  check('全局输出 token 上限已传入模型请求', Number(captured?.options?.maxTokens) === 8192, JSON.stringify({ maxTokens: captured?.options?.maxTokens }))
   const wrappedUser = captured?.messages?.find(message => message.role === 'user')
   check('用户内容按 untrusted 紧凑 JSON 包装', typeof wrappedUser?.content === 'string' && wrappedUser.content.includes('"trust":"untrusted"'), String(wrappedUser?.content || '').slice(0, 120))
 
@@ -386,7 +387,11 @@ async function main() {
       builtUserPayload?.content?.trust === 'untrusted',
     JSON.stringify(builtUserPayload?.meta || null),
   )
-  check('context-builder 受 token 预算约束', built.stats.memoryTokens <= built.stats.budget, JSON.stringify(built.stats))
+  check(
+    'context-builder 输入预算语义正确（默认 0=不限；正数时受约束）',
+    built.stats.budget === 0 || built.stats.memoryTokens <= built.stats.budget,
+    JSON.stringify(built.stats),
+  )
 
   console.log('\n⑦b 渠道设置里勾选跨渠道权限：来源侧策略直接生效')
   sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossReadable: true, sensitiveConfirm: false } })
@@ -810,6 +815,37 @@ async function main() {
   )
   const builtRoles = builtContext.messages.map(message => message.role).join(',')
   check('构建上下文顺序与聊天记录一致', builtRoles === 'system,user,assistant,user,assistant' || builtRoles === 'system,user,assistant,user', builtRoles)
+
+
+  console.log('\n⑩h 图片自动上下文预算（只保留最近 2 张）')
+  const convImg = sessions.create({ name: '图片预算测试', meta: { roleId: 'role-img' } })
+  sessions.activate(convImg.id)
+  const channelImg = store.channelForConversation(convImg.id)
+  const imgData = 'data:image/png;base64,' + 'A'.repeat(200000)
+  for (let i = 0; i < 5; i++) {
+    store.append(convImg.id, {
+      role: 'user',
+      content: '第' + (i + 1) + '张图',
+      sender_id: 'user-img',
+      sender_name: '图片用户',
+      meta: { images: [{ dataUrl: imgData, mime: 'image/png' }] },
+    })
+  }
+  check('默认输入上下文不再按 token 截断', config.get('chat.contextTokens', -1) === 0, JSON.stringify({ contextTokens: config.get('chat.contextTokens', -1) }))
+  check('默认单次输出上限为 8192', Number(config.get('chat.maxOutputTokens', 0)) === 8192, JSON.stringify({ maxOutputTokens: config.get('chat.maxOutputTokens', 0) }))
+  const builtImg = builder.build({ conversationId: convImg.id, roleId: 'role-img', persona: '', channelId: channelImg.channelId })
+  const imgParts = builtImg.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const imageParts = imgParts.filter(part => part?.type === 'image_url')
+  const placeholderCount = imgParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check('自动上下文最多保留最近 2 张原图', imageParts.length === 2, JSON.stringify({ images: imageParts.length, placeholders: placeholderCount }))
+  check('其余图片全部降级为 [图片] 占位', placeholderCount >= 3, JSON.stringify({ placeholders: placeholderCount }))
+  config.set('chat.imageBytesPerRequest', 300000)
+  const builtImgTiny = builder.build({ conversationId: convImg.id, roleId: 'role-img', persona: '', channelId: channelImg.channelId })
+  const tinyParts = builtImgTiny.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const tinyImages = tinyParts.filter(part => part?.type === 'image_url')
+  const tinyPlaceholders = tinyParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check('图片总字节预算超限时只保留装得下的最近图片', tinyImages.length === 1 && tinyPlaceholders >= 4, JSON.stringify({ images: tinyImages.length, placeholders: tinyPlaceholders }))
+  config.set('chat.imageBytesPerRequest', 8 * 1024 * 1024)
 
   console.log('\n⑩i 工具协议轨迹进入下一轮上下文')
   registry.select('mock/mock-chat')

@@ -1705,7 +1705,13 @@ function normalizeError(err) {
     return `无法连接远端服务${code ? `（${code}）` : ''}：${detail}`
   }
   const status = err.status || err.statusCode
-  return status ? `HTTP ${status} · ${err.message}` : err.message || String(err)
+  if (status) {
+    const text = String(err.message || '').trim()
+    if (!text) return `HTTP ${status}`
+    // 上游错误正文优先原样返回；只有消息里完全没有状态码时才补前缀。
+    return /^\d{3}\b/.test(text) ? text : `HTTP ${status} · ${text}`
+  }
+  return err.message || String(err)
 }
 
 /**
@@ -1725,7 +1731,7 @@ async function request(ctx, url, { method = 'GET', headers = {}, body, signal, t
       : await fetch(url, { method, headers, body, signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 200) : ''}`)
+      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 600) : ''}`)
       err.status = res.status
       throw err
     }

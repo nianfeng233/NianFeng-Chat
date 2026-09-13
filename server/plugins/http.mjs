@@ -229,17 +229,35 @@ export function apply(ctx, config = {}) {
   const readBody = (req, maxBytes = 2 * 1024 * 1024) =>
     new Promise((resolveBody, reject) => {
       let size = 0
+      let settled = false
+      let oversizeError = null
       const chunks = []
+      const finishReject = error => {
+        if (settled) return
+        settled = true
+        reject(error)
+      }
       req.on('data', chunk => {
+        if (settled) return
         size += chunk.length
         if (size > maxBytes) {
-          reject(Object.assign(new Error(`请求体超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`), { status: 413 }))
-          req.destroy()
+          // 超限时不要 destroy：继续把请求体读掉（最多 4 倍上限），
+          // 这样 catch 里写回的 413 JSON 能完整到达客户端，而不是被连接重置成 502。
+          if (!oversizeError) {
+            oversizeError = Object.assign(new Error(`请求体超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`), { status: 413 })
+          }
+          if (size > maxBytes * 4) {
+            finishReject(oversizeError)
+            req.destroy()
+          }
           return
         }
         chunks.push(chunk)
       })
       req.on('end', () => {
+        if (oversizeError) return finishReject(oversizeError)
+        if (settled) return
+        settled = true
         if (!chunks.length) return resolveBody({})
         try {
           resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8')))
@@ -247,11 +265,23 @@ export function apply(ctx, config = {}) {
           reject(Object.assign(new Error('请求体不是合法 JSON'), { status: 400 }))
         }
       })
-      req.on('error', reject)
+      req.on('error', error => finishReject(error))
+      req.on('aborted', () => finishReject(Object.assign(new Error('请求已中断'), { status: 400 })))
     })
 
   /** 插件上传是 base64 JSON，单独放宽到 48MB（解码后的 zip 仍限制 32MB）。 */
   const readUploadBody = req => readBody(req, 48 * 1024 * 1024)
+
+  /**
+   * /api/chat 请求体上限：群聊上下文可能内联图片 data URL，2MB 很容易被顶爆。
+   * 默认 32MB，可用 network.chatBodyLimitMB 调整（4–128MB）。
+   * 图片本身另有“只保留最近 2 张 + 总字节预算”的约束，见 context-builder。
+   */
+  const chatBodyLimit = () => {
+    const configured = Number(settings.get()?.network?.chatBodyLimitMB)
+    const mb = Number.isFinite(configured) && configured > 0 ? configured : 32
+    return Math.min(128, Math.max(4, mb)) * 1024 * 1024
+  }
 
   const sse = (res, handler) => {
     res.writeHead(200, {
@@ -547,7 +577,7 @@ export function apply(ctx, config = {}) {
   /* ---------------- 聊天（SSE） ---------------- */
 
   route('POST', '/api/chat', async (req, res) => {
-    const body = await readBody(req)
+    const body = await readBody(req, chatBodyLimit())
     const { provider, model, messages = [], temperature, maxTokens, reasoningEffort, extraBody: extraBodyPatch, tools, toolChoice } = body
     if (!provider) return sendError(res, 400, '缺少 provider 参数')
 

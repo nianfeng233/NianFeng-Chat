@@ -79,7 +79,7 @@ export function apply(ctx) {
             model: model.id,
             messages,
             temperature,
-            maxTokens: options?.maxTokens ?? params.maxTokens,
+            maxTokens: params.maxTokens !== undefined ? params.maxTokens : options?.maxTokens,
             reasoningEffort: options?.reasoningEffort ?? params.reasoningEffort,
             extraBody: options?.extraBody ?? params.extraBody,
             tools: options?.tools,

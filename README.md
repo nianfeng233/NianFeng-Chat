@@ -28,8 +28,10 @@
 - 后端默认用 SQLite（`user_data/chat.db`）逐条保存消息，开启 WAL，并为 `(conversation_id, seq)` 建索引；
   聊天记录不会因为模型上下文窗口有限而丢失。没有 `node:sqlite` 的环境会自动回退到 JSON 持久化。
   `read_messages` 再通过关键词、精确 `seq`、相对序号、时间段和 `cursor` 分页召回历史。
-- 上下文预算默认只有 `chat.contextTokens = 4096`，但**记忆本身没有 4096 上限**：当前会话 /
-  角色工作记忆只取最近几轮，更早历史由模型主动检索。
+- 输入上下文默认不按 token 截断（`chat.contextTokens = 0`，填正数时才作为安全上限；模型设置里填了
+  “上下文长度”时会自动按 `上下文长度 - 输出预留` 约束），当前会话 / 角色工作记忆只按最近几轮进入
+  prompt，更早历史由模型主动检索；输出侧由 `chat.maxOutputTokens`（默认 8192）限制，模型级
+  `max_tokens` 可覆盖。
 - 长资料进入 `document-service`：单份最多 2M 字符，聊天记录里只留 `doc_id + 标题 + 摘要`；
   `read_document` 每次按 `chat.readTokens`（默认 1500，单次最多 4000）分段读取，返回 `next_offset`
   可以连续读到结尾。

@@ -114,7 +114,8 @@ const DEFAULTS = {
   'chat.toolsEnabled': true,
   'chat.toolChoice': 'required',
   'chat.maxToolRounds': 10,
-  'chat.contextTokens': 4096,
+  'chat.contextTokens': 0,
+  'chat.maxOutputTokens': 8192,
   'chat.memoryRounds': 5,
   'chat.channelRounds': 5,
   'chat.readTokens': 1500,
@@ -122,6 +123,8 @@ const DEFAULTS = {
   'chat.imagesPerRequest': 2,
   'chat.imagesPerMessage': 2,
   'chat.imageTokens': 800,
+  // 自动上下文内联图片的总字节预算（data URL 字符数近似）：超过后降级为 [图片] 占位，防止 /api/chat 请求体爆掉
+  'chat.imageBytesPerRequest': 8 * 1024 * 1024,
   'chat.confirmSensitive': true,
   'chat.simulateTyping': true,
   'chat.typingMinMs': 500,
@@ -177,6 +180,35 @@ export function apply(ctx) {
   const persist = () => storage.set(NS, KEY, data)
   const persistMeta = () => storage.set(NS, META_KEY, meta)
 
+  /**
+   * 旧默认值一次性迁移（只迁移“没有在设置里显式改过”的键）：
+   *   - contextTokens 4096 会把输入上下文卡得很小（工具定义一多就没历史了），
+   *     新默认 0 = 不做本地 token 截断；
+   *   - 自动上下文图片旧默认 4 张，新默认只保留最近 2 张，其余用 [图片] 占位。
+   */
+  const LEGACY_DEFAULT_MIGRATIONS = [
+    ['chat.contextTokens', 4096, 0],
+    ['chat.imagesPerRequest', 4, 2],
+    ['chat.imagesPerMessage', 4, 2],
+  ]
+  const migrateLegacyDefaults = () => {
+    const changed = []
+    for (const [key, oldValue, newValue] of LEGACY_DEFAULT_MIGRATIONS) {
+      if (!hasPath(data, key)) continue
+      if (getPath(data, key) !== oldValue) continue
+      if (meta[key]) continue
+      setPath(data, key, newValue)
+      changed.push({ key, value: newValue })
+    }
+    if (changed.length) {
+      persist()
+      for (const change of changed) ctx.emit('config:changed', change)
+      ctx.logger.debug(`已迁移旧默认值 ${changed.map(item => item.key).join('、')}`)
+    }
+    return changed.length
+  }
+  migrateLegacyDefaults()
+
   const syncablePreferences = () => pruneLocalOnlyPreferences(structuredClone(data))
   const syncableMeta = () => {
     const out = {}
@@ -216,7 +248,8 @@ export function apply(ctx) {
     const metaChanged = !deepEqual(merged.meta, meta)
     data = merged.data
     meta = merged.meta
-    if (merged.changes.length || metaChanged) {
+    const migrated = migrateLegacyDefaults()
+    if (merged.changes.length || metaChanged || migrated) {
       persist()
       persistMeta()
     }
