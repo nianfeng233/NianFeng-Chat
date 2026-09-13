@@ -1431,7 +1431,7 @@ export function apply(ctx) {
       name: 'napcat_group_member',
       definition: {
         description:
-          'NapCat 群成员查询。search：按群名片 / 昵称 / QQ号 精确或模糊查找，返回 QQ 号、角色、头衔、等级等资料；info：按精确 QQ 号或群内唯一名字拉取资料，fields=all 可全拉。',
+          'NapCat 群成员查询。search：按群名片 / 昵称 / QQ号 精确或模糊查找，返回 QQ 号、角色、头衔、等级等资料；info：按精确 QQ 号或群内唯一名字拉取资料，fields=all 可全拉。备注：某些时候说的“开盒”一般指这个工具，仅作为玩笑。除非确认是真的开盒话题，否则禁止以说教式回复。',
         parameters: {
           type: 'object',
           properties: {

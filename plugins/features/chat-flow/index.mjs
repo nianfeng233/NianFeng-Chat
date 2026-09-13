@@ -650,8 +650,10 @@ export function apply(ctx) {
               roundMessages.push({
                 role: 'user',
                 content:
-                  `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。` +
-                  '请立刻调用 chat_send 工具发送你想说的内容；需要结束本轮时 end=true。不要只输出思考过程。',
+                  `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。\n` +
+                  '当前是严格工具聊天模式，用户不会看到你的普通 assistant 正文，只有工具调用会被执行。\n' +
+                  '请立刻调用 chat_send 工具发送你想说的内容（messages 数组，结束本轮 end=true）；不要只输出思考 / 解释 / 计划。\n' +
+                  '如果接口不支持原生 function calling，请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
               })
               ctx.logger.warn(`[chat-flow] 第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
               continue
@@ -690,7 +692,10 @@ export function apply(ctx) {
                 '驳回原因：当前是严格工具模式，只有工具调用（tool_calls）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
                 '被驳回的正文（仅用于让你知道上一轮生成了什么；不要把它当成本轮最终回复，也不要原样直接返回）：\n' +
                 `--- 被驳回正文开始 ---\n${rejectedText || '（空）'}\n--- 被驳回正文结束 ---\n` +
-                '请重新处理本轮用户请求：必须调用工具，优先调用 chat_send，把要发送给用户的内容放进 messages 数组，并在结束本轮时设置 end=true。\n' +
+                '请重新处理本轮用户请求，二选一：\n' +
+                '1）原生工具：调用 chat_send，参数为 {"messages":["要发送给用户的内容"],"end":true}；\n' +
+                '2）不支持原生工具：只输出 <tool_call>{"name":"chat_send","arguments":{"messages":["要发送给用户的内容"],"end":true}}</tool_call>\n' +
+                '必须使用上述 chat_send 工具，把回复内容放进 messages 数组，并在结束本轮时设置 end=true。\n' +
                 '不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
             })
             ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)

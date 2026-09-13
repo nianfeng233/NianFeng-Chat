@@ -29,6 +29,36 @@ export const optionalDepends = {
 export const inject = ['chat-store', 'config', 'tool-registry?']
 export const provides = [{ name: 'context-builder', type: 'singleton' }]
 
+/** 固定追加在 system prompt 最底部的「聊天模式说明」，只列当前真实注册的工具。 */
+const CHAT_MODE_TOOL_HINTS = {
+  chat_send: '发送聊天消息（所有面向用户的普通回复都必须通过它发送；messages 数组，结束本轮 end=true）',
+  send_document: '发送长资料 / 文件（原文进资料库，聊天里只留引用）',
+  read_document: '读取资料原文',
+  read_messages: '读取历史聊天记录 / 图片',
+  napcat_group_send: '群内 @成员 / @全体 / 发送群消息',
+  napcat_group_member: '群成员资料查询（search / info）',
+  napcat_group_guard: '群管助手：黑名单 / 入群审核 / 不活跃清理',
+  napcat_group_manage: '群管理：禁言 / 踢人 / 群名片 / 头衔',
+  napcat_group_notice: '群公告读取 / 发布 / 删除',
+  napcat_group_info: '群资料 / 禁言列表 / 待处理入群申请',
+}
+
+const chatModeGuide = (tools = [], { requireToolCall = true } = {}) => {
+  const names = new Set(tools.map(tool => String(tool?.name || '')))
+  const lines = [
+    '【聊天模式说明】',
+    requireToolCall
+      ? '当前是严格工具聊天模式：你直接输出的普通 assistant 正文不会发送给用户，也不会被当作回复；只有真正调用工具才会产生聊天效果。'
+      : '当前是兼容工具聊天模式：优先调用工具；未调用工具时正文可能作为兜底发送。',
+    '发送聊天消息与资料时必须使用对应工具，把内容放进工具参数，不要直接输出正文：',
+  ]
+  for (const [name, hint] of Object.entries(CHAT_MODE_TOOL_HINTS)) {
+    if (names.has(name)) lines.push(`- ${name}：${hint}`)
+  }
+  lines.push('聊天回复优先 chat_send；长文 / 代码 / 文件用 send_document；需要结束本轮时按工具约定设置 end=true。')
+  return lines.join('\n')
+}
+
 const TOOL_RULES = [
   '你只能通过工具与用户聊天，不能直接输出面向用户的正文；普通 assistant 正文不会被当作聊天消息。需要回复时必须调用 chat_send。',
   '协议记忆：历史里 role=assistant 且带 tool_calls 的，才是你过去真正调用过的工具；role=tool 是工具返回的调用结果。没有 tool_calls 的普通 assistant 正文只是历史展示内容，不代表本轮回复方式，更不能据此认为应该继续输出 assistant 正文。',
@@ -157,6 +187,8 @@ export function apply(ctx) {
         )
       }
     }
+    // 放在 system prompt 最底部，形成“最近提醒”，降低模型直接输出 assistant 正文的概率。
+    lines.push(chatModeGuide(tools, { requireToolCall: config.get('chat.requireToolCall', true) !== false }))
     return lines.filter(Boolean).join('\n\n')
   }
 
