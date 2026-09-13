@@ -15,7 +15,17 @@ export const description = '视觉内容 · 会话标题、模型运行状态与
 export const author = '念风内核'
 export const icon = '📌'
 export const core = true
-export const depends = { 'chat-view': '^1.0.0' }
+export const depends = {
+  'chat-view': '^1.0.0',
+  'context-menu-host': '>=1.0.0',
+  'event-bus': '*',
+  'i18n': '>=2.0.0',
+  'modal-host': '>=1.0.0',
+  'session-service': '>=2.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'session-service', 'event-bus', 'context-menu', 'toast', 'modal', 'i18n']
 
 import { useStyle } from '../../../src/util/style.mjs'

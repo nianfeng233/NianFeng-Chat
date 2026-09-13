@@ -18,7 +18,12 @@ export const description = '业务服务 · 长资料原文存储与分段读取
 export const author = '念风内核'
 export const icon = '📚'
 export const core = true
-export const depends = { storage: '^1.0.0' }
+export const depends = {
+  'config': '>=1.1.0',
+  'event-bus': '*',
+  'storage': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['storage', 'event-bus', 'config']
 export const provides = [{ name: 'document-service', type: 'singleton' }]
 

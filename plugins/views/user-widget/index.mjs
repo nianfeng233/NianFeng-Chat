@@ -20,7 +20,12 @@ export const description = '顶层栏内容 · 用户头像（可更换）与可
 export const author = '念风内核'
 export const icon = '🙋'
 export const core = true
-export const depends = { titlebar: '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'slots': '*',
+  'titlebar': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'config']
 
 import {

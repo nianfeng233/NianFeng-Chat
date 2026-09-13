@@ -14,7 +14,12 @@ export const description = '设置页 · 快捷键列表与冲突提示。'
 export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'keyboard-shortcuts': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'keyboard-shortcuts': '^1.0.0',
+  'settings-container': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'shortcuts', 'event-bus']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'

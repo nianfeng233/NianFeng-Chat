@@ -15,7 +15,11 @@ export const description = '侧边栏内容 · 用户插件图标挂载点（rai
 export const author = '念风内核'
 export const icon = '🪝'
 export const core = true
-export const depends = { rail: '^1.0.0' }
+export const depends = {
+  'rail': '^1.0.0',
+  'slots': '*',
+}
+export const optionalDepends = {}
 export const inject = ['slots']
 export const provides = [{ name: 'rail-plugin-slot', type: 'singleton' }]
 

@@ -15,7 +15,11 @@ export const description = '内核层 · 扫描插件目录、读取 manifest、
 export const author = '念风内核'
 export const icon = '🧩'
 export const core = true
-export const depends = { 'event-bus': '^1.0.0', 'dependency-resolver': '^1.0.0' }
+export const depends = {
+  'dependency-resolver': '=1.0.0',
+  'event-bus': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'plugin-loader', type: 'singleton' }]
 

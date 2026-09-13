@@ -56,6 +56,12 @@ export const APP_SHELL_CSS = `
   }
   body.resizing-v .body{ transition:none; }
 
+  /* 全宽视图（运行日志等）：隐藏左列表与拖拽条，让右主面板独占。 */
+  .body.full-view{grid-template-columns:1fr;}
+  .body.full-view [data-slot="app:list"],
+  .body.full-view .resizer{display:none !important;}
+  .body.full-view .content{padding-left:10px;}
+
   .glass{
     background:rgba(var(--glass-rgb), var(--glass-alpha, .55));
     -webkit-backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturate, 150%)) brightness(var(--glass-brightness, 100%));

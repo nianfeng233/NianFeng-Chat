@@ -15,6 +15,8 @@ export const description = '内核层 · 插件间通信的基础设施，提供
 export const author = '念风内核'
 export const icon = '⚡'
 export const core = true
+export const depends = {}
+export const optionalDepends = {}
 export const provides = [{ name: 'event-bus', type: 'singleton' }]
 
 export function apply(ctx) {

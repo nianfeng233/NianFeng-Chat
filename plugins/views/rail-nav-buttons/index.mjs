@@ -15,7 +15,13 @@ export const description = '侧边栏内容 · 会话 / 渠道 / 设置切换。
 export const author = '念风内核'
 export const icon = '🧭'
 export const core = true
-export const depends = { rail: '^1.0.0', 'view-router': '^1.0.0' }
+export const depends = {
+  'keyboard-shortcuts': '>=1.0.0',
+  'rail': '^1.0.0',
+  'slots': '*',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'view-router', 'shortcuts']
 
 import { icons } from '../../../src/util/icons.mjs'
@@ -109,7 +115,10 @@ export function apply(ctx) {
     }
     const onClick = e => {
       if (e.target.closest('[data-action="logs"]')) {
-        ctx.emit('settings:open', { page: 'logs' })
+        ctx.emit('settings:close', null)
+        // 运行日志是独立视图，不再打开设置浮层。
+        if (router.has('logs')) router.switch('logs')
+        else ctx.logger.warn('运行日志视图尚未就绪，请稍后再点一次')
         return
       }
       if (!e.target.closest('[data-action="settings"]')) return
@@ -131,20 +140,28 @@ export function apply(ctx) {
     const offOrder = ctx.on('slot:mounted', ({ slot } = {}) => {
       if (slot === 'rail:bottom') ensureOrder()
     })
-    // settings-view 默认高亮设置按钮；设置页切到 logs 时把高亮移到日志按钮。
+    // settings-view 默认高亮设置按钮；设置页切到旧 logs 路由时兼容高亮日志按钮。
     const off = ctx.on('settings:page-changed', ({ id } = {}) => {
-      setSettingsActive(id === 'logs', id !== 'logs')
+      if (id === 'logs') setSettingsActive(true, false)
     })
     const off2 = ctx.on('settings:opened', () => {
       if (settingsBtn?.classList.contains('active')) setSettingsActive(false, true)
     })
-    const off3 = ctx.on('settings:closed', () => setSettingsActive(false, false))
+    const off3 = ctx.on('settings:closed', () => setSettingsActive(router.active() === 'logs', false))
+    // 独立日志视图 / 其它视图切换时同步侧栏高亮。
+    const syncRailActive = () => {
+      if (document.querySelector('#settingsView.show')) return
+      setSettingsActive(router.active() === 'logs', false)
+    }
+    const offView = ctx.on('view:changed', syncRailActive)
+    syncRailActive()
     return () => {
       container.removeEventListener('click', onClick)
       offOrder()
       off()
       off2()
       off3()
+      offView()
       container.innerHTML = ''
     }
   }, { order: 10 })

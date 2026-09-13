@@ -15,7 +15,16 @@ export const description = '设置页 · 后端连接状态与模型请求超时
 export const author = '念风内核'
 export const icon = '🌐'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'backend-client': '>=1.0.0',
+  'config': '^1.0.0',
+  'event-bus': '*',
+  'modal-host': '>=1.0.0',
+  'permissions': '^1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'api', 'config', 'toast', 'event-bus', 'modal']
 export const permissions = ["network"]
 

@@ -14,7 +14,10 @@ export const description = '可选中背景 · 漂浮渐变光团 · 呼吸式�
 export const author = '念风内核'
 export const icon = '🫧'
 export const core = false
-export const depends = { 'bg-provider': '^1.0.0' }
+export const depends = {
+  'bg-provider': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['bg-provider']
 
 import { useStyle } from '../../../src/util/style.mjs'

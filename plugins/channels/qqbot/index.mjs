@@ -27,10 +27,20 @@ export const author = '念风插件'
 export const icon = '🐧'
 export const core = false
 export const depends = {
-  'channel-base': '^1.1.0',
-  'channel-list': '^1.1.0',
+  'channel-base': '>=1.0.0',
   'channel-detail-host': '^3.0.0',
+  'channel-list': '>=1.0.0',
+  'channel-registry': '>=1.0.0',
+  'config': '>=1.1.0',
+  'event-bus': '*',
   'session-service': '^2.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+  'chat-store': '>=1.0.0',
+  'message-service': '>=1.0.0',
+  'plugin-manager': '>=1.0.0',
 }
 export const inject = [
   'channel-base',

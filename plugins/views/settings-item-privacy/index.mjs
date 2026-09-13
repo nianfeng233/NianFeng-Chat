@@ -17,7 +17,12 @@ export const description = '设置页 · 插件权限预设、按插件授权与
 export const author = '念风内核'
 export const icon = '🛡️'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0' }
+export const depends = {
+  'permissions': '^1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'permissions', 'toast']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'

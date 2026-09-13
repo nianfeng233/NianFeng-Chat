@@ -14,7 +14,11 @@ export const description = '可选中背景 · 用户上传的图片，自动压
 export const author = '念风内核'
 export const icon = '🖼️'
 export const core = false
-export const depends = { 'bg-provider': '^1.0.0' }
+export const depends = {
+  'bg-provider': '^1.0.0',
+  'config': '>=1.1.0',
+}
+export const optionalDepends = {}
 export const inject = ['bg-provider', 'config']
 export const provides = []
 

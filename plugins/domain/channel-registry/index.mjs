@@ -16,7 +16,12 @@ export const description = '业务服务 · 渠道类型注册与渠道实例管
 export const author = '念风内核'
 export const icon = '📡'
 export const core = true
-export const depends = { storage: '^1.0.0' }
+export const depends = {
+  'config': '>=1.1.0',
+  'event-bus': '*',
+  'storage': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['storage', 'event-bus', 'config']
 export const provides = [{ name: 'channel-registry', type: 'singleton' }]
 

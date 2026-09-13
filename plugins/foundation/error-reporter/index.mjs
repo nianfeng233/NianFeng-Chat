@@ -15,6 +15,10 @@ export const description = '基础服务 · 捕获运行期错误，集中记录
 export const author = '念风内核'
 export const icon = '🚨'
 export const core = false
+export const depends = {
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'error-reporter', type: 'singleton' }]
 

@@ -14,7 +14,13 @@ export const description = '设置页 · 在已安装的气泡实现之间切换
 export const author = '念风内核'
 export const icon = '💠'
 export const core = true
-export const depends = { 'settings-item-theme': '^1.0.0', 'message-list': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'message-list': '^1.0.0',
+  'settings-item-theme': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['appearance-page', 'bubble-styles', 'event-bus', 'toast']
 
 import { section, card, row } from '../../../src/util/settings.mjs'

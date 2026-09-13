@@ -19,7 +19,13 @@ export const description = '业务服务 · 会话管理、上下文组装、后
 export const author = '念风内核'
 export const icon = '💬'
 export const core = true
-export const depends = { storage: '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'storage': '^1.0.0',
+}
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+}
 export const inject = ['storage', 'config', 'api?']
 export const provides = [{ name: 'session-service', type: 'singleton' }]
 

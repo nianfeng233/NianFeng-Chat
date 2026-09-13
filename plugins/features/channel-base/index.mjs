@@ -15,7 +15,14 @@ export const description = '业务功能 · 渠道插件公共基座，负责连
 export const author = '念风内核'
 export const icon = '🛠️'
 export const core = true
-export const depends = { 'channel-registry': '^1.0.0', 'session-service': '^2.0.0', 'message-service': '^1.0.0' }
+export const depends = {
+  'channel-registry': '^1.0.0',
+  'event-bus': '*',
+  'message-service': '^1.0.0',
+  'session-service': '^2.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['channel-registry', 'session-service', 'message-service', 'event-bus', 'toast']
 export const provides = [{ name: 'channel-base', type: 'singleton' }]
 

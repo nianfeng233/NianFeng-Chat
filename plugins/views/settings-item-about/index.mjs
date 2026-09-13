@@ -14,7 +14,13 @@ export const description = '设置页 · 版本与插件系统信息。'
 export const author = '念风内核'
 export const icon = 'ℹ️'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'plugin-manager': '^1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'plugin-manager', 'event-bus', 'toast']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'

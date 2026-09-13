@@ -17,9 +17,15 @@ export const description = '模型适配器 · 通过本地后端接入真实模
 export const author = '念风内核'
 export const icon = '🔌'
 export const core = true
-export const depends = { 'model-registry': '^1.0.0', 'backend-client': '^1.0.0' }
+export const depends = {
+  'backend-client': '^1.0.0',
+  'config': '>=1.1.0',
+  'model-registry': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['api', 'model-registry', 'config', 'toast']
-export const provides = []
+export const provides = [{ name: 'model-adapter', type: 'singleton' }]
 
 /**
  * 决定一次模型请求最终使用的 temperature：

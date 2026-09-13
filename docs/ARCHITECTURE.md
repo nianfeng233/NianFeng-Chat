@@ -41,6 +41,7 @@
 | 兼容 ctx | `compat.mjs` | `inject()` 无回调取值；`provide()` 记录 owner/type；`emit()` 支持拦截；`effect()` 统一为"注册清理函数"；`registry`/`events` 只读视图；`logger` 带插件名 |
 | 插件清单与状态 | `app.mjs` | 把 cordis 的 fiber 状态映射为 active / inactive / error / disabled，并给出原因 |
 | 依赖图 | `app.mjs#graph()` | 基于插件名 `depends` 的拓扑排序 + 环检测（服务级依赖交给 cordis） |
+| 依赖健康 | `app.mjs#dependencyReport()/list()` | `depends`（必须，缺失标红并阻止激活）与 `optionalDepends`（可选，缺失标黄）的结构化报告，含版本范围与实际版本 |
 | 启停 | `app.mjs#enable/disable` | 调 `fiber.dispose()` 或重新 `ctx.plugin()`，状态持久化到 config |
 | 语义冲突提示 | `app.mjs#detectSemanticConflicts()` | 插槽拥挤 / 多监听者 / 多实现 |
 | 诊断 | `main.mjs` + `#wind-diag` | 状态、错误、告警，供测试与排障 |

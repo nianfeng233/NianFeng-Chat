@@ -14,8 +14,14 @@ export const description = '视觉框架 · 右主面板玻璃板容器与视图
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'app-shell': '^1.0.0', 'view-router': '^1.0.0' }
-export const inject = ['slots', 'view-router', 'event-bus']
+export const depends = {
+  'app-shell': '^1.0.0',
+  'event-bus': '*',
+  'slots': '*',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {}
+export const inject = ['slots', 'view-router', 'app-shell', 'event-bus']
 export const provides = [{ name: 'right-main-panel', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -23,6 +29,7 @@ import { MAIN_PANEL_CSS } from './style.mjs'
 
 export function apply(ctx) {
   const router = ctx.inject('view-router')
+  const shell = ctx.inject('app-shell')
   const events = ctx.inject('event-bus')
 
   useStyle(ctx, MAIN_PANEL_CSS)
@@ -35,8 +42,13 @@ export function apply(ctx) {
     root = container.querySelector('#mainPanel')
 
     const show = () => {
-      for (const [id, mount] of mounts) mount.wrapper.style.display = id === router.active() ? '' : 'none'
       const active = router.activeView()
+      // 全宽视图（运行日志）隐藏左列表与拖拽条，主面板独占。
+      shell?.setFullView(active?.fullWidth === true)
+      for (const [id, mount] of mounts) {
+        mount.wrapper.style.display = id === router.active() ? '' : 'none'
+        if (id === router.active()) mount.ensureMounted?.()
+      }
       if (active) router.ready(`main:${active.id}`)
     }
 
@@ -49,17 +61,25 @@ export function apply(ctx) {
       wrapper.style.display = id === router.active() ? '' : 'none'
       root.appendChild(wrapper)
       let cleanup = null
-      if (view?.main) {
-        try {
-          cleanup = view.main(wrapper, ctx) || null
-        } catch (err) {
-          ctx.logger.error(`主视图 ${id} 挂载失败`, err)
+      let mounted = false
+      const mountContent = () => {
+        if (mounted) return
+        mounted = true
+        if (view?.main) {
+          try {
+            cleanup = view.main(wrapper, ctx) || null
+          } catch (err) {
+            ctx.logger.error(`主视图 ${id} 挂载失败`, err)
+          }
+        } else {
+          wrapper.innerHTML = `<div class="empty-state"><div class="empty-title">${view?.label || id}</div></div>`
         }
-      } else {
-        wrapper.innerHTML = `<div class="empty-state"><div class="empty-title">${view?.label || id}</div></div>`
       }
+      // 懒挂载视图第一次激活时才 mountContent，避免启动时就建立 SSE / 轮询。
+      if (!view?.lazy || id === router.active()) mountContent()
       mounts.set(id, {
         wrapper,
+        ensureMounted: view?.lazy ? mountContent : null,
         cleanup: () => {
           cleanup?.()
           wrapper.remove()

@@ -15,7 +15,14 @@ export const description = '业务服务 · 插件启停 / 安装 / 卸载与状
 export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
-export const depends = { 'plugin-loader': '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+  'modal-host': '>=1.0.0',
+  'plugin-loader': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['plugin-loader', 'config', 'event-bus', 'toast', 'modal']
 export const provides = [{ name: 'plugin-manager', type: 'singleton' }]
 
@@ -186,6 +193,9 @@ export function apply(ctx) {
         path: record.path,
         depends: meta.depends || {},
         optionalDepends: meta.optionalDepends || {},
+        dependencies: summary?.dependencies || [],
+        dependencyIssues: summary?.dependencyIssues || [],
+        dependencyHealth: summary?.dependencyHealth || 'ok',
         inject: meta.inject || [],
         provides: meta.provides || [],
         slots: meta.slots || [],
@@ -283,6 +293,7 @@ export function apply(ctx) {
       const list = loader.list()
       const active = list.filter(r => r.status === 'active')
       const issues = loader.selfCheck ? loader.selfCheck() : []
+      const dependencies = list.flatMap(r => r.dependencies || [])
       return {
         total: list.length,
         active: active.length,
@@ -291,6 +302,8 @@ export function apply(ctx) {
         errors: list.filter(r => r.status === 'error').length + list.filter(r => r.conflict).length,
         inactive: list.filter(r => r.status === 'inactive').length,
         warnings: issues.filter(i => i.severity !== 'error').length,
+        dependencyErrors: dependencies.filter(d => d.required && d.severity === 'error').length,
+        dependencyWarnings: dependencies.filter(d => !d.required && d.severity === 'warning').length,
         services: ctx.registry.list().length,
         servicesByType: ctx.registry.list().reduce((acc, s) => {
           acc[s.type] = (acc[s.type] || 0) + 1

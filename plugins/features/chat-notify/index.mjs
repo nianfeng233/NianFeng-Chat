@@ -23,10 +23,13 @@ export const author = '念风内核'
 export const icon = '🔔'
 export const core = false
 export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
   'message-service': '^1.0.0',
   'session-service': '^2.0.0',
-  notification: '^2.1.0',
-  config: '^1.0.0',
+}
+export const optionalDepends = {
+  'notification': '^2.1.0',
 }
 export const inject = ['message-service', 'session-service', 'config', 'event-bus', 'notification?']
 export const provides = []

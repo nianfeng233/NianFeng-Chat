@@ -28,14 +28,21 @@ export const author = '念风内核'
 export const icon = '🔀'
 export const core = true
 export const depends = {
-  'session-service': '^2.0.0',
+  'config': '>=1.1.0',
+  'event-bus': '*',
   'message-service': '^1.0.0',
   'model-service': '^1.0.0',
+  'session-service': '^2.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+  'chat-permissions': '^1.0.0',
+  'chat-queue': '^1.0.0',
   'chat-store': '^1.0.0',
   'chat-tools': '^1.0.0',
   'context-builder': '^1.0.0',
-  'chat-queue': '^1.0.0',
-  'chat-permissions': '^1.0.0',
+  'user-identity': '>=1.0.0',
 }
 export const inject = [
   'event-bus',

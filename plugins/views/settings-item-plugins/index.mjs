@@ -20,7 +20,14 @@ export const description = '设置页 · 插件自检、健康状态、启停与
 export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'plugin-manager': '^1.0.0' }
+export const depends = {
+  'backend-client': '>=1.0.0',
+  'modal-host': '>=1.0.0',
+  'plugin-manager': '^1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'plugin-manager', 'toast', 'modal', 'api']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'
@@ -95,38 +102,85 @@ export function apply(ctx) {
       const issuesOf = (id, list) => list.filter(i => i.id === id)
 
       /* ---------------- 状态与样式 ---------------- */
+      const dependenciesOf = plugin => plugin.dependencies || []
+      const dependencyIssuesOf = plugin =>
+        dependenciesOf(plugin).filter(item => item.status !== 'ok' && item.status !== 'pending')
+      const hasRequiredDependencyIssue = plugin =>
+        dependenciesOf(plugin).some(item => item.required && item.severity === 'error')
+      const hasOptionalDependencyIssue = plugin =>
+        dependenciesOf(plugin).some(item => !item.required && item.severity === 'warning')
+
       const severityOf = (plugin, list) => {
         const own = issuesOf(plugin.id, list)
         if (plugin.status === 'error' || plugin.conflict || own.some(i => i.severity === 'error')) return 'error'
-        if (plugin.unavailable && plugin.status === 'active') return 'warning'
-        if (plugin.status === 'inactive' || plugin.warnings?.length || own.length) return 'warning'
+        // 用户主动禁用的插件保持灰色，不因为它的依赖当前未启用而虚报红/黄。
         if (plugin.status === 'disabled') return 'disabled'
+        if (plugin.dependencyHealth === 'error' || hasRequiredDependencyIssue(plugin)) return 'error'
+        if (plugin.unavailable && plugin.status === 'active') return 'warning'
+        if (
+          plugin.status === 'inactive' ||
+          plugin.warnings?.length ||
+          own.length ||
+          plugin.dependencyHealth === 'warning' ||
+          hasOptionalDependencyIssue(plugin)
+        ) {
+          return 'warning'
+        }
         return 'ok'
       }
 
       const tagOf = (plugin, severity) => {
         if (plugin.conflict) return '<span class="plugin-tag error">服务冲突</span>'
+        if (plugin.status === 'disabled') {
+          const tag = STATUS_TAG.disabled
+          return `<span class="plugin-tag ${tag.cls}">${tag.text}</span>`
+        }
+        if (hasRequiredDependencyIssue(plugin)) return '<span class="plugin-tag error">缺少依赖</span>'
         if (severity === 'error') return '<span class="plugin-tag error">加载失败</span>'
         if (plugin.unavailable && plugin.status === 'active') return '<span class="plugin-tag warn">暂不可用</span>'
+        if (hasOptionalDependencyIssue(plugin)) return '<span class="plugin-tag warn">可选依赖提示</span>'
         if (plugin.status === 'inactive') return '<span class="plugin-tag warn">未激活</span>'
         if (severity === 'warning') return '<span class="plugin-tag warn">有提示</span>'
         const tag = STATUS_TAG[plugin.status] || STATUS_TAG.pending
         return `<span class="plugin-tag ${tag.cls}">${tag.text}</span>`
       }
 
+      const depIssueText = item => {
+        const label = item.required
+          ? item.status === 'version-mismatch'
+            ? '依赖版本不匹配'
+            : '缺少依赖'
+          : item.status === 'version-mismatch'
+            ? '可选依赖版本不匹配'
+            : item.status === 'missing'
+              ? '缺少可选依赖'
+              : '可选依赖不可用'
+        return `${item.severity === 'error' ? '✕' : '!'} ${label} ${item.name}@${item.range}：${item.reason || item.status}`
+      }
+
       const reasonHtml = (plugin, list) => {
         const own = issuesOf(plugin.id, list)
+        const depIssues = plugin.status === 'disabled' ? [] : dependencyIssuesOf(plugin)
         const lines = []
         if (plugin.status === 'error') lines.push(`<div class="plugin-issue error">✕ 运行失败：${escapeHtml(plugin.error || plugin.reason || '未知错误')}</div>`)
         else if (plugin.conflict) lines.push(`<div class="plugin-issue error">✕ 冲突：${escapeHtml(plugin.reason || '服务被占用')}</div>`)
-        else if (plugin.status === 'inactive') lines.push(`<div class="plugin-issue warning">! 未激活：${escapeHtml(plugin.reason || '依赖未就绪')}</div>`)
-        else if (plugin.status === 'disabled') lines.push(`<div class="plugin-issue muted">已禁用${plugin.reason ? '：' + escapeHtml(plugin.reason) : ''}</div>`)
+        else if (plugin.status === 'inactive') {
+          const cls = hasRequiredDependencyIssue(plugin) ? 'error' : 'warning'
+          lines.push(`<div class="plugin-issue ${cls}">${cls === 'error' ? '✕' : '!'} 未激活：${escapeHtml(plugin.reason || '依赖未就绪')}</div>`)
+        } else if (plugin.status === 'disabled') {
+          lines.push(`<div class="plugin-issue muted">已禁用${plugin.reason ? '：' + escapeHtml(plugin.reason) : ''}</div>`)
+        }
         if (plugin.unavailable && plugin.status === 'active') {
           lines.push(`<div class="plugin-issue warning">! ${escapeHtml(plugin.unavailableReason || '该插件依赖的官方服务暂未制作，功能暂不可用。')} 禁用后账号页与相关入口会一起隐藏。</div>`)
         }
+        for (const item of depIssues) {
+          const cls = item.severity === 'error' ? 'error' : 'warning'
+          lines.push(`<div class="plugin-issue ${cls}">${escapeHtml(depIssueText(item))}</div>`)
+        }
         for (const issue of own) {
-          if (issue.severity === 'error') continue
-          lines.push(`<div class="plugin-issue ${issue.severity === 'warning' ? 'warning' : 'muted'}">! ${escapeHtml(issue.message)}</div>`)
+          if (issue.message.includes('依赖')) continue
+          const cls = issue.severity === 'error' ? 'error' : issue.severity === 'warning' ? 'warning' : 'muted'
+          lines.push(`<div class="plugin-issue ${cls}">${issue.severity === 'error' ? '✕' : '!'} ${escapeHtml(issue.message)}</div>`)
         }
         for (const warning of plugin.warnings || []) {
           if (own.some(i => i.message === warning.message)) continue
@@ -214,7 +268,9 @@ export function apply(ctx) {
         const external = sortList(list.filter(p => p.external && !p.removed), issueList)
         const third = sortList(list.filter(p => !p.core && !p.external && !p.removed), issueList)
         const core = sortList(list.filter(p => p.core), issueList)
-        const errorCount = list.filter(p => p.status === 'error' || p.conflict).length
+        const errorCount = list.filter(
+          p => p.status === 'error' || p.conflict || (p.status !== 'disabled' && p.dependencyHealth === 'error'),
+        ).length
 
         summaryEl.innerHTML = `
           <span class="plugin-chip">共 <b>${stats.total}</b></span>
@@ -264,6 +320,20 @@ export function apply(ctx) {
         const plugin = manager.describe(id)
         if (!plugin) return
         const owns = ctx.registry.list().filter(s => s.owner === `plugin:${id}`).map(s => `${s.name}(${s.type})`)
+        const dependencyReport = (plugin.dependencies || []).length
+          ? plugin.dependencies
+          : [
+              ...Object.entries(plugin.depends || {}).map(([name, range]) => ({ name, range, required: true, status: 'ok', reason: '' })),
+              ...Object.entries(plugin.optionalDepends || {}).map(([name, range]) => ({ name, range, required: false, status: 'ok', reason: '' })),
+            ]
+        const depDetail = item => {
+          const mark = item.status === 'ok' || item.status === 'pending' ? '✓' : item.severity === 'error' ? '✕' : '!'
+          const version = item.installedVersion ? `（实际 ${item.installedVersion}）` : ''
+          const reason = item.reason ? ` · ${item.reason}` : ''
+          return `${mark} ${item.name}@${item.range}${version}${reason}`
+        }
+        const requiredDeps = dependencyReport.filter(item => item.required)
+        const optionalDeps = dependencyReport.filter(item => !item.required)
         const detail = [
           `id        ${plugin.id}@${plugin.version}`,
           `作者      ${plugin.author || '未标注'}`,
@@ -273,8 +343,8 @@ export function apply(ctx) {
           `来源      ${plugin.external ? '外部插件（可删除文件）' : '内置插件（随版本发布）'}`,
           `路径      ${plugin.path || plugin.dir || '—'}`,
           '',
-          `必须依赖  ${Object.entries(plugin.depends).map(([k, v]) => `${k}@${v}`).join('、') || '无'}`,
-          `可选依赖  ${Object.entries(plugin.optionalDepends || {}).map(([k, v]) => `${k}@${v}`).join('、') || '无'}`,
+          `必须依赖  ${requiredDeps.map(depDetail).join('、') || '无'}`,
+          `可选依赖  ${optionalDeps.map(depDetail).join('、') || '无'}`,
           `注入服务  ${plugin.inject.join('、') || '无'}`,
           `提供声明  ${plugin.provides.map(p => (typeof p === 'string' ? p : p.name)).join('、') || '无'}`,
           `实际持有  ${owns.join('、') || '无'}`,

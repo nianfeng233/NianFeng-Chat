@@ -18,7 +18,16 @@ export const description = '视觉内容 · 跨会话 / 消息 / 渠道 / 插件
 export const author = '念风内核'
 export const icon = '🔍'
 export const core = false
-export const depends = { 'search-service': '^1.0.0', rail: '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'rail': '^1.0.0',
+  'search-service': '^1.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'keyboard-shortcuts': '>=1.0.0',
+}
 export const inject = ['slots', 'search-service', 'event-bus', 'shortcuts?', 'toast']
 export const provides = [{ name: 'global-search', type: 'singleton' }]
 

@@ -15,7 +15,17 @@ export const description = '视觉内容 · 渠道分组列表、拖拽排序与
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'left-list-panel': '^1.0.0', 'channel-registry': '^1.0.0' }
+export const depends = {
+  'channel-registry': '^1.0.0',
+  'context-menu-host': '>=1.0.0',
+  'event-bus': '*',
+  'i18n': '>=2.0.0',
+  'left-list-panel': '^1.0.0',
+  'modal-host': '>=1.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'channel-registry', 'event-bus', 'context-menu', 'modal', 'toast', 'i18n']
 export const provides = [{ name: 'channel-list', type: 'singleton' }]
 

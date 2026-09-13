@@ -19,7 +19,13 @@ export const description = '业务功能 · 工作记忆 + 渠道记忆合并、
 export const author = '念风内核'
 export const icon = '🧩'
 export const core = true
-export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'chat-store': '^1.0.0',
+  'config': '^1.0.0',
+}
+export const optionalDepends = {
+  'tool-registry': '>=1.0.0',
+}
 export const inject = ['chat-store', 'config', 'tool-registry?']
 export const provides = [{ name: 'context-builder', type: 'singleton' }]
 

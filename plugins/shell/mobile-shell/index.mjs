@@ -19,8 +19,18 @@ export const description = '视觉框架 · 手机访问自动切换到单栏界
 export const author = '念风内核'
 export const icon = '📱'
 export const core = true
-export const depends = { 'app-shell': '^1.0.0', 'view-router': '^1.0.0', 'session-service': '^2.0.0' }
+export const depends = {
+  'app-shell': '^1.0.0',
+  'event-bus': '*',
+  'session-service': '^2.0.0',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {
+  'channel-registry': '>=1.0.0',
+  'settings-view': '>=1.0.0',
+}
 export const inject = ['app-shell', 'view-router', 'session-service', 'event-bus', 'channel-registry?', 'settings-view?']
+export const provides = [{ name: 'mobile-shell', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { icons } from '../../../src/util/icons.mjs'

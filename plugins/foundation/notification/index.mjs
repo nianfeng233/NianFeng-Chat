@@ -29,7 +29,11 @@ export const description = '基础服务 · 右下角通知中心（系统通知
 export const author = '念风内核'
 export const icon = '🔔'
 export const core = false
-export const depends = { config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'event-bus']
 export const provides = [{ name: 'notification', type: 'singleton' }]
 

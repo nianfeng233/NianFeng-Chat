@@ -15,6 +15,8 @@ export const description = '基础服务 · 会话与配置的本地持久化（
 export const author = '念风内核'
 export const icon = '💾'
 export const core = true
+export const depends = {}
+export const optionalDepends = {}
 export const inject = []
 export const provides = [{ name: 'storage', type: 'singleton' }]
 

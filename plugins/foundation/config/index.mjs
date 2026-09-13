@@ -17,7 +17,11 @@ export const description = '基础服务 · 用户偏好持久化（本地 + 后
 export const author = '念风内核'
 export const icon = '⚙️'
 export const core = true
-export const depends = { storage: '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'storage': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['storage', 'event-bus']
 export const provides = [{ name: 'config', type: 'singleton' }]
 

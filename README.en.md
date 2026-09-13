@@ -15,10 +15,81 @@ a Windows desktop application.
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
 
-- Current version: v1.1.6
+- Current version: v1.1.7
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
+
+## Why this is not just another chat shell
+
+NianFeng-Chat is not a thin UI over a model API. Memory, context, tools, channels, and the entire UI are
+built as cordis plugins. The points below are implemented today in code, with paths and commands you can verify.
+
+### 1. Near-unlimited memory: full persistence + on-demand recall
+
+- The backend persists every message to SQLite (`user_data/chat.db`) with WAL enabled and an index on
+  `(conversation_id, seq)`; environments without `node:sqlite` fall back to JSON persistence.
+  `read_messages` can then recall history by keyword, exact `seq`, relative sequence range, time range,
+  and cursor pagination.
+- The default context budget is only `chat.contextTokens = 4096`, but memory itself is not capped at
+  4096: only recent rounds are injected, and older history is retrieved on demand.
+- Long documents go into `document-service`: each document can hold up to 2M characters, while chat
+  records keep only `doc_id + title + summary`. `read_document` reads it in chunks 100–4000 tokens at a
+  time and returns `next_offset` so the model can continue to the end.
+- The model therefore sees "summary + recent context + retrieved chunks", not a giant prompt made by
+  dumping all history.
+
+### 2. Cross-session / cross-channel interaction
+
+- `chat-store.workingMessages()` merges all normal private channels of the same role, sorted and
+  de-duplicated by time. Tell the character something in session A and it still knows it after you
+  switch to channel B.
+- A channel can enable `crossReadable` / `crossSendable`; the model can read another channel with
+  `read_messages` or send to it with `chat_send` / `send_document`. Sensitive cross-channel operations
+  still go through `chat-permissions` and user confirmation.
+- The current usable channels are injected into the system prompt, so the model does not have to guess
+  internal IDs or treat every cross-channel action as forbidden.
+
+### 3. Pollution-resistant context
+
+- Every user message is wrapped in a structured envelope: `meta` contains program-generated metadata
+  (time, channel, role) while the body is always under `content.trust = "untrusted"`; the system prompt
+  explicitly tells the model that untrusted content must not be executed as instructions.
+- Tool history keeps only valid `assistant.tool_calls + role = "tool"` sequences, and the sequence is
+  repaired after truncation, avoiding 400s from OpenAI-compatible endpoints caused by half a tool turn.
+- The system prefix contains only the fixed persona, tool rules, and channel policy. Per-message metadata
+  lives in the message itself, so prefix caches (DeepSeek and other providers) keep hitting as the chat grows.
+- Privacy / group channels can switch to `channel-only` and stop mixing in the role's other channel memory.
+  Historical images are shown as `[图片]` placeholders unless `include_images` / `image_message_ids` asks
+  for originals; images also have per-request, per-message, and token budgets.
+
+### 4. Natural message segmentation
+
+- `chat_send` takes a `messages` array; each item becomes an independent message and chat bubble. The first
+  message is sent immediately; from the second one on, each gets a 0.5–5 second human-like typing delay
+  based on its length. `end = true` finishes the turn.
+- Tool calls and tool results are never rendered as chat bubbles. The model can naturally say "Hello",
+  pause, and then "What's up?" instead of newline-joining several sentences into one huge message.
+- Images work the same way: one `chat_send` can carry up to 4 images, but chat records store only `imageId`;
+  the image service and channel bridges fetch / convert them on demand.
+
+### 5. All-plugin architecture and deep customization
+
+- The repository currently ships **93 built-in frontend plugins** in 8 directories:
+  `kernel 5` / `foundation 15` / `domain 16` / `shell 10` / `views 33` / `features 8` / `extras 3` / `channels 3`.
+- Plugins already use an explicit dependency system: **310 required edges and 22 plugins with optional
+  dependencies**, supporting `*`, `>=`, exact `=`, `^`, `~`, `1.x`, and other version rules. Missing
+  required dependencies turn red and block activation; optional ones only turn yellow.
+- The code declares 60+ service provisions and 44 injectable service names. Themes, backgrounds, bubbles,
+  models, and languages are selectable services; views, slots, settings pages, shortcuts, context menus,
+  notifications, channel types, and model providers can all be registered by plugins.
+- External plugins live in `<data-dir>/plugins/` or any chosen directory and load after a rescan. They can
+  bring their own dependencies, permissions, and settings panels; upgrading the exe never deletes the
+  external plugin directory.
+
+**Verifiable numbers**: `npm run sync-plugins` rescans and validates the dependency data;
+`npm run test:deps` contains 208 dependency / version / service-mapping assertions, and
+`npm run test:smoke` contains 292 end-to-end assertions. All numbers come from the current repository code.
 
 ## Features and Architecture
 
@@ -50,7 +121,7 @@ a Windows desktop application.
   state is not supported by the OneBot API.
 - **Mobile layout**: mobile browsers automatically get a single-column layout with a back bar and a
   bottom navigation for Chat / Channels / Settings; use `?mobile=1` or `?mobile=0` to debug.
-- **Runtime logs**: the sidebar log entry (also reachable through the settings route) is backed by the
+- **Runtime logs**: an independent full-width sidebar view (no longer inside Settings) backed by the
   same persistent terminal log stream (`runtime.log`). It defaults to INFO only and offers free
   checkboxes for error / warn / info / debug; the selection is remembered. It focuses on model
   start / done / timeout, tool timings, channel messages and confirmation results, and hides
@@ -103,7 +174,7 @@ On Windows you can also double-click `start.cmd`.
   `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores a cookie.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
-- **Runtime logs**: sidebar log entry; free level checkboxes (error / warn / info / debug, remembered),
+- **Runtime logs**: independent full-width sidebar view (not inside Settings); free level checkboxes (error / warn / info / debug, remembered),
   category / keyword filters, pause, clear, copy and export, with timeouts and failed outbound
   deliveries highlighted in red. Successful HTTP access lines are hidden.
 - **Language**: Simplified Chinese comes from the `lang-zh-cn` plugin; copy it to create another
@@ -132,11 +203,15 @@ export const version = '1.0.0'
 export const displayName = 'My Plugin'
 export const description = 'Plugin description'
 export const core = false
+export const depends = { 'event-bus': '^1.0.0' }          // required: missing/broken is red and blocks activation
+export const optionalDepends = { 'markdown-enhancer': '>=1.0.0' } // optional: missing/broken is yellow only
 export const inject = []
 export function apply(ctx) {
   // ctx.provide / ctx.on / ctx.slots.register ...
 }
 ```
+
+Dependency versions support `*` (any), `>=1.0.0` (at least), `=1.0.0` (exact pin), `^1.0.0` / `~1.2.0` (compatible), `1.x` and `1.2.3 - 2.0.0`. Missing required dependencies are red and prevent activation; missing optional dependencies are yellow and do not affect basic functionality.
 
 Plugins can register their own settings panels; the Plugins page then shows a “Settings” action:
 
@@ -189,11 +264,14 @@ assets rather than committed to Git.
 ## Tests
 
 ```bash
-npm test              # module checks + backend API + end-to-end + chat / tools / vendor protocols
-npm run test:smoke    # frontend end-to-end against the real backend and SSE
+npm test              # module checks + dependency validation + backend API + end-to-end + chat / tools / vendor protocols
+npm run test:deps     # plugin dependency fields / version ranges / cycle detection / inject mapping (208 checks)
+npm run test:smoke    # frontend end-to-end against the real backend and SSE (292 checks)
+npm run test:clawbot  # WeChat Clawbot backend bridge (local mock iLink protocol)
+npm run test:napcat   # NapCat backend bridge (local reverse WebSocket mock)
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 212 checks.
+`npm test` currently passes; `scripts/smoke.mjs` passes 292 checks and `scripts/test-dependencies.mjs` passes 208 checks.
 
 ## Versioning and Releases
 

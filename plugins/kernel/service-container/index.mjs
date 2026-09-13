@@ -15,6 +15,11 @@ export const description = '内核层 · provide / inject 服务注册与注入�
 export const author = '念风内核'
 export const icon = '📦'
 export const core = true
+export const depends = {
+  'config': '>=1.1.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus', 'config']
 export const provides = [{ name: 'service-container', type: 'singleton' }]
 

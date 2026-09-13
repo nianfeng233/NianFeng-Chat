@@ -16,7 +16,11 @@ export const description = '视觉框架 · 侧边栏容器与三段插槽。'
 export const author = '念风内核'
 export const icon = '📎'
 export const core = true
-export const depends = { 'app-shell': '^1.0.0' }
+export const depends = {
+  'app-shell': '^1.0.0',
+  'slots': '*',
+}
+export const optionalDepends = {}
 export const inject = ['slots']
 export const provides = [{ name: 'rail', type: 'singleton' }]
 

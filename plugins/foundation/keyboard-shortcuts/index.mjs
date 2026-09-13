@@ -17,6 +17,10 @@ export const icon = '⌨️'
 // 核心视图导航（rail-nav-buttons 等）依赖快捷键服务提供；它属于基础服务，
 // 不允许被单独禁用，否则导航快捷键会整体失效。
 export const core = true
+export const depends = {
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'shortcuts', type: 'singleton' }]
 

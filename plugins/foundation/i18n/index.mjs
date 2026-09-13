@@ -22,7 +22,11 @@ export const icon = '🌏'
 // 会话列表、输入框、渠道列表等核心 UI 都依赖 i18n 服务；它属于基础服务，
 // 不允许被单独禁用，否则会让这些核心插件一起进入 inactive。
 export const core = true
-export const depends = { config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'event-bus']
 export const provides = [{ name: 'i18n', type: 'singleton' }]
 

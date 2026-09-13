@@ -19,6 +19,10 @@ export const description = '基础服务 · cordis 日志导出器：控制台�
 export const author = '念风内核'
 export const icon = '📝'
 export const core = true
+export const depends = {}
+export const optionalDepends = {
+  'config': '>=1.1.0',
+}
 export const inject = ['config?']
 export const provides = [{ name: 'logs', type: 'singleton' }]
 

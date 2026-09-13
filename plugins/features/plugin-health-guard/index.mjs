@@ -15,7 +15,14 @@ export const description = '启动检查 · 发现插件错误时弹窗提醒，
 export const author = '念风内核'
 export const icon = '🩺'
 export const core = false
-export const depends = { 'plugin-manager': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'modal-host': '>=1.0.0',
+  'plugin-manager': '^1.0.0',
+}
+export const optionalDepends = {
+  'toast-host': '>=1.0.0',
+}
 export const inject = ['plugin-manager', 'modal', 'event-bus', 'toast?']
 export const provides = []
 

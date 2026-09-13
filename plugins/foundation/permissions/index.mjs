@@ -24,7 +24,11 @@ export const description = '基础服务 · 插件权限声明、预设与真实
 export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
-export const depends = { config: '^1.0.0', 'event-bus': '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'app', 'event-bus']
 export const provides = [{ name: 'permissions', type: 'singleton' }]
 

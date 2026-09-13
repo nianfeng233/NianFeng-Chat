@@ -15,6 +15,12 @@ export const description = '业务服务 · 会话导出（Markdown / JSON / TXT
 export const author = '念风内核'
 export const icon = '📤'
 export const core = false
+export const depends = {
+  'event-bus': '*',
+  'session-service': '>=2.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['session-service', 'event-bus', 'toast']
 export const provides = [{ name: 'export-service', type: 'singleton' }]
 

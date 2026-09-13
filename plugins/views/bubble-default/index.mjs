@@ -15,7 +15,15 @@ export const description = '可选中气泡 · Telegram 风格，双勾 / 时间
 export const author = '念风内核'
 export const icon = '💠'
 export const core = true
-export const depends = { 'message-list': '^1.0.0' }
+export const depends = {
+  'config': '>=1.1.0',
+  'event-bus': '*',
+  'i18n': '>=2.0.0',
+  'message-list': '^1.0.0',
+}
+export const optionalDepends = {
+  'image-service': '>=1.0.0',
+}
 export const inject = ['bubble-styles', 'event-bus', 'i18n', 'config', 'image-service?']
 
 import { useStyle } from '../../../src/util/style.mjs'

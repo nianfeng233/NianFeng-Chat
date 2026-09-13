@@ -14,6 +14,10 @@ export const description = '基础服务 · 右下角浮动提示（info / succe
 export const author = '念风内核'
 export const icon = '💬'
 export const core = true
+export const depends = {
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'toast', type: 'singleton' }]
 

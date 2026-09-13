@@ -21,13 +21,16 @@ export const author = '念风内核'
 export const icon = '🧰'
 export const core = true
 export const depends = {
-  'tool-registry': '^1.0.0',
-  'chat-store': '^1.0.0',
-  'document-service': '^1.0.0',
   'chat-permissions': '^1.0.0',
+  'chat-store': '^1.0.0',
+  'config': '^1.0.0',
   'context-builder': '^1.0.0',
-  config: '^1.0.0',
+  'document-service': '^1.0.0',
+  'event-bus': '*',
+  'session-service': '>=2.0.0',
+  'tool-registry': '^1.0.0',
 }
+export const optionalDepends = {}
 export const inject = ['tool-registry', 'chat-store', 'document-service', 'chat-permissions', 'context-builder', 'session-service', 'config', 'event-bus']
 export const provides = [{ name: 'chat-tools', type: 'singleton' }]
 

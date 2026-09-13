@@ -21,7 +21,10 @@ export const description = '语言包 · 内置简体中文；复制本插件目
 export const author = '念风内核'
 export const icon = '🀄'
 export const core = true
-export const depends = { i18n: '^2.0.0' }
+export const depends = {
+  'i18n': '^2.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['i18n']
 export const provides = []
 

@@ -14,7 +14,14 @@ export const description = '视觉内容 · 渠道视图入口。'
 export const author = '念风内核'
 export const icon = '📡'
 export const core = true
-export const depends = { 'right-main-panel': '^1.0.0', 'left-list-panel': '^1.0.0', 'view-router': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'left-list-panel': '^1.0.0',
+  'right-main-panel': '^1.0.0',
+  'slots': '*',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'view-router', 'event-bus']
 export const provides = [{ name: 'channel-view', type: 'singleton' }]
 

@@ -16,7 +16,11 @@ export const description = '业务服务 · 统一用户标识（本地配置默
 export const author = '念风内核'
 export const icon = '🪪'
 export const core = true
-export const depends = { config: '^1.1.0' }
+export const depends = {
+  'config': '^1.1.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'event-bus']
 export const provides = [{ name: 'user-identity', type: 'singleton' }]
 

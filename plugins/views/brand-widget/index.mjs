@@ -14,7 +14,11 @@ export const description = '顶层栏内容 · logo + 名称。'
 export const author = '念风内核'
 export const icon = '🌬️'
 export const core = true
-export const depends = { titlebar: '^1.0.0' }
+export const depends = {
+  'slots': '*',
+  'titlebar': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots']
 export const order = 10
 

@@ -17,7 +17,10 @@ export const description = '业务服务 · 每个角色一条 FIFO 队列，保
 export const author = '念风内核'
 export const icon = '🚦'
 export const core = true
-export const depends = { 'event-bus': '^1.0.0' }
+export const depends = {
+  'event-bus': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'chat-queue', type: 'singleton' }]
 

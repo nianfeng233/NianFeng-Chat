@@ -15,9 +15,17 @@ export const description = '基础服务 · 全局 CSS 变量管理，支持浅�
 export const author = '念风内核'
 export const icon = '🎨'
 export const core = true
-export const depends = { config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+  'service-container': '*',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'event-bus', 'service-container']
-export const provides = [{ name: 'theme', type: 'selectable' }]
+export const provides = [
+  { name: 'theme', type: 'selectable' },
+  { name: 'theme-tokens', type: 'singleton' },
+]
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { THEME_CSS } from './style.mjs'

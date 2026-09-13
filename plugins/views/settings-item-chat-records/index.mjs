@@ -19,7 +19,16 @@ export const description = '设置页 · 图形化 / JSON 双模式查看与编�
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'chat-store': '^1.0.0', 'session-service': '^2.0.0' }
+export const depends = {
+  'chat-store': '^1.0.0',
+  'event-bus': '*',
+  'session-service': '^2.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'modal-host': '>=1.0.0',
+}
 export const inject = ['settings-container', 'chat-store', 'session-service', 'toast', 'modal?', 'event-bus']
 export const provides = []
 

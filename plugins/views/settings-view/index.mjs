@@ -15,7 +15,12 @@ export const description = '视觉内容 · 设置页外壳、导航槽与内容
 export const author = '念风内核'
 export const icon = '⚙️'
 export const core = true
-export const depends = { 'app-shell': '^1.0.0' }
+export const depends = {
+  'app-shell': '^1.0.0',
+  'event-bus': '*',
+  'slots': '*',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'event-bus']
 export const provides = [{ name: 'settings-view', type: 'singleton' }]
 

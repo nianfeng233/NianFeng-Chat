@@ -15,7 +15,19 @@ export const description = '视觉内容 · 消息输入、工具条与高度拖
 export const author = '念风内核'
 export const icon = '⌨️'
 export const core = true
-export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
+export const depends = {
+  'chat-view': '^1.0.0',
+  'config': '>=1.1.0',
+  'event-bus': '*',
+  'i18n': '>=2.0.0',
+  'message-service': '^1.0.0',
+  'session-service': '>=2.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'image-service': '>=1.0.0',
+}
 export const inject = ['slots', 'session-service', 'message-service', 'event-bus', 'toast', 'i18n', 'config', 'image-service?']
 export const provides = [{ name: 'composer', type: 'singleton' }]
 

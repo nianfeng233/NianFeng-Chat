@@ -5,6 +5,7 @@
  */
 /** settings-item-logs 样式：运行日志控制台 */
 export const LOGS_CSS = `
+  .logs-page{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:30px 46px 50px 42px;}
   .logs-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 12px;}
   .logs-toolbar select,.logs-toolbar input:not([type="checkbox"]){height:32px;border:1px solid rgba(0,0,0,.09);background:rgba(255,255,255,.86);border-radius:8px;padding:0 9px;color:var(--text);font:inherit;font-size:12px;outline:none;box-sizing:border-box;}
   .logs-toolbar select:focus,.logs-toolbar input:not([type="checkbox"]):focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
@@ -35,4 +36,5 @@ export const LOGS_CSS = `
   .logs-note{margin-top:10px;font-size:11.5px;color:var(--text-4);line-height:1.6;}
   html[data-theme="dark"] .logs-list{background:#1e1e1e;border-color:#2b2b2b;}
   html[data-theme="dark"] .logs-toolbar select,html[data-theme="dark"] .logs-toolbar input:not([type="checkbox"]),html[data-theme="dark"] .logs-levels{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);}
+  @media(max-width:820px){.logs-page{padding:20px 18px 36px;}}
 `

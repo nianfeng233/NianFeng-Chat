@@ -20,6 +20,10 @@ export const description = '基础服务 · WebUI ↔ 本地后端的 REST / SSE
 export const author = '念风内核'
 export const icon = '🔌'
 export const core = true
+export const depends = {
+  'config': '>=1.1.0',
+}
+export const optionalDepends = {}
 export const inject = ['config']
 export const provides = [{ name: 'api', type: 'singleton' }]
 export const permissions = ["network"]

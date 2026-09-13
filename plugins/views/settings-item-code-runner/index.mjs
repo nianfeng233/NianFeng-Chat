@@ -20,7 +20,12 @@ export const description = '设置页 · 在无 DOM / 无网络的 Web Worker �
 export const author = '念风内核'
 export const icon = '⚡'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', permissions: '^1.0.0' }
+export const depends = {
+  'permissions': '^1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'toast']
 export const permissions = ["code-execution"]
 export const provides = []

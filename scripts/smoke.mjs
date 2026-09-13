@@ -1356,8 +1356,12 @@ async function main() {
   check('设置页可关闭', !settingsView.isOpen())
 
   section('⑩a 运行日志页')
-  settingsView.open('logs')
+  const logsRouter = ctx.inject('view-router')
+  check('运行日志是独立视图而非设置页', logsRouter.has('logs') && logsRouter.get('logs')?.fullWidth === true)
+  settingsView.close()
+  logsRouter.switch('logs')
   await sleep(80)
+  check('日志视图已激活且不打开设置浮层', logsRouter.active() === 'logs' && !settingsView.isOpen(), JSON.stringify({ active: logsRouter.active(), settingsOpen: settingsView.isOpen() }))
   check('运行日志页已注册并可打开', !!document.querySelector('.logs-list'))
   const logsRailBtn = document.getElementById('railLogsBtn')
   const settingsRailBtn = document.getElementById('railSettingsBtn')
@@ -1408,7 +1412,9 @@ async function main() {
     JSON.stringify(ctx.inject('config').get('logs.levels')) === JSON.stringify(['info', 'debug']),
     JSON.stringify(ctx.inject('config').get('logs.levels')),
   )
-  settingsView.open('logs')
+  logsRouter.switch('chat')
+  await sleep(30)
+  logsRouter.switch('logs')
   await sleep(60)
   check(
     '重新打开日志页仍保留勾选组合',
@@ -1424,11 +1430,25 @@ async function main() {
   await sleep(20)
   backend.ctx.logger.info('SMOKE_RUNTIME_LOG_LINE')
   await sleep(150)
-  settingsView.close()
-  await sleep(20)
-  settingsView.open('logs')
+  logsRouter.switch('chat')
+  await sleep(30)
+  logsRouter.switch('logs')
   const backendLogShown = await waitFor(() => document.querySelector('.logs-list')?.textContent?.includes('SMOKE_RUNTIME_LOG_LINE'), { timeout: 3000 })
   check('后端日志可进入运行日志页（历史拉取）', !!backendLogShown)
+  const logTimeValue = text => {
+    const match = String(text || '').trim().match(/^(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/)
+    return match ? Number(match[1]) * 3600000 + Number(match[2]) * 60000 + Number(match[3]) * 1000 + Number(match[4]) : -1
+  }
+  const logTimeValuesBeforeRefresh = [...document.querySelectorAll('.logs-list .logs-time')]
+    .map(el => logTimeValue(el.textContent))
+    .filter(value => value >= 0)
+  check(
+    '日志列表按时间顺序排列（历史回填 / 实时日志混排后仍稳定）',
+    logTimeValuesBeforeRefresh.every((value, index) => !index || value >= logTimeValuesBeforeRefresh[index - 1]),
+    logTimeValuesBeforeRefresh.slice(0, 8).join(' | '),
+  )
+  const logEntryCount = () => Number((document.querySelector('[data-logs-stats]')?.textContent || '').match(/(\d+)\s*条/)?.[1]) || 0
+  const entriesBeforeRefresh = logEntryCount()
   backend.ctx.logger.info('SMOKE_LOG_REFRESH_BUTTON')
   await sleep(30)
   const refreshLogsBtn = document.querySelector('[data-logs-refresh]')
@@ -1443,6 +1463,12 @@ async function main() {
       tail: String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
     }),
   )
+  const entriesAfterRefresh = logEntryCount()
+  check(
+    '日志刷新不会丢掉已有历史',
+    entriesAfterRefresh >= entriesBeforeRefresh,
+    `${entriesBeforeRefresh} -> ${entriesAfterRefresh}`,
+  )
 
   // 访问日志噪音（HTTP POST /api/xxx → 200）不应出现在日志页。
   backend.ctx.logger.info('HTTP POST /api/smoke-noise → 200 · 1ms')
@@ -1454,8 +1480,8 @@ async function main() {
     !String(document.querySelector('.logs-list')?.textContent || '').includes('/api/smoke-noise'),
     String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
   )
-  settingsView.close()
-  await sleep(20)
+  logsRouter.switch('chat')
+  await sleep(30)
 
   section('⑩b 捏人窗口与插件权限')
   const characterSessions = ctx.inject('session-service')

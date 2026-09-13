@@ -18,7 +18,18 @@ export const description = '业务服务 · 渠道读写权限表、跨渠道校
 export const author = '念风内核'
 export const icon = '🛡️'
 export const core = true
-export const depends = { 'chat-store': '^1.0.0', config: '^1.0.0', 'event-bus': '^1.0.0' }
+export const depends = {
+  'chat-store': '^1.0.0',
+  'config': '^1.0.0',
+  'event-bus': '^1.0.0',
+  'session-service': '>=2.0.0',
+  'storage': '*',
+}
+export const optionalDepends = {
+  'channel-registry': '>=1.0.0',
+  'toast-host': '>=1.0.0',
+  'user-identity': '>=1.0.0',
+}
 export const inject = ['chat-store', 'session-service', 'config', 'event-bus', 'storage', 'toast?', 'user-identity?', 'channel-registry?']
 export const provides = [{ name: 'chat-permissions', type: 'singleton' }]
 

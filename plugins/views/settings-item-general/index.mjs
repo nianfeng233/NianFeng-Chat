@@ -14,7 +14,12 @@ export const description = '设置页 · 应用行为与基础偏好。'
 export const author = '念风内核'
 export const icon = '🔧'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0' }
+export const depends = {
+  'config': '>=1.1.0',
+  'i18n': '>=2.0.0',
+  'settings-container': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'config', 'i18n']
 
 import { page, section, card, row, switchBtn, select, input, bindConfigControls } from '../../../src/util/settings.mjs'

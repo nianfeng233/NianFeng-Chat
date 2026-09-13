@@ -103,6 +103,10 @@ export async function boot() {
   return { app, ctx: app.rootCompat, cordis: app.cordis, loader: app, version: VERSION }
 }
 
+function summaryDependencyIssue(item) {
+  return { name: item.name, range: item.range, status: item.status, reason: item.reason }
+}
+
 function writeDiagnostics(app) {
   try {
     const list = app.list()
@@ -116,6 +120,16 @@ function writeDiagnostics(app) {
     diag.dataset.errors = JSON.stringify(list.filter(r => r.status === STATUS.ERROR).map(r => ({ id: r.id, reason: r.reason })))
     diag.dataset.inactive = JSON.stringify(list.filter(r => r.status === STATUS.INACTIVE).map(r => ({ id: r.id, reason: r.reason })))
     diag.dataset.disabled = JSON.stringify(list.filter(r => r.status === STATUS.DISABLED).map(r => r.id))
+    diag.dataset.dependencyErrors = JSON.stringify(
+      list
+        .filter(r => r.dependencyHealth === 'error')
+        .map(r => ({ id: r.id, issues: (r.dependencyIssues || []).filter(item => item.required).map(item => summaryDependencyIssue(item)) })),
+    )
+    diag.dataset.dependencyWarnings = JSON.stringify(
+      list
+        .filter(r => r.dependencyHealth === 'warning')
+        .map(r => ({ id: r.id, issues: (r.dependencyIssues || []).filter(item => !item.required).map(item => summaryDependencyIssue(item)) })),
+    )
     diag.dataset.warnings = JSON.stringify(app.warnings)
     diag.dataset.plugins = JSON.stringify(list.map(r => ({ id: r.id, status: r.status })))
     document.body.appendChild(diag)

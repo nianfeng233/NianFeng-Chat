@@ -27,7 +27,17 @@ export const description = '设置页 · 内置模型开关与自定义提供商
 export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'backend-client': '^1.0.0' }
+export const depends = {
+  'backend-client': '^1.0.0',
+  'config': '>=1.1.0',
+  'modal-host': '>=1.0.0',
+  'model-registry': '>=1.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'model-adapter-backend': '>=2.0.0',
+}
 export const inject = ['settings-container', 'api', 'model-registry', 'model-adapter?', 'config', 'toast', 'modal']
 export const permissions = ["network"]
 export const provides = []
@@ -1050,9 +1060,20 @@ export function apply(ctx) {
             }
             case 'toggle-provider-enabled': {
               if (!provider || provider.managed) break
-              const next = !target.classList.contains('on')
+              // 以当前内存中的 provider 状态为准，不依赖可能被异步 render 替换的按钮 class；
+              // 同时先乐观更新本地 payload，避免 sync 期间的回渲染把开关又画回旧状态。
+              const previousEnabled = provider.enabled
+              const wasEnabled = provider.enabled !== false
+              const next = !wasEnabled
+              provider.enabled = next
               target.classList.toggle('on', next)
-              await api.updateProvider(provider.id, { enabled: next })
+              try {
+                await api.updateProvider(provider.id, { enabled: next })
+              } catch (err) {
+                provider.enabled = previousEnabled
+                target.classList.toggle('on', wasEnabled)
+                throw err
+              }
               await syncAndReload()
               break
             }

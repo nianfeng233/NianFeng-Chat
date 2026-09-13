@@ -15,7 +15,12 @@ export const description = '业务服务 · 模型抽象接口与调度，具体
 export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
-export const depends = { 'model-registry': '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+  'model-registry': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['model-registry', 'config', 'event-bus']
 export const provides = [{ name: 'model-service', type: 'singleton' }]
 

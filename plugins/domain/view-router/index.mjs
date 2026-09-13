@@ -16,7 +16,11 @@ export const description = '业务服务 · 当前视图、列表宽度记忆与
 export const author = '念风内核'
 export const icon = '🧭'
 export const core = true
-export const depends = { config: '^1.0.0' }
+export const depends = {
+  'config': '^1.0.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['config', 'event-bus']
 export const provides = [{ name: 'view-router', type: 'singleton' }]
 
@@ -57,6 +61,10 @@ export function apply(ctx) {
         icon: definition.icon || '',
         order: definition.order ?? 100,
         rail: definition.rail !== false,
+        // 全宽视图（如运行日志）：隐藏左列表与拖拽条，主面板独占窗口。
+        fullWidth: definition.fullWidth === true,
+        // 懒挂载：视图第一次激活时才执行 main()，避免启动时就建立 SSE / 轮询。
+        lazy: definition.lazy === true,
         list: definition.list || null,
         main: definition.main || null,
         meta: definition.meta || {},
@@ -84,6 +92,7 @@ export function apply(ctx) {
     has: id => views.has(id),
     active: () => active,
     activeView: () => views.get(active) || null,
+    isFullWidth: (id = active) => views.get(id)?.fullWidth === true,
 
     switch(id) {
       if (id === active) return false

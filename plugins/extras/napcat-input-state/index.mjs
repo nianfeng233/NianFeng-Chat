@@ -19,7 +19,15 @@ export const description = '扩展 · NapCat 私聊在模型调用期间持续�
 export const author = '念风插件'
 export const icon = '⌨️'
 export const core = false
-export const depends = { 'channel-registry': '^1.0.0', napcat: '^1.0.0', config: '^1.0.0' }
+export const depends = {
+  'channel-registry': '^1.0.0',
+  'config': '^1.0.0',
+  'event-bus': '*',
+}
+export const optionalDepends = {
+  'napcat': '^1.0.0',
+  'plugin-manager': '>=1.0.0',
+}
 export const inject = ['channel-registry', 'event-bus', 'config', 'napcat-channel?', 'plugin-manager?']
 export const permissions = ['network']
 

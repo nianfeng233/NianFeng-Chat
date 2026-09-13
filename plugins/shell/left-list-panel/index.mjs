@@ -16,7 +16,13 @@ export const description = '视觉框架 · 左列表玻璃板容器，负责视
 export const author = '念风内核'
 export const icon = '📋'
 export const core = true
-export const depends = { 'app-shell': '^1.0.0', 'view-router': '^1.0.0' }
+export const depends = {
+  'app-shell': '^1.0.0',
+  'event-bus': '*',
+  'slots': '*',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'view-router', 'app-shell', 'event-bus']
 export const provides = [{ name: 'left-list-panel', type: 'singleton' }]
 

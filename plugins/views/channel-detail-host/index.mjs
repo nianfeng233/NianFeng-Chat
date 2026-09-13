@@ -17,7 +17,15 @@ export const description = '视觉内容 · 渠道详情与基础操作入口。
 export const author = '念风内核'
 export const icon = '🔎'
 export const core = true
-export const depends = { 'channel-view': '^1.0.0', 'channel-registry': '^1.0.0' }
+export const depends = {
+  'channel-registry': '^1.0.0',
+  'channel-view': '^1.0.0',
+  'i18n': '>=2.0.0',
+  'session-service': '>=2.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['slots', 'channel-registry', 'session-service', 'toast', 'i18n']
 
 import { useStyle } from '../../../src/util/style.mjs'

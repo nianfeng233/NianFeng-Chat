@@ -15,7 +15,20 @@ export const description = '视觉内容 · 消息滚动区容器与渲染调度
 export const author = '念风内核'
 export const icon = '📜'
 export const core = true
-export const depends = { 'chat-view': '^1.0.0', 'message-service': '^1.0.0' }
+export const depends = {
+  'chat-view': '^1.0.0',
+  'config': '>=1.1.0',
+  'context-menu-host': '>=1.0.0',
+  'event-bus': '*',
+  'message-service': '^1.0.0',
+  'service-container': '*',
+  'session-service': '>=2.0.0',
+  'slots': '*',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {
+  'modal-host': '>=1.0.0',
+}
 export const inject = ['slots', 'session-service', 'message-service', 'service-container', 'event-bus', 'context-menu', 'modal?', 'toast', 'config']
 export const provides = [
   { name: 'message-list', type: 'singleton' },

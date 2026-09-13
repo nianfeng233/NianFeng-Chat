@@ -15,7 +15,15 @@ export const description = '设置页 · 主题、背景与界面细节，支持
 export const author = '念风内核'
 export const icon = '🎨'
 export const core = true
-export const depends = { 'settings-container': '^1.0.0', 'theme-tokens': '^1.0.0', 'bg-provider': '^1.0.0' }
+export const depends = {
+  'bg-provider': '^1.0.0',
+  'config': '>=1.1.0',
+  'event-bus': '*',
+  'settings-container': '^1.0.0',
+  'theme-tokens': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'theme', 'bg-provider', 'theme-tokens', 'config', 'event-bus', 'toast']
 export const provides = [{ name: 'appearance-page', type: 'singleton' }]
 

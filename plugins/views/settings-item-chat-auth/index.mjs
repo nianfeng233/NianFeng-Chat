@@ -17,7 +17,15 @@ export const description = '设置页 · 跨渠道读取 / 发送策略、授权
 export const author = '念风内核'
 export const icon = '🔐'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', 'chat-permissions': '^1.0.0', 'chat-store': '^1.0.0' }
+export const depends = {
+  'chat-permissions': '^1.0.0',
+  'chat-store': '^1.0.0',
+  'event-bus': '*',
+  'session-service': '>=2.0.0',
+  'settings-container': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container', 'chat-permissions', 'chat-store', 'session-service', 'event-bus', 'toast']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'

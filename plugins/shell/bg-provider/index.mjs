@@ -15,7 +15,11 @@ export const description = '视觉框架 · 背景可选中服务，用户可在
 export const author = '念风内核'
 export const icon = '🌫️'
 export const core = true
-export const depends = { 'service-container': '^1.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'service-container': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['service-container', 'event-bus']
 export const provides = [{ name: 'bg-provider', type: 'singleton' }]
 

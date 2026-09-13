@@ -15,6 +15,10 @@ export const description = '内核层 · 提供 setup / start / stop / dispose �
 export const author = '念风内核'
 export const icon = '♻️'
 export const core = true
+export const depends = {
+  'event-bus': '*',
+}
+export const optionalDepends = {}
 export const inject = ['event-bus']
 export const provides = [{ name: 'lifecycle', type: 'singleton' }]
 

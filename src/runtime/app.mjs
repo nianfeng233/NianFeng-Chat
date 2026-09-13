@@ -29,6 +29,12 @@ export const STATUS = {
   ERROR: 'error',
 }
 
+/** 插件依赖类型：必须依赖缺失=红，可选依赖缺失=黄。 */
+export const DEPENDENCY_KIND = {
+  REQUIRED: 'required',
+  OPTIONAL: 'optional',
+}
+
 const FIBER = { PENDING: 0, LOADING: 1, ACTIVE: 2, FAILED: 3, DISPOSED: 4, UNLOADING: 5 }
 
 export class App {
@@ -530,7 +536,13 @@ export class App {
     if (name === 'app') return true
     for (const record of this.records.values()) {
       if (record.manifest?.removed) continue
-      if (record.status === STATUS.DISABLED || record.status === STATUS.ERROR) continue
+      if (
+        record.status === STATUS.DISABLED ||
+        record.status === STATUS.ERROR ||
+        record.status === STATUS.INACTIVE
+      ) {
+        continue
+      }
       for (const item of record.manifest?.provides || []) {
         const provided = typeof item === 'string' ? item : item?.name
         if (provided === name) return true
@@ -541,15 +553,19 @@ export class App {
 
   /** 检查一组插件名依赖（不含 cordis inject 服务），用于加载前的版本/依赖判定 */
   dependsIssuesFor(record, dependencies = {}) {
-    const missing = []
+    const issues = []
     for (const [dep, range] of Object.entries(dependencies || {})) {
       const target = this.records.get(dep)
-      if (!target) missing.push(`${dep}${range ? '@' + range : ''}`)
-      else if (range && !satisfies(target.manifest.version, range)) missing.push(`${dep}@${range}(实际 ${target.manifest.version})`)
-      else if (target.status === STATUS.ERROR) missing.push(`${dep}(加载失败)`)
-      else if (target.status === STATUS.INACTIVE || target.status === STATUS.DISABLED) missing.push(`${dep}(未激活)`)
+      if (!target) issues.push(`${dep}${range ? '@' + range : ''}`)
+      else if (target.manifest?.removed) issues.push(`${dep}(已卸载)`)
+      else if (target.status === STATUS.ERROR) issues.push(`${dep}(加载失败)`)
+      else if (target.status === STATUS.INACTIVE) issues.push(`${dep}(未激活)`)
+      else if (target.status === STATUS.DISABLED) issues.push(`${dep}(已被禁用)`)
+      else if (range && range !== '*' && !satisfies(target.manifest.version, range)) {
+        issues.push(`${dep}@${range}(实际 ${target.manifest.version})`)
+      }
     }
-    return [...new Set(missing)]
+    return [...new Set(issues)]
   }
 
   /** 只检查插件必须 depends 声明（不含 cordis inject 服务） */
@@ -568,7 +584,98 @@ export class App {
 
   /** 硬依赖问题：缺失 / 加载失败 / 未激活；版本不匹配只做警告，不阻塞加载 */
   hardDependsIssues(record) {
-    return this.dependsIssues(record).filter(item => !/实际|版本不匹配/.test(String(item)))
+    const issues = []
+    for (const [dep, range] of Object.entries(record.manifest.depends || {})) {
+      const target = this.records.get(dep)
+      if (!target) issues.push(`${dep}${range ? '@' + range : ''}`)
+      else if (target.manifest?.removed) issues.push(`${dep}(已卸载)`)
+      else if (target.status === STATUS.ERROR) issues.push(`${dep}(加载失败)`)
+      else if (target.status === STATUS.INACTIVE) issues.push(`${dep}(未激活)`)
+      else if (target.status === STATUS.DISABLED) issues.push(`${dep}(已被禁用)`)
+    }
+    return [...new Set(issues)]
+  }
+
+  /**
+   * 结构化依赖报告（插件管理页直接消费）。
+   * status: ok | pending | missing | version-mismatch | error | inactive | disabled | removed
+   * severity: ok | warning | error；必须依赖缺失/失效为 error，可选依赖任何异常为 warning。
+   */
+  dependencyReportFor(record, kind = DEPENDENCY_KIND.REQUIRED) {
+    if (!record) return []
+    const optional = kind === DEPENDENCY_KIND.OPTIONAL
+    const dependencies = optional ? record.manifest.optionalDepends || {} : record.manifest.depends || {}
+    return Object.entries(dependencies).map(([name, rawRange]) => {
+      const range = String(rawRange || '*').trim() || '*'
+      const target = this.records.get(name)
+      const installedVersion = target?.manifest?.version || ''
+      const report = {
+        name,
+        kind,
+        required: !optional,
+        range,
+        installed: !!target,
+        installedVersion,
+        status: 'ok',
+        severity: 'ok',
+        satisfied: true,
+        requiredBy: record.id,
+        reason: '',
+      }
+      if (!target) {
+        report.status = 'missing'
+        report.satisfied = false
+        report.severity = optional ? 'warning' : 'error'
+        report.reason = `未安装（需要 ${name}@${range}）`
+      } else if (target.manifest?.removed) {
+        report.status = 'removed'
+        report.satisfied = false
+        report.severity = optional ? 'warning' : 'error'
+        report.reason = '已卸载'
+      } else if (target.status === STATUS.ERROR) {
+        report.status = STATUS.ERROR
+        report.satisfied = false
+        report.severity = optional ? 'warning' : 'error'
+        report.reason = `加载失败${target.reason ? `：${target.reason}` : ''}`
+      } else if (target.status === STATUS.INACTIVE) {
+        report.status = STATUS.INACTIVE
+        report.satisfied = false
+        report.severity = optional ? 'warning' : 'error'
+        report.reason = `未激活${target.reason ? `：${target.reason}` : ''}`
+      } else if (target.status === STATUS.DISABLED) {
+        report.status = STATUS.DISABLED
+        report.satisfied = false
+        report.severity = optional ? 'warning' : 'error'
+        report.reason = '已被禁用'
+      } else if (range !== '*' && !satisfies(installedVersion, range)) {
+        report.status = 'version-mismatch'
+        report.satisfied = false
+        report.severity = 'warning'
+        report.reason = `版本不匹配（需要 ${range}，实际 ${installedVersion}）`
+      } else if (target.status === STATUS.PENDING) {
+        report.status = STATUS.PENDING
+        report.reason = '加载中'
+      }
+      return report
+    })
+  }
+
+  /** 某个插件的全部依赖（必须依赖在前，可选依赖在后） */
+  dependencyReport(recordOrId) {
+    const record = typeof recordOrId === 'string' ? this.records.get(recordOrId) : recordOrId
+    if (!record) return []
+    return [
+      ...this.dependencyReportFor(record, DEPENDENCY_KIND.REQUIRED),
+      ...this.dependencyReportFor(record, DEPENDENCY_KIND.OPTIONAL),
+    ]
+  }
+
+  /** 依赖健康度：error=有必须依赖不可用 / warning=有可选依赖提示 / ok=全部满足 */
+  dependencyHealth(recordOrId) {
+    const report = this.dependencyReport(recordOrId)
+    if (report.some(item => item.required && item.severity === 'error')) return 'error'
+    if (report.some(item => item.severity === 'warning')) return 'warning'
+    return 'ok'
   }
 
   missingDeps(record) {
@@ -679,20 +786,32 @@ export class App {
   }
 
   list() {
-    return [...this.records.values()].map(record => ({
-      id: record.id,
-      dir: record.dir,
-      path: record.path,
-      status: record.status,
-      reason: record.reason,
-      error: record.error ? String(record.error.message || record.error) : null,
-      conflict: !!record.conflict,
-      started: record.started,
-      dynamic: !!record.dynamic,
-      warnings: record.warnings,
-      fiberState: record.fiber?.state ?? null,
-      manifest: record.manifest,
-    }))
+    return [...this.records.values()].map(record => {
+      const dependencies = this.dependencyReport(record)
+      const dependencyIssues = dependencies.filter(item => item.status !== 'ok' && item.status !== 'pending')
+      return {
+        id: record.id,
+        dir: record.dir,
+        path: record.path,
+        status: record.status,
+        reason: record.reason,
+        error: record.error ? String(record.error.message || record.error) : null,
+        conflict: !!record.conflict,
+        started: record.started,
+        dynamic: !!record.dynamic,
+        warnings: record.warnings,
+        fiberState: record.fiber?.state ?? null,
+        dependencies,
+        dependencyIssues,
+        dependencyHealth:
+          dependencyIssues.some(item => item.required && item.severity === 'error')
+            ? 'error'
+            : dependencies.some(item => item.severity === 'warning')
+              ? 'warning'
+              : 'ok',
+        manifest: record.manifest,
+      }
+    })
   }
 
   /**
@@ -708,39 +827,52 @@ export class App {
     for (const record of this.records.values()) {
       const id = record.id
 
-      // 依赖版本不匹配：不阻塞加载，但明确标黄提示，避免协议悄悄漂移。
-      for (const item of this.dependsIssues(record)) {
-        if (/实际/.test(String(item))) {
-          push(
-            id,
-            'warning',
-            `依赖版本不匹配：${item}`,
-            '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内',
-          )
-        }
-      }
+      // 结构化依赖报告：必须依赖异常标红，可选依赖异常标黄。
+      // 插件自身已禁用/卸载时，不把“依赖也无人启用”当成错误，避免产生噪音。
+      const dependencyReport =
+        record.status === STATUS.DISABLED || record.manifest.removed ? [] : this.dependencyReport(record)
+      for (const item of dependencyReport) {
+        if (item.status === 'ok' || item.status === 'pending') continue
+        const required = item.required
 
-      // 可选依赖只影响扩展能力，缺失 / 未启用 / 版本不匹配统一标黄，不阻止插件运行。
-      for (const item of this.optionalDependsIssues(record)) {
-        if (/实际/.test(String(item))) {
+        // 版本范围不匹配只做黄色告警，不阻止插件加载。
+        if (item.status === 'version-mismatch') {
           push(
             id,
             'warning',
-            `可选依赖版本不匹配：${item}`,
-            '可选依赖已安装但版本不同，相关扩展能力可能不可用；升级 / 降级后会自动恢复',
+            `${required ? '依赖版本不匹配' : '可选依赖版本不匹配'}：${item.name}@${item.range}（实际 ${item.installedVersion}）`,
+            required
+              ? '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内'
+              : '可选依赖已安装但版本不同，相关扩展能力可能不可用；升级 / 降级后会自动恢复',
           )
-        } else if (/\(未激活\)|\(加载失败\)/.test(String(item))) {
+          continue
+        }
+
+        const unavailable =
+          item.status === 'missing'
+            ? '未安装'
+            : item.status === 'error'
+              ? '加载失败'
+              : item.status === 'inactive'
+                ? '未激活'
+                : item.status === 'disabled'
+                  ? '已被禁用'
+                  : item.status === 'removed'
+                    ? '已卸载'
+                    : item.status || '不可用'
+        if (required) {
           push(
             id,
-            'warning',
-            `可选依赖不可用：${item}`,
-            '可选依赖存在但未启用 / 加载失败；本插件仍可运行，相关扩展能力暂不可用',
+            'error',
+            `缺少依赖：${item.name}@${item.range}（${unavailable}）`,
+            '检查依赖插件是否安装、启用或加载成功，或依赖版本是否满足声明范围',
           )
         } else {
+          const label = item.status === 'missing' ? '缺少可选依赖' : '可选依赖不可用'
           push(
             id,
             'warning',
-            `缺少可选依赖：${item}`,
+            `${label}：${item.name}@${item.range}（${unavailable}）`,
             '缺少可选依赖不影响本插件基础功能，只影响依赖它扩展的能力',
           )
         }
@@ -753,15 +885,16 @@ export class App {
         push(id, 'error', `服务冲突：${record.reason}`, '另一个插件已经注册了同名 singleton 服务')
       }
       if (record.status === STATUS.INACTIVE) {
-        const hard = this.hardDependsIssues(record)
-        const versionOnly = !hard.length && /实际|版本/.test(record.reason || '')
-        if (!versionOnly) {
-          const detail = hard.length ? hard.join('、') : record.reason || '依赖未就绪'
+        const hasHardDependencyIssue = dependencyReport.some(
+          item => item.required && item.status !== 'ok' && item.status !== 'pending',
+        )
+        if (!hasHardDependencyIssue) {
+          const missing = this.missingDeps(record)
           push(
             id,
             'error',
-            `缺少依赖：${detail}`,
-            '检查依赖插件是否安装、启用或加载成功，或依赖版本是否满足声明范围',
+            `缺少依赖：${missing.join('、') || record.reason || '依赖未就绪'}`,
+            '检查依赖插件是否安装、启用或加载成功，或服务注入名是否正确',
           )
         }
       }

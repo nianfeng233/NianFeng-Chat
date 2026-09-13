@@ -16,6 +16,12 @@ export const description = '基础服务 · 图片文件存储（消息只存 im
 export const author = '念风内核'
 export const icon = '🖼️'
 export const core = false
+export const depends = {}
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+  'session-service': '>=2.0.0',
+  'toast-host': '>=1.0.0',
+}
 export const inject = ['api?', 'session-service?', 'toast?']
 export const provides = [{ name: 'image-service', type: 'singleton' }]
 

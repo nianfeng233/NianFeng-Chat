@@ -14,7 +14,10 @@ export const description = '设置页 · 如实列出尚未实现的功能与原
 export const author = '念风内核'
 export const icon = '🚧'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0' }
+export const depends = {
+  'settings-container': '^1.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['settings-container']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'

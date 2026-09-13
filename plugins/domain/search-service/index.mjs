@@ -14,7 +14,11 @@ export const description = '业务服务 · 跨会话 / 渠道 / 插件的全局
 export const author = '念风内核'
 export const icon = '🔍'
 export const core = false
-export const depends = { 'session-service': '^2.0.0' }
+export const depends = {
+  'event-bus': '*',
+  'session-service': '^2.0.0',
+}
+export const optionalDepends = {}
 export const inject = ['session-service', 'event-bus']
 export const provides = [{ name: 'search-service', type: 'singleton' }]
 

@@ -15,6 +15,8 @@ export const description = '内核层 · 拓扑排序依赖、检测循环依赖
 export const author = '念风内核'
 export const icon = '🧮'
 export const core = true
+export const depends = {}
+export const optionalDepends = {}
 export const inject = []
 export const provides = [{ name: 'dependency-resolver', type: 'singleton' }]
 
@@ -39,6 +41,8 @@ export function apply(ctx) {
         reason: record.reason,
         depends: Object.keys(record.manifest.depends || {}),
         optionalDepends: Object.keys(record.manifest.optionalDepends || {}),
+        dependencyReport: loader.dependencyReport?.(id) || [],
+        dependencyHealth: loader.dependencyHealth?.(id) || 'ok',
         injectedBy: loader.list().filter(r => (r.manifest.inject || []).includes(id)).map(r => r.id),
         edges: [...(graph.edges.get(id) || [])],
         optionalEdges: [...(graph.optionalEdges?.get(id) || [])],

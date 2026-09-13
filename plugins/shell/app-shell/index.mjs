@@ -26,6 +26,10 @@ export const description = '视觉框架 · 整体 grid 骨架与挂载点。'
 export const author = '念风内核'
 export const icon = '🪟'
 export const core = true
+export const depends = {
+  'slots': '*',
+}
+export const optionalDepends = {}
 export const inject = ['slots']
 export const provides = [{ name: 'app-shell', type: 'singleton' }]
 
@@ -87,6 +91,10 @@ export function apply(ctx) {
     },
     setDragging(kind, on) {
       document.body.classList.toggle(`resizing-${kind}`, !!on)
+    },
+    /** 全宽视图：隐藏左列表 / 拖拽条，让主面板独占窗口 */
+    setFullView(on) {
+      refs.bodyEl?.classList.toggle('full-view', !!on)
     },
   }
 

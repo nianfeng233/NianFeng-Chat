@@ -167,7 +167,7 @@ export function apply(ctx) { /* ... */ }
 | `settings-item-privacy` | `views/settings-item-privacy/` | 权限开关 | 隐私设置 |
 | `settings-item-code-runner` | `views/settings-item-code-runner/` | JavaScript Web Worker 沙箱（无 DOM / 无网络 / 5s 超时） | 代码片段运行 |
 | `settings-item-unimplemented` | `views/settings-item-unimplemented/` | **未实现清单** | 新增未实现项在这里登记 |
-| `settings-item-logs` | `views/settings-item-logs/` | 运行日志台（入口在侧栏，设置导航不再重复）：cordis 日志 + 模型阶段 / 工具 / 权限确认 / 渠道消息收发，默认只勾 info、级别可自由组合并记住，成功 HTTP 访问日志不展示；超时标红，支持筛选、暂停、清空、复制、导出与刷新 | 排查模型调用与超时 |
+| `settings-item-logs` | `views/settings-item-logs/` | 独立运行日志视图（侧栏入口、全宽主面板，不再放进设置页）：cordis 日志 + 模型阶段 / 工具 / 权限确认 / 渠道消息收发，默认只勾 info、级别可自由组合并记住，成功 HTTP 访问日志不展示；超时标红，支持筛选、暂停、清空、复制、导出与刷新 | 排查模型调用与超时 |
 
 ---
 

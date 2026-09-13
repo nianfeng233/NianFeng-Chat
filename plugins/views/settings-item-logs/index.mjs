@@ -12,13 +12,22 @@
  */
 export const name = 'settings-item-logs'
 export const version = '1.0.0'
-export const displayName = '设置项 · 运行日志'
-export const description = '模型调用阶段、工具 / 外发 / 权限确认与后端运行日志。'
+export const displayName = '视图 · 运行日志'
+export const description = '独立运行日志视图：模型调用阶段、工具 / 渠道消息 / 权限确认与后端运行日志。'
 export const author = '念风内核'
 export const icon = '📝'
 export const core = false
-export const depends = { 'settings-container': '^1.0.0', logger: '^1.0.0' }
-export const inject = ['settings-container', 'logs?', 'api?', 'event-bus', 'config?', 'toast?']
+export const depends = {
+  'event-bus': '*',
+  'view-router': '^1.0.0',
+}
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+  'config': '>=1.1.0',
+  'logger': '^1.0.0',
+  'toast-host': '>=1.0.0',
+}
+export const inject = ['view-router', 'logs?', 'api?', 'event-bus', 'config?', 'toast?']
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { LOGS_CSS } from './style.mjs'
@@ -69,7 +78,7 @@ const categoryOfSource = name => {
 }
 
 export function apply(ctx) {
-  const pages = ctx.inject('settings-container')
+  const router = ctx.inject('view-router')
   const logs = ctx.inject('logs?')
   const api = ctx.inject('api?')
   const events = ctx.inject('event-bus')
@@ -78,16 +87,17 @@ export function apply(ctx) {
 
   useStyle(ctx, LOGS_CSS)
 
-  pages.register({
-    id: 'logs',
-    group: '系统',
-    groupOrder: 40,
+  router.register('logs', {
     label: '运行日志',
     icon: '📝',
-    order: 70,
-    // 侧栏已有独立日志入口；这里只保留路由，不再占据设置左侧导航。
-    hidden: true,
-    render(container) {
+    // 侧栏已有独立日志入口，不再出现在顶部视图导航里。
+    rail: false,
+    // 日志视图独占整个主面板，不显示左侧会话 / 渠道列表。
+    fullWidth: true,
+    // 第一次点开日志时才建立日志采集 / SSE / 轮询。
+    lazy: true,
+    order: 30,
+    main(container) {
       const readLevels = () => {
         const saved = config?.get?.('logs.levels', undefined)
         const list = Array.isArray(saved) ? saved : typeof saved === 'string' ? saved.split(',') : null
@@ -102,6 +112,7 @@ export function apply(ctx) {
       ).join('')
 
       container.innerHTML = `
+        <div class="logs-page">
         <div class="settings-title-row">
           <div>
             <div class="settings-title">运行日志</div>
@@ -141,7 +152,8 @@ export function apply(ctx) {
             <span data-logs-backend-file></span>
             <span data-logs-sync-hint></span>
           </div>
-        </section>`
+        </section>
+        </div>`
 
       const listEl = container.querySelector('[data-logs-list]')
       const statsEl = container.querySelector('[data-logs-stats]')
@@ -176,8 +188,12 @@ export function apply(ctx) {
       // 前端也能识别并强制重拉全量，避免增量 after 永远卡在旧 id 上。
       let runtimeInstance = ''
       let latestRuntimeId = 0
+      let backendTotal = 0
       let streamOnline = false
       let active = true
+
+      /** 日志按时间排序；同一毫秒内保持进入列表的先后顺序。 */
+      const compareEntries = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || a.id - b.id
 
       const scheduleRender = () => {
         if (!active || paused || renderTimer) return
@@ -227,7 +243,11 @@ export function apply(ctx) {
           for (const existing of entries) entryKeys.add(fingerprintOf(existing))
         }
         entries.push(item)
-        if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+        if (entries.length > MAX_ENTRIES) {
+          // 历史回填可能晚于本地日志到达，按时间排序后再截断，避免把最新日志裁掉。
+          entries.sort(compareEntries)
+          entries.splice(0, entries.length - MAX_ENTRIES)
+        }
         if (!autoScroll) {
           unseen += 1
           updateJumpBtn()
@@ -282,7 +302,9 @@ export function apply(ctx) {
         const keepScrollTop = listEl.scrollTop
         const cat = catSelect?.value || ''
         const keyword = String(searchInput?.value || '').trim().toLowerCase()
-        const visible = entries
+        // 先按时间排序再过滤 / 截断：历史回填、SSE 与轮询混在一起时顺序仍然稳定。
+        const sortedEntries = [...entries].sort(compareEntries)
+        const visible = sortedEntries
           .filter(item => selectedLevels.has(item.level))
           .filter(item => !cat || item.cat === cat)
           .filter(item => !keyword || `${item.source} ${item.text}`.toLowerCase().includes(keyword))
@@ -462,6 +484,7 @@ export function apply(ctx) {
             const instanceChanged = !!(instance && runtimeInstance && instance !== runtimeInstance)
             if (instance) runtimeInstance = instance
             latest = Number(data?.latestId) || 0
+            backendTotal = Number(data?.total) || 0
             // 后端进程换了，或日志被清空后 id 回退：清掉增量游标，从头完整拉取。
             if (instanceChanged || (latest > 0 && latest < latestRuntimeId)) {
               if (!allowRetry) return { ok: false, error: '后端日志实例已切换，请重试' }
@@ -475,16 +498,24 @@ export function apply(ctx) {
               if (addRuntimeLine(line)) added += 1
             }
             const pageLatest = dataLines.reduce((max, line) => Math.max(max, Number(line?.id) || 0), 0)
+            // 只把游标推进到本轮真正拿到的最后一条，不能直接跳到后端 latestId：
+            // after 分页返回的是“最早的一段”，若一次积压超过 limit，直接跳 latest
+            // 会永久漏掉中间日志。for 循环会继续用新的 after 追到 latestId 为止。
             if (pageLatest > latestRuntimeId) latestRuntimeId = pageLatest
-            if (latest > latestRuntimeId) latestRuntimeId = latest
             if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
             const limit = full ? FULL_LIMIT : PAGE_LIMIT
             // 拉满说明这段之后可能还有；若已经追平 latestId 则结束。
             if (dataLines.length < limit || latest <= 0 || latestRuntimeId >= latest) break
             full = false
           }
+          // 自愈：后端返回的 total 大于本轮已见过的 id 数量，说明上次全量拉取不完整
+          // （代理截断 / 请求中断 / 旧游标遗漏）。立即强制全量重拉一次，避免浏览器
+          // 只显示一小段日志，点刷新才恢复。
+          if (backendTotal > runtimeSeen.size && allowRetry) {
+            return fetchRuntimeOnce({ force: true, allowRetry: false })
+          }
           scheduleRender()
-          return { ok: true, added, latest, instance: runtimeInstance }
+          return { ok: true, added, latest, total: backendTotal, seen: runtimeSeen.size, instance: runtimeInstance }
         } catch (err) {
           // 旧后端没有该接口时保留本地日志订阅兜底。
           runtimeAvailable = false
@@ -506,18 +537,15 @@ export function apply(ctx) {
       }
       const pullBackendRuntime = options => queueRuntimePull(options)
 
-      /** 手动刷新：重建本地视图后从后端完整重拉，确保和直接刷新浏览器看到的一致。 */
-      const resyncFromBackend = async ({ rebuild = true } = {}) => {
-        if (rebuild) {
-          entries = []
-          entryKeys.clear()
-          backendSeen.clear()
-          runtimeSeen = new Set()
-          latestRuntimeId = 0
-          seq = 0
-          // 先放回当前页面内存里的本地日志（可能还没来得及转发到后端）。
-          for (const record of logs?.history?.() || []) addRawLog(record)
-        }
+      /**
+       * 手动 / 自动重同步：保留当前列表里的本地日志，把后端全量历史合并进来。
+       * 不复位 entries / entryKeys，缺的历史会补上，已有的靠内容指纹去重；
+       * 这样即使后端某次响应被代理截断，刷新也不会把新日志“洗掉”回到旧状态。
+       */
+      const resyncFromBackend = async () => {
+        backendSeen.clear()
+        // 游标复位交给队列里的 fetchRuntimeOnce({ force:true })，避免与仍在进行的
+        // 增量轮询同时改 latestRuntimeId / runtimeSeen。
         const result = await pullBackendRuntime({ force: true })
         await pullBackend()
         if (!streamOnline) scheduleRuntimeReconnect(0)
@@ -765,7 +793,7 @@ export function apply(ctx) {
         autoScroll = true
         unseen = 0
         updateJumpBtn()
-        const result = await resyncFromBackend({ rebuild: true })
+        const result = await resyncFromBackend()
         render()
         listEl.scrollTop = listEl.scrollHeight
         if (result?.ok === false) toast?.error?.(`日志刷新失败：${result.error || '后端日志接口不可用'}`)
@@ -825,7 +853,7 @@ export function apply(ctx) {
         const awayFor = lastHiddenAt ? Date.now() - lastHiddenAt : 0
         lastHiddenAt = 0
         if (!streamOnline || awayFor > 15000) {
-          void resyncFromBackend({ rebuild: awayFor > 15000 }).catch(() => {})
+          void resyncFromBackend().catch(() => {})
         } else {
           void pullBackendRuntime()
           void pullBackend()
@@ -847,8 +875,10 @@ export function apply(ctx) {
         pullBackend()
         pullBackendRuntime().catch(() => {})
       }, 3000)
-      pullBackendRuntime().catch(() => {})
       openRuntimeStream()
+      // 首次进入日志页就直接全量重同步：即使某次历史请求被代理截断 / 请求中断，
+      // fetchRuntimeOnce 的 total 自检也会再补一次，确保不是只显示当前会话的一小段。
+      void resyncFromBackend().catch(() => {})
       render()
 
       return () => {
@@ -874,5 +904,5 @@ export function apply(ctx) {
     },
   })
 
-  ctx.logger.debug('运行日志设置页就绪')
+  ctx.logger.debug('运行日志视图就绪')
 }
