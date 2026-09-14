@@ -82,6 +82,8 @@ export function apply(ctx) {
     chat_send: '发送消息',
     send_document: '发送资料',
     read_document: '读取资料',
+    read_forward: '读取转发记录',
+    napcat_card: '处理 QQ 卡片',
   }
   const TYPING_TOOLS = new Set(['chat_send', 'send_document'])
 
@@ -521,6 +523,20 @@ export function apply(ctx) {
     }
 
     try {
+      const imageService = ctx.registry.get('image-service')
+      // 只有会话里真的存在“未预加载的 imageId”时才异步取图，避免给普通聊天增加额外 await。
+      // 必须放在构造 user wire 之前：NapCat / QQ / 微信入站图片在插件先写入消息时
+      // 只有 imageId，若等到 build 前才 hydration，协议轨迹里的用户消息会永远缺图。
+      const needsTurnImageHydration = () => !!(imageService?.needsHydration?.(conversationId) && imageService?.hydrateConversation)
+      const hydrateTurnImages = async () => {
+        // 先展示“思考中”占位气泡，再等待图片预加载；否则远程大图 hydration 的几秒内界面无反馈。
+        if (!entry.draftId) entry.draftId = messages.placeholder(conversationId)?.id || null
+        await Promise.race([
+          imageService.hydrateConversation(conversationId),
+          new Promise(resolve => setTimeout(resolve, 8000)),
+        ]).catch(() => {})
+        if (entry.cancelled) throw abortError()
+      }
       let userMessage = null
       if (!skipUserAppend) {
         const normalizedImages = (Array.isArray(images) ? images : [])
@@ -544,12 +560,6 @@ export function apply(ctx) {
           meta: { via: 'composer', ...(normalizedImages.length ? { images: normalizedImages } : {}) },
         })
         scheduleStatus(conversationId, userMessage?.id)
-        const userWire = builder.toModelMessage(userMessage, {
-          roleId,
-          channelId: userMessage?.channel_id || channelId,
-          timezone: builder.timezone?.(),
-        })
-        if (userWire) entry.protocol.push(userWire)
       } else {
         // 渠道插件已先写入入站消息（skipUserAppend=true），这里必须补一份 user wire，
         // 否则工具协议轨迹只有 assistant/tool，下一轮构建上下文时会丢掉用户刚说的话。
@@ -560,12 +570,6 @@ export function apply(ctx) {
             : null) ||
           [...sessionMessages].reverse().find(item => item?.role === 'user') ||
           null
-        const userWire = builder.toModelMessage(userMessage, {
-          roleId,
-          channelId: userMessage?.channel_id || channelId,
-          timezone: builder.timezone?.(),
-        })
-        if (userWire) entry.protocol.push(userWire)
       }
       emitStatus(conversationId, 'thinking', { round: 0, label: '正在思考' })
       // 日志页据此展示“谁 / 哪个渠道 / 说了什么”，而不是只有一串 conversationId。
@@ -581,22 +585,22 @@ export function apply(ctx) {
         channelType: requestStartChannelType,
       })
 
+      // 图片 hydration 可能等几秒：先发状态 / 开始生成事件（停止按钮立即出现），
+      // 但必须在构造 user wire 之前完成，协议轨迹里的用户消息才带得上图片。
+      if (needsTurnImageHydration()) await hydrateTurnImages()
+      const userWire = builder.toModelMessage(userMessage, {
+        roleId,
+        channelId: userMessage?.channel_id || channelId,
+        timezone: builder.timezone?.(),
+      })
+      if (userWire) entry.protocol.push(userWire)
+
       // 模型开始思考时先展示占位气泡（三点动画）；工具真正发出消息前会移除它，
       // 普通文本降级时则复用它继续流式输出。
-      const thinking = messages.placeholder(conversationId)
+      const thinking = ensureDraft(entry, conversationId)
       entry.draftId = thinking?.id || null
 
       const persona = String(conv.meta?.persona || '').trim()
-      const imageService = ctx.registry.get('image-service')
-      // 只有会话里真的存在“未预加载的 imageId”时才异步取图，避免给普通聊天增加额外 await
-      // （否则停止生成等交互可能抢在 stream 创建之前，影响原有即时取消语义）。
-      if (imageService?.needsHydration?.(conversationId) && imageService?.hydrateConversation) {
-        await Promise.race([
-          imageService.hydrateConversation(conversationId),
-          new Promise(resolve => setTimeout(resolve, 8000)),
-        ]).catch(() => {})
-        if (entry.cancelled) throw abortError()
-      }
       const base = builder.build({ conversationId, roleId, persona, channelId, currentMessageId: userMessage?.message_id || userMessage?.id || null })
       const options = toolOptions(conv)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {

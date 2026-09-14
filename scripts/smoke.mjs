@@ -1151,6 +1151,13 @@ async function main() {
     if (html.includes('页面渲染失败')) pageErrors.push(`${page.id} 渲染失败`)
   }
   check('所有设置页渲染成功', pageErrors.length === 0, pageErrors.join(' | '))
+  const settingSearchHits = settingsContainer.searchItems('声音')
+  check(
+    '设置搜索能直接命中具体设置项',
+    settingSearchHits.some(item => item.name.includes('声音提示')) && settingSearchHits.some(item => item.pageId === 'notifications'),
+    JSON.stringify(settingSearchHits.map(item => `${item.pageId}/${item.name}`).slice(0, 8)),
+  )
+
   settingsContainer.open('appearance')
   await sleep(60)
   const appearanceNames = []

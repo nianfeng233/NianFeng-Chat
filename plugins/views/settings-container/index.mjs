@@ -41,15 +41,170 @@ export function apply(ctx) {
   let activeId = null
   let cleanupCurrent = null
   let navSearchQuery = ''
+  let settingItems = null
+  let searchResults = []
 
   const sorted = () =>
     [...pages.values()].sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0) || a.order - b.order)
 
   /** 入口已独立到侧栏 / 其它位置的页面可标记 hidden：仍能 open(id)，但不占用设置导航。 */
   const navPages = () => sorted().filter(page => !page.hidden)
+  // ------------------------------------------------------------------
+  // 设置项搜索：设置页标签只够找到“页面”，这里进一步索引每一行设置项，
+  // 支持直接输入“声音”“代理”“上下文”等关键词定位并跳转。
+  // 索引通过把设置页渲染到离屏节点构建，渲染完立即 cleanup，不污染当前页面。
+  // ------------------------------------------------------------------
+  const stripHtml = value => String(value ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+
+  const buildIndexForPage = page => {
+    const host = document.createElement('div')
+    let cleanup = null
+    const items = []
+    const previousSearchIndexing = ctx.__settingsSearchIndexing
+    try {
+      ctx.__settingsSearchIndexing = true
+      cleanup = page.render(host, ctx)
+      const rows = [...host.querySelectorAll('.setting-row')]
+      rows.forEach((row, rowIndex) => {
+        const name = stripHtml(row.querySelector('.setting-name')?.textContent || '')
+        if (!name) return
+        const help = stripHtml(row.querySelector('.setting-help')?.textContent || '')
+        const section = stripHtml(row.closest('.settings-section')?.querySelector('.settings-section-title')?.textContent || '')
+        items.push({
+          pageId: page.id,
+          group: page.group || '',
+          pageLabel: page.label || page.id,
+          section,
+          name,
+          help,
+          rowIndex,
+          haystack: `${page.group || ''} ${page.label || ''} ${section} ${name} ${help}`.toLowerCase(),
+        })
+      })
+      if (!items.length) {
+        items.push({
+          pageId: page.id,
+          group: page.group || '',
+          pageLabel: page.label || page.id,
+          section: '',
+          name: page.label || page.id,
+          help: page.description || '',
+          rowIndex: -1,
+          haystack: `${page.group || ''} ${page.label || ''} ${page.description || ''}`.toLowerCase(),
+        })
+      }
+    } catch (err) {
+      ctx.logger.warn?.(`构建设置搜索索引时跳过 ${page.id}：${err.message}`)
+    } finally {
+      try {
+        ctx.__settingsSearchIndexing = previousSearchIndexing
+          if (typeof cleanup === 'function') cleanup()
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    return items
+  }
+
+  const getSettingItems = () => {
+    if (settingItems) return settingItems
+    const list = []
+    for (const page of navPages()) list.push(...buildIndexForPage(page))
+    const seen = new Set()
+    settingItems = list.filter(item => {
+      const key = `${item.pageId}:${item.rowIndex}:${item.name}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    return settingItems
+  }
+
+  const searchSettingItems = query => {
+    const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean)
+    if (!terms.length) return []
+    return getSettingItems()
+      .map(item => {
+        const name = item.name.toLowerCase()
+        let score = 0
+        for (const term of terms) {
+          if (!item.haystack.includes(term)) return null
+          if (name === term) score += 100
+          else if (name.startsWith(term)) score += 70
+          else if (name.includes(term)) score += 45
+          else score += 10
+        }
+        return { ...item, score }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score || a.rowIndex - b.rowIndex)
+      .slice(0, 30)
+  }
+
+  const iconOfPage = id => pages.get(id)?.icon || ''
+
+  const escapeText = value =>
+    String(value ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]))
+
+  const focusSettingItem = item => {
+    if (!item || !contentEl) return
+    const locate = () => {
+      if (!contentEl) return
+      const rows = [...contentEl.querySelectorAll('.setting-row')]
+      const nameOf = row => stripHtml(row.querySelector('.setting-name')?.textContent || '')
+      let target = item.rowIndex >= 0 ? rows[item.rowIndex] : null
+      if (!target || nameOf(target) !== item.name) target = rows.find(row => nameOf(row) === item.name) || target
+      if (!target) return
+      try {
+        target.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+      } catch (_) {
+        try {
+          target.scrollIntoView?.()
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      target.classList.add('settings-search-hit')
+      setTimeout(() => target.classList.remove('settings-search-hit'), 2400)
+    }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(locate)
+    else setTimeout(locate, 0)
+  }
+
 
   const renderNav = () => {
     for (const host of navHosts.values()) {
+      const searchQuery = navSearchQuery.trim()
+      if (searchQuery) {
+        const lower = searchQuery.toLowerCase()
+        const pageMatches = navPages().filter(page =>
+          `${page.group || ''} ${page.label || ''} ${page.description || ''}`.toLowerCase().includes(lower),
+        )
+        searchResults = searchSettingItems(searchQuery)
+        const pageButtons = pageMatches
+          .map(
+            page => `<button class="settings-nav-item ${page.id === activeId ? 'active' : ''}" data-page="${page.id}">
+              ${page.icon || ''}<span class="nav-label">${escapeText(page.label)}</span>
+            </button>`,
+          )
+          .join('')
+        const itemButtons = searchResults
+          .map(
+            (item, index) => `<button class="settings-nav-item settings-nav-result ${item.pageId === activeId ? 'active' : ''}" data-page="${item.pageId}" data-settings-item="${index}">
+              ${iconOfPage(item.pageId)}<span class="nav-label">${escapeText(item.name)}</span>
+              <span class="settings-result-hint">${escapeText(item.section || item.pageLabel)}</span>
+            </button>`,
+          )
+          .join('')
+        host.innerHTML = `
+          <div class="settings-nav-group settings-nav-search-results">
+            <div class="settings-nav-head">搜索结果</div>
+            ${pageButtons}${itemButtons}
+            ${!pageButtons && !itemButtons ? '<div class="settings-nav-empty">没有找到匹配的设置项</div>' : ''}
+          </div>`
+        continue
+      }
+      searchResults = []
       const groups = new Map()
       for (const page of navPages()) {
         if (!groups.has(page.group)) groups.set(page.group, [])
@@ -86,7 +241,7 @@ export function apply(ctx) {
     }
   }
 
-  const openPage = id => {
+  const openPage = (id, options = {}) => {
     const page = pages.get(id) || pages.get('account') || navPages()[0] || sorted()[0]
     if (!page) return
     activeId = page.id
@@ -103,6 +258,7 @@ export function apply(ctx) {
       }
     }
     renderNav()
+    focusSettingItem(options?.item)
     events.emit('settings:page-changed', { id: page.id })
   }
 
@@ -117,9 +273,13 @@ export function apply(ctx) {
       })
       const disposer = () => {
         pages.delete(page.id)
+        settingItems = null
+        searchResults = []
         if (activeId === page.id) openPage('account')
         else renderNav()
       }
+      settingItems = null
+      searchResults = []
       ctx.effect(disposer)
       renderNav()
       if (!activeId) openPage(page.hidden ? pages.get('account')?.id || navPages()[0]?.id : page.id)
@@ -127,6 +287,8 @@ export function apply(ctx) {
       return disposer
     },
     list: () => sorted(),
+    /** 设置项搜索：返回 { pageId, pageLabel, section, name, help, rowIndex }[]，供界面与测试使用。 */
+    searchItems: query => searchSettingItems(query),
     open: openPage,
     active: () => activeId,
     async enablePlugin(id) {
@@ -149,6 +311,12 @@ export function apply(ctx) {
       renderNav()
     }
     const onClick = e => {
+      const itemBtn = e.target.closest('[data-settings-item]')
+      if (itemBtn) {
+        const result = searchResults[Number(itemBtn.dataset.settingsItem)]
+        if (result) openPage(result.pageId, { item: result })
+        return
+      }
       const btn = e.target.closest('.settings-nav-item')
       if (btn) openPage(btn.dataset.page)
     }

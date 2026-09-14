@@ -94,7 +94,9 @@ export function apply(ctx) {
           row('打字最大延迟（毫秒）', '后续消息的动态延迟上限，默认 5000ms',
             input('chat.typingMaxMs', config.get('chat.typingMaxMs', 5000), { type: 'number', width: 90 })) +
           row('每字延迟（毫秒）', '延迟按消息字数线性增长，默认 35ms/字',
-            input('chat.typingPerCharMs', config.get('chat.typingPerCharMs', 35), { type: 'number', width: 80 })),
+            input('chat.typingPerCharMs', config.get('chat.typingPerCharMs', 35), { type: 'number', width: 80 })) +
+          row('本地图片保留数量', '本地图片文件最多保留多少张；超过后自动删除最旧的图片，默认 30 张',
+            input('chat.imageStoreLimit', config.get('chat.imageStoreLimit', 30), { type: 'number', width: 80 })),
         ))}`)
 
       const unbind = bindConfigControls(container, ctx, {

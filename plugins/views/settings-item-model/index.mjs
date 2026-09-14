@@ -116,7 +116,7 @@ export function apply(ctx) {
     label: '模型',
     icon: icons.cpu,
     order: 20,
-    render(container) {
+    render(container, hostCtx) {
       /* ---------------- 页面状态 ---------------- */
       let providerPayload = { providers: [], adapters: [], defaultProvider: '', defaultModel: '' }
       let health = null
@@ -131,6 +131,8 @@ export function apply(ctx) {
       let unbindConfig = null
       let unbindSliderConfig = null
       let disposed = false
+        // 设置搜索为了建立索引会把页面渲染到离屏节点；此时不启动网络请求与模型同步，避免搜索操作干扰正在进行的模型列表。
+        const settingsSearchIndexing = hostCtx?.__settingsSearchIndexing === true || ctx.__settingsSearchIndexing === true
 
       /** 官方服务插件是否存在；禁用它后内置模型区域会整体消失 */
       const officialService = () => ctx.registry.get('official-service')
@@ -1184,8 +1186,10 @@ export function apply(ctx) {
       ]
 
       render()
-      loadProviders()
-      if (officialService() && config.get('model.useBuiltin', true) !== false) loadBuiltin()
+      if (!settingsSearchIndexing) {
+        loadProviders()
+        if (officialService() && config.get('model.useBuiltin', true) !== false) loadBuiltin()
+      }
 
       return () => {
         disposed = true

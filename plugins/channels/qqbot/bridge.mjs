@@ -202,6 +202,7 @@ export function verifyWebhook(secret, timestamp, body, signatureHex) {
 
 export function apply(ctx) {
   const settings = ctx.settings
+  const imageKeep = () => Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined
   const hub = ctx.hub
   const httpApi = ctx.httpApi
 
@@ -259,7 +260,7 @@ export function apply(ctx) {
     if (closed && !force) return
     try {
       await mkdir(settings.dataDir, { recursive: true })
-      const tmp = `${statePath()}.${process.pid}.tmp`
+      const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
       await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8')
       await rename(tmp, statePath())
       try {
@@ -1772,7 +1773,12 @@ export function apply(ctx) {
         const buffer = await downloadBinary(item.url, { maxBytes: Math.min(MAX_MEDIA_BYTES, 3 * 1024 * 1024) })
         if (!buffer || totalBytes + buffer.length > 6 * 1024 * 1024) continue
         totalBytes += buffer.length
-        const record = await saveImageBuffer(settings.dataDir, buffer, { mime: item.mime, width: item.width, height: item.height })
+        const record = await saveImageBuffer(
+          settings.dataDir,
+          buffer,
+          { mime: item.mime, width: item.width, height: item.height },
+          { keep: imageKeep() },
+        )
         records.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
       } catch (_) {
         /* 单张失败不影响文本消息 */

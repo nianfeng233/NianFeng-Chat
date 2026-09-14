@@ -125,6 +125,8 @@ const DEFAULTS = {
   'chat.imageTokens': 800,
   // 自动上下文内联图片的总字节预算（data URL 字符数近似）：超过后降级为 [图片] 占位，防止 /api/chat 请求体爆掉
   'chat.imageBytesPerRequest': 8 * 1024 * 1024,
+    // 本地图片文件保留数量：超过后自动删除最旧的图片，避免硬盘无限增长
+    'chat.imageStoreLimit': 30,
   'chat.confirmSensitive': true,
   'chat.simulateTyping': true,
   'chat.typingMinMs': 500,
@@ -155,6 +157,8 @@ const DEFAULTS = {
   'notify.background': true,
   // 旧版「后台活动默认关闭」的一次性迁移标记
   'notify.backgroundDefaultMigrated': false,
+    // 服务器端系统通知兜底：远程 HTTP 访问浏览器禁止授权时，由后端所在机器弹系统通知
+    'notify.serverToast': true,
   'notify.pluginAllowed': true,
 }
 
@@ -197,7 +201,10 @@ export function apply(ctx) {
     for (const [key, oldValue, newValue] of LEGACY_DEFAULT_MIGRATIONS) {
       if (!hasPath(data, key)) continue
       if (getPath(data, key) !== oldValue) continue
-      if (meta[key]) continue
+      // 只有“用户真正改过”的键才跳过迁移；早期自动写入的 meta 可能是 {at:0}，
+      // 不能让它挡住旧默认值（如 imagesPerRequest=4）升级到新默认 2。
+      const metaAt = Number(meta[key]?.at)
+      if (Number.isFinite(metaAt) && metaAt > 0) continue
       setPath(data, key, newValue)
       changed.push({ key, value: newValue })
     }

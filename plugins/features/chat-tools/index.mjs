@@ -30,8 +30,24 @@ export const depends = {
   'session-service': '>=2.0.0',
   'tool-registry': '^1.0.0',
 }
-export const optionalDepends = {}
-export const inject = ['tool-registry', 'chat-store', 'document-service', 'chat-permissions', 'context-builder', 'session-service', 'config', 'event-bus']
+export const optionalDepends = {
+  'napcat': '^1.0.0',
+  'backend-client': '>=1.0.0',
+  'image-service': '>=1.0.0',
+}
+export const inject = [
+  'tool-registry',
+  'chat-store',
+  'document-service',
+  'chat-permissions',
+  'context-builder',
+  'session-service',
+  'config',
+  'event-bus',
+  'api?',
+  'napcat-channel?',
+  'image-service?',
+]
 export const provides = [{ name: 'chat-tools', type: 'singleton' }]
 
 import { looksLikeToolMarkup, parseTextToolCalls } from '../../../src/util/tool-text.mjs'
@@ -45,6 +61,9 @@ export function apply(ctx) {
   const sessions = ctx.inject('session-service')
   const config = ctx.inject('config')
   const events = ctx.inject('event-bus')
+  const api = ctx.inject('api?')
+  const napcatChannel = ctx.inject('napcat-channel?')
+  const imageService = ctx.inject('image-service?') || ctx.registry.get('image-service')
 
   const unavailable = () => ({ ok: false, code: 'CHANNEL_UNAVAILABLE', error: '目标渠道不可用' })
 
@@ -387,6 +406,245 @@ export function apply(ctx) {
     return { ok: result.ok, ...result, error: result.error }
   }
 
+  /** 读取当前渠道 / 指定消息的合并转发记录：后端按页返回，避免一次把转发全部塞进上下文。 */
+  const readForward = async (args, context) => {
+    const list = store.messagesOf(context.channelId) || []
+    const byMessageId = id => list.find(item => String(item.message_id || item.id || '') === String(id || ''))
+    const latestForward = () => [...list].reverse().find(item => item.meta?.forward?.id)
+    let message = null
+    let forwardId = String(args.forward_id || args.forwardId || '').trim()
+    if (!forwardId && args.message_id) message = byMessageId(args.message_id)
+    if (!forwardId) message = message || latestForward()
+    if (!forwardId) forwardId = String(message?.meta?.forward?.id || '').trim()
+    if (!forwardId) return { ok: false, error: '没有找到合并转发记录：请传 forward_id 或 message_id，或先在当前渠道转发一段聊天记录。' }
+    if (!api?.post) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用，无法深读转发记录。' }
+
+    const includeImages = args.include_images === true || String(args.include_images) === 'true'
+    // 默认从第 0 条开始，而不是跳过预览：预览可能被截断，模型需要能重新读取完整正文。
+    // 继续读后续消息时应显式传 offset=已返回条数。
+    const offset = Math.max(0, Number(args.offset ?? 0) || 0)
+    const limit = Math.max(1, Math.min(20, Number(args.limit) || 5))
+    const textOffset = Math.max(0, Number(args.text_offset) || 0)
+    const imageLimit = Math.max(0, Math.min(2, Number(args.image_limit) || 2))
+    let result = null
+    try {
+      result = await api.post('/napcat/forward/read', {
+        id: forwardId,
+        instanceId: String(args.instance_id || message?.meta?.instanceId || ''),
+        offset,
+        limit,
+        text_offset: textOffset,
+          include_images: includeImages,
+        image_limit: imageLimit,
+      })
+    } catch (err) {
+      return { ok: false, error: `读取转发记录失败：${err?.message || err}` }
+    }
+    if (!result?.ok) return { ok: false, code: result?.code || 'READ_FAILED', error: result?.error || '转发记录读取失败' }
+
+    const items = Array.isArray(result.items) ? result.items : []
+    const imageParts = []
+    if (includeImages && imageLimit > 0 && imageService) {
+      const refs = []
+      for (const item of items) {
+        for (const image of Array.isArray(item.preview_images) ? item.preview_images : []) refs.push(image)
+      }
+      if (refs.length && imageService.hydrateImages) {
+        try {
+          await imageService.hydrateImages(refs)
+        } catch (_) {
+          /* 单张失败不影响文字结果 */
+        }
+      }
+      for (const item of items) {
+        for (const image of Array.isArray(item.preview_images) ? item.preview_images : []) {
+          if (imageParts.length >= imageLimit) break
+          const url = image?.dataUrl || imageService.dataUrlOf?.(image) || image?.url || ''
+          if (url) imageParts.push({ type: 'image_url', image_url: { url: String(url) }, item_index: item.index })
+        }
+        if (imageParts.length >= imageLimit) break
+      }
+    }
+
+    return {
+      ok: true,
+      forward_id: result.id || forwardId,
+      instance_id: result.instance_id || undefined,
+      title: result.title || '聊天记录',
+      total: result.total,
+      offset: result.offset ?? offset,
+      returned: items.length,
+      next_offset: result.next_offset ?? null,
+        next_text_offset: result.next_text_offset ?? null,
+      has_more: result.has_more === true,
+        truncated: result.truncated || undefined,
+      items: items.map(item => ({
+        index: item.index,
+        sender_name: item.sender_name,
+        time: item.time,
+        text: item.text,
+          text_offset: item.text_offset || undefined,
+          text_length: item.text_length || undefined,
+          text_truncated: item.text_truncated || undefined,
+        image_count: item.image_count || item.image_available || undefined,
+        nested_forward: item.nested_forward || undefined,
+      })),
+      images: imageParts.length ? imageParts : undefined,
+      image_note: imageParts.length ? '已附带本页前两张图片；非必要不要继续读取图片。' : undefined,
+      hint:
+        result.hint ||
+        '继续读取请带同一个 forward_id 和 next_offset；嵌套转发可用 items[].nested_forward.id 作为新的 forward_id。',
+    }
+  }
+
+  const extractCardFlag = card => {
+    const direct = card?.flag || card?.request_id || card?.requestId || card?.reqId || ''
+    if (direct) return String(direct)
+    const raw = String(card?.raw || '')
+    try {
+      const parsed = JSON.parse(raw)
+      const found = parsed?.flag || parsed?.request_id || parsed?.requestId || parsed?.reqId || ''
+      if (found) return String(found)
+    } catch (_) {
+      /* raw 不是 JSON 时继续用正则 */
+    }
+    const match = raw.match(/(?:flag|request_id|requestId)["']?\s*[:=]\s*["']?([^"',\s}]+)/i)
+    return match ? String(match[1]) : ''
+  }
+
+  const classifyCard = card => {
+    const app = String(card?.app || '')
+    const hay = `${app} ${card?.title || ''} ${card?.summary || ''}`.toLowerCase()
+    if (card?.kind === 'group_invite' || /群邀请|加入群聊|group.?join|join.?group/.test(hay)) return 'group_invite'
+    if (card?.kind === 'contact_card') return 'contact_card'
+    if (card?.kind === 'binding_card') return 'binding_card'
+    if (/推荐|联系人|名片|friend|contact|recommend/.test(hay)) return 'contact_card'
+    if (/绑定|关系|bind|relation/.test(hay)) return 'binding_card'
+    return 'qq_card'
+  }
+
+  const findCardMessage = (messageId, context) => {
+    const list = store.messagesOf(context.channelId) || []
+    if (messageId) return list.find(item => String(item.message_id || item.id || '') === String(messageId)) || null
+    return [...list].reverse().find(item => item.meta?.card || item.meta?.cards?.length) || null
+  }
+
+  /** QQ 卡片处理：查看 / 提取链接 / 对有 request flag 的邀请执行同意或拒绝。 */
+  const napcatCard = async (args, context) => {
+    const action = String(args.action || 'info').toLowerCase()
+    const message = findCardMessage(args.message_id, context)
+    if (!message) return { ok: false, error: '当前渠道没有找到可处理的 QQ 卡片消息。' }
+    const card =
+      message.meta?.card && typeof message.meta.card === 'object'
+        ? message.meta.card
+        : Array.isArray(message.meta?.cards)
+          ? message.meta.cards.find(item => item && typeof item === 'object') || null
+          : null
+    if (!card) return { ok: false, error: '这条消息没有可解析的卡片数据。' }
+    const kind = classifyCard(card)
+    const messageId = String(message.message_id || message.id || '')
+    const summary = {
+      kind,
+      app: card.app || undefined,
+      title: card.title || undefined,
+      summary: card.summary || undefined,
+      url: card.url || undefined,
+      prompt: card.prompt || undefined,
+    }
+    const flag = extractCardFlag(card)
+    const instanceId = String(message.meta?.instanceId || args.instance_id || '')
+    const canHandle = !!(flag && napcatChannel?.action && instanceId && kind !== 'binding_card')
+    const availableActions = ['info', 'open', 'ignore']
+    if (canHandle) availableActions.push('handle')
+
+    if (action === 'info') {
+      return {
+        ok: true,
+        message_id: messageId,
+        card: summary,
+        has_request_flag: !!flag,
+        can_auto_handle: canHandle,
+        available_actions: availableActions,
+        hint: canHandle
+          ? '可用 handle + approve=true/false 处理这条邀请；敏感操作前应先询问用户。'
+          : '这条卡片没有 OneBot request flag，无法自动同意/拒绝；可把内容或链接转述给用户，请用户在 QQ 客户端里确认。',
+      }
+    }
+
+    if (action === 'open') {
+      const url = String(card.url || '').trim()
+      return url
+        ? { ok: true, message_id: messageId, url, hint: '可以把链接转述给用户，由用户决定是否打开。' }
+        : { ok: false, code: 'NO_URL', error: '这条卡片没有可打开的链接。' }
+    }
+
+    if (action === 'ignore') {
+      try {
+        sessions.updateMessage(context.conversationId, messageId, {
+          meta: { ...(message.meta || {}), cardHandled: 'ignored', cardHandledAt: Date.now() },
+        })
+      } catch (_) {
+        /* 标记失败不影响返回 */
+      }
+      return { ok: true, message_id: messageId, handled: 'ignored', hint: '已忽略这条卡片，不再处理。' }
+    }
+
+    if (action !== 'handle') {
+      return { ok: false, error: 'action 只支持 info / open / ignore / handle。' }
+    }
+    if (kind === 'binding_card') {
+      return {
+        ok: false,
+        code: 'UNSUPPORTED_CARD',
+        message_id: messageId,
+        card: summary,
+        error: '绑定关系卡片没有通用 OneBot 处理接口；模型只能转述详情/链接，或让用户自行确认绑定，不能替用户操作。',
+      }
+    }
+
+    if (!flag) {
+      return {
+        ok: false,
+        code: 'MANUAL_REQUIRED',
+        message_id: messageId,
+        card: summary,
+        error: '这条卡片没有 OneBot request flag，无法自动处理；请把卡片内容/链接转述给用户，由用户在 QQ 客户端确认。',
+      }
+    }
+    if (!napcatChannel?.action || !instanceId) {
+      return { ok: false, code: 'NO_NAPCAT', message_id: messageId, error: '当前消息没有可用的 NapCat 连接，无法自动处理。' }
+    }
+    const approve = args.approve !== false && String(args.approve) !== 'false'
+    const reason = String(args.reason || '').slice(0, 200)
+    const napcatAction = kind === 'group_invite' || /group/.test(String(card.app || '')) ? 'set_group_add_request' : 'set_friend_add_request'
+    const params =
+      napcatAction === 'set_group_add_request'
+        ? { flag, approve, reason: reason || ' ' }
+        : { flag, approve, remark: reason || ' ' }
+    let result = null
+    try {
+      result = await napcatChannel.action(instanceId, napcatAction, params)
+    } catch (err) {
+      return { ok: false, error: `NapCat 处理失败：${err?.message || err}` }
+    }
+    if (!result || result.ok !== true) return { ok: false, code: result?.code || 'ACTION_FAILED', error: result?.error || 'NapCat 返回处理失败', card: summary }
+    try {
+      sessions.updateMessage(context.conversationId, messageId, {
+        meta: { ...(message.meta || {}), cardHandled: approve ? 'approved' : 'rejected', cardHandledAt: Date.now() },
+      })
+    } catch (_) {
+      /* 标记失败不影响结果 */
+    }
+    return {
+      ok: true,
+      message_id: messageId,
+      handled: approve ? 'approved' : 'rejected',
+      kind,
+      action: napcatAction,
+      hint: approve ? '已同意；可以简短告知用户处理结果。' : '已拒绝；可以简短告知用户处理结果。',
+    }
+  }
+
   const disposers = [
     registry.register(
       'read_messages',
@@ -486,6 +744,46 @@ export function apply(ctx) {
       },
       readDocument,
     ),
+    registry.register(
+      'read_forward',
+      {
+        description:
+          '分页读取合并转发聊天记录。转发消息默认只自动展示前几条和前两张图片；只有确实需要更多内容时才调用本工具，默认从预览结束的位置继续，每次 limit 建议 5~10，不要一次性读取全部。若某条 items[].text_truncated=true，说明该条正文很长，需要带同一个 offset、limit=1 和 text_offset（从 0 开始，之后用返回的 next_text_offset 续读）直到拿到完整正文。嵌套转发可用 items[].nested_forward.id 作为新的 forward_id。图片不是必要信息时保持 include_images=false。',
+        parameters: {
+          type: 'object',
+          properties: {
+            forward_id: { type: 'string', description: '转发的根 id；通常从当前消息 meta.forward.id 或上一次 read_forward 返回里获取。' },
+            message_id: { type: 'string', description: '指定某条包含转发记录的消息；省略时使用当前渠道最近一条转发。' },
+            offset: { type: 'number', description: '从第几条开始读，默认 0（预览可能被截断，需要完整正文时要用这个重新读）；继续读后续消息时传 next_offset。' },
+            limit: { type: 'number', description: '本次读取条数，默认 5，最大 20。续读单条长文本时建议 limit=1。' },
+              text_offset: { type: 'number', description: '单条长文本的字符偏移；text_truncated=true 时配合同一个 offset、limit=1 使用，并按 next_text_offset 续读。' },
+            include_images: { type: 'boolean', description: '是否附带本页图片；默认 false，非必要不要开启。' },
+            image_limit: { type: 'number', description: '附带图片数量上限，默认 2，最大 2。' },
+            instance_id: { type: 'string', description: '可选 NapCat 连接 id；一般由工具从消息 meta 自动获取。' },
+          },
+        },
+      },
+      readForward,
+    ),
+    registry.register(
+      'napcat_card',
+      {
+        description:
+          '处理 QQ 卡片消息（群邀请、推荐联系人、绑定关系等）。先用 action=info 查看卡片详情与可用动作；action=open 返回卡片链接；action=ignore 忽略；只有卡片带 OneBot request flag 时才能用 action=handle + approve=true/false 自动同意或拒绝。同意好友/入群、拒绝等敏感操作前必须先让用户确认。',
+        parameters: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['info', 'open', 'ignore', 'handle'], description: '默认 info。' },
+            message_id: { type: 'string', description: '卡片消息的 message_id；省略时使用当前渠道最近一条卡片。' },
+            approve: { type: 'boolean', description: 'handle 时 true=同意，false=拒绝。' },
+            reason: { type: 'string', description: 'handle 时的备注 / 拒绝理由，可选。' },
+            instance_id: { type: 'string', description: '可选 NapCat 连接 id；一般自动获取。' },
+          },
+        },
+      },
+      napcatCard,
+    ),
+
   ]
 
   const service = {

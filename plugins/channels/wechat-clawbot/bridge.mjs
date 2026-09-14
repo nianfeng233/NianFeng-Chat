@@ -212,7 +212,7 @@ async function downloadWxImage(imageItem) {
 }
 
 /** 给一条入站消息补上图片 data URL；单条最多 4 张、总量 3MB，失败的静默跳过。 */
-async function hydrateIncomingImages(message, dataDir) {
+async function hydrateIncomingImages(message, dataDir, keep = undefined) {
   const items = Array.isArray(message?._imageItems) ? message._imageItems.slice(0, 4) : []
   delete message?._imageItems
   if (!items.length) return message
@@ -224,7 +224,7 @@ async function hydrateIncomingImages(message, dataDir) {
       if (!image) continue
       if (totalBytes + (image.size || 0) > 3 * 1024 * 1024) break
       totalBytes += image.size || 0
-      const record = await saveImageBuffer(dataDir, image.buffer, { mime: image.mime })
+      const record = await saveImageBuffer(dataDir, image.buffer, { mime: image.mime }, { keep: keep || undefined })
       images.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
     } catch (_) {
       /* 单张失败不影响消息本身 */
@@ -237,6 +237,7 @@ async function hydrateIncomingImages(message, dataDir) {
 export function apply(ctx) {
   // 后端是真实 cordis：inject 声明会先把服务放到 ctx 上，这里直接读取。
   const settings = ctx.settings
+  const imageKeep = () => Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined
   const hub = ctx.hub
   const sessions = new Map()
   let state = { version: 1, accounts: {} }
@@ -288,7 +289,7 @@ export function apply(ctx) {
     if (closed && !force) return
     try {
       await mkdir(settings.dataDir, { recursive: true })
-      const tmp = `${statePath()}.${process.pid}.tmp`
+      const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
       await writeFile(tmp, JSON.stringify(state, null, 2), 'utf8')
       await rename(tmp, statePath())
       try {
@@ -504,7 +505,7 @@ export function apply(ctx) {
         }
         for (const raw of extractMessages(response)) {
           if (isOwnMessage(raw)) continue
-          const message = await hydrateIncomingImages(normalizeIncoming(raw), settings.dataDir)
+          const message = await hydrateIncomingImages(normalizeIncoming(raw), settings.dataDir, imageKeep())
           if (!message) continue
           if (message.contextToken) {
             session.contextTokens[message.fromUserId] = message.contextToken

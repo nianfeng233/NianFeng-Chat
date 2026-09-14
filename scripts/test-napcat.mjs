@@ -45,6 +45,9 @@ async function main() {
   const actions = []
   let ws = null
   let instanceId = ''
+  const longStory = '超长转发正文测试。'.repeat(300)
+  const longStory2 = '续读测试。'.repeat(5000)
+
 
   const request = async (path, options = {}) => {
     const response = await fetch(`${api}${path}`, {
@@ -66,6 +69,59 @@ async function main() {
       send({ status: 'ok', retcode: 0, data: [{ group_id: 22222, group_name: '测试群' }], echo: payload.echo })
     } else if (payload.action === 'get_version_info') {
       send({ status: 'ok', retcode: 0, data: { app_name: 'NapCat.Test', version: '1.0.0' }, echo: payload.echo })
+    } else if (payload.action === 'get_msg') {
+      const messageId = String(payload.params?.message_id ?? '')
+      send({
+        status: 'ok',
+        retcode: 0,
+        data:
+          messageId === '7001'
+            ? {
+                message_id: '7001',
+                time: Math.floor(Date.now() / 1000) - 60,
+                sender: { user_id: 10001, nickname: '测试机器人' },
+                message: [
+                    { type: 'text', data: { text: '原来的消息原文' } },
+                    { type: 'image', data: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==' } },
+                  ],
+              }
+            : {},
+        echo: payload.echo,
+      })
+    } else if (payload.action === 'get_forward_msg') {
+      const forwardId = String(payload.params?.id ?? '')
+      send({
+        status: 'ok',
+        retcode: 0,
+        data: {
+          messages:
+            forwardId === '9003'
+                ? [{ user_id: 10007, nickname: '戊', message: [{ type: 'text', data: { text: longStory2 } }] }]
+                : forwardId === '9002'
+                  ? [{ user_id: 10006, nickname: '丁', message: [{ type: 'text', data: { text: longStory } }] }]
+                : forwardId === '9001'
+              ? [{ user_id: 10005, nickname: '丙', message: [{ type: 'text', data: { text: '更深一层' } }] }]
+              : [
+                  { user_id: 10003, nickname: '甲', time: Math.floor(Date.now() / 1000) - 50, message: [{ type: 'text', data: { text: '转发第一条' } }] },
+                  {
+                    user_id: 10004,
+                    nickname: '乙',
+                    time: Math.floor(Date.now() / 1000) - 40,
+                    message: [
+                      { type: 'text', data: { text: '转发第二条' } },
+                      {
+                        type: 'image',
+                        data: {
+                          url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==',
+                        },
+                      },
+                      { type: 'forward', data: { id: '9001', title: '嵌套层' } },
+                    ],
+                  },
+                ],
+        },
+        echo: payload.echo,
+      })
     } else if (payload.action === 'send_group_msg' || payload.action === 'send_private_msg') {
       send({ status: 'ok', retcode: 0, data: { message_id: 9001 }, echo: payload.echo })
     } else {
@@ -231,6 +287,172 @@ async function main() {
       fallbackMessage?.mentionedSelf === true && fallbackMessage?.selfId === '10001' && fallbackMessage?.atUserIds?.includes('10001'),
       JSON.stringify({ selfId: fallbackMessage?.selfId, mentionedSelf: fallbackMessage?.mentionedSelf, atUserIds: fallbackMessage?.atUserIds }),
     )
+
+    // 3c) 引用 / 合并转发 / QQ 卡片：模型侧必须能拿到原文与转发条目
+    const inviteCard = JSON.stringify({
+      app: 'com.tencent.qqconnect.group',
+      prompt: '[群邀请] 测试群邀请',
+      meta: { detail_1: { title: '测试群邀请', desc: '邀请你加入测试群' } },
+      jumpUrl: 'https://qun.qq.com/join/abc',
+    })
+    pushEvent({
+      post_type: 'message',
+      message_type: 'group',
+      sub_type: 'normal',
+      message_id: 1003,
+      group_id: 22222,
+      user_id: 10002,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      message: [
+        { type: 'reply', data: { id: '7001', user_id: '10001' } },
+        { type: 'forward', data: { id: '9000' } },
+        { type: 'json', data: { data: inviteCard } },
+        { type: 'text', data: { text: ' 看看这些' } },
+      ],
+      sender: { user_id: 10002, nickname: 'QQ昵称甲', card: '群昵称甲', role: 'member' },
+    })
+    const richMessage = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(channelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '1003')?.message || null
+    })
+    check(
+      '引用消息会通过 get_msg 取回原文',
+      richMessage?.quote?.available === true &&
+        String(richMessage.quote.text || '').includes('原来的消息原文') &&
+        richMessage.quote.senderName === '测试机器人' &&
+          richMessage.quote.message_id === '7001' &&
+          !Number.isNaN(Date.parse(richMessage.quote.time || '')) &&
+          richMessage.quote.images?.length === 1,
+      JSON.stringify(richMessage?.quote || null),
+    )
+    check(
+      '合并转发会通过 get_forward_msg 取回结构化预览',
+      richMessage?.forward?.preview?.length === 2 &&
+        String(richMessage.forward.preview[0]?.text || '').includes('转发第一条') &&
+        String(richMessage.forward.preview[1]?.text || '').includes('转发第二条') &&
+        Number(richMessage.forward.preview[1]?.image_count) === 1 &&
+        richMessage.forward.preview[1]?.preview_images?.length === 1 &&
+        Number(richMessage.forward.images_shown) === 1 &&
+        Number(richMessage.forward.total) === 2 &&
+        richMessage.forward.has_more === false,
+      JSON.stringify(richMessage?.forward || null),
+    )
+    check(
+      '群邀请卡片被识别为 group_invite 并保留标题',
+      richMessage?.card?.kind === 'group_invite' && String(richMessage.card.title || '').includes('测试群邀请'),
+      JSON.stringify(richMessage?.card || null),
+    )
+    check(
+      '引用 / 转发不会吞掉本条正文',
+      String(richMessage?.text || '').includes('看看这些'),
+      JSON.stringify(richMessage?.text || ''),
+    )
+
+    // 3d) 超长单条转发正文：预览只截前 1000 字，但深读必须能拿到完整原文
+    pushEvent({
+      post_type: 'message',
+      message_type: 'group',
+      sub_type: 'normal',
+      message_id: 1004,
+      group_id: 22222,
+      user_id: 10002,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      message: [
+        { type: 'forward', data: { id: '9002', title: '超长文本转发' } },
+        { type: 'text', data: { text: ' 看完告诉我' } },
+      ],
+      sender: { user_id: 10002, nickname: 'QQ昵称甲', card: '群昵称甲', role: 'member' },
+    })
+    const longForwardMessage = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(channelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '1004')?.message || null
+    })
+    check(
+      '超长单条转发在上下文里只给预览并标记 text_truncated',
+      longForwardMessage?.forward?.preview?.[0]?.text_truncated === true &&
+        Number(longForwardMessage.forward.preview?.[0]?.text_length) === longStory.length &&
+        String(longForwardMessage.forward.preview?.[0]?.text || '').length <= 1001,
+      JSON.stringify(longForwardMessage?.forward?.preview?.[0] || null),
+    )
+    const longForwardPage = await request('/napcat/forward/read', {
+      method: 'POST',
+      body: { id: '9002', offset: 0, limit: 1 },
+    })
+    check(
+      'read_forward 深读能拿到超长消息完整正文',
+      longForwardPage.data?.ok === true &&
+        String(longForwardPage.data.items?.[0]?.text || '').length === longStory.length &&
+        longForwardPage.data.items?.[0]?.text_truncated !== true,
+      JSON.stringify({
+        returned: longForwardPage.data?.items?.[0]?.text?.length,
+        expected: longStory.length,
+        truncated: longForwardPage.data?.items?.[0]?.text_truncated,
+      }),
+    )
+    const longForwardPart1 = await request('/napcat/forward/read', {
+      method: 'POST',
+      body: { id: '9003', offset: 0, limit: 1 },
+    })
+    check(
+      '超过单次工具上限的超长消息会给出 next_text_offset',
+      longForwardPart1.data?.ok === true &&
+        String(longForwardPart1.data.items?.[0]?.text || '').length === 20000 &&
+        longForwardPart1.data.items?.[0]?.text_truncated === true &&
+        longForwardPart1.data.next_text_offset === 20000,
+      JSON.stringify({ length: longForwardPart1.data?.items?.[0]?.text?.length, next: longForwardPart1.data?.next_text_offset }),
+    )
+    const longForwardPart2 = await request('/napcat/forward/read', {
+      method: 'POST',
+      body: { id: '9003', offset: 0, limit: 1, text_offset: 20000 },
+    })
+    check(
+      '按 next_text_offset 可续读到完整正文',
+      longForwardPart2.data?.ok === true &&
+        String(longForwardPart2.data.items?.[0]?.text || '').length === longStory2.length - 20000 &&
+        longForwardPart2.data.next_text_offset === null,
+      JSON.stringify({ length: longForwardPart2.data?.items?.[0]?.text?.length, next: longForwardPart2.data?.next_text_offset }),
+    )
+
+
+
+    const forwardPage1 = await request('/napcat/forward/read', { method: 'POST', body: { id: '9000', offset: 0, limit: 1 } })
+    check(
+      '转发深读接口按页返回，不一次灌给模型',
+      forwardPage1.data?.ok === true &&
+        forwardPage1.data.items?.length === 1 &&
+        forwardPage1.data.next_offset === 1 &&
+        forwardPage1.data.has_more === true,
+      JSON.stringify(forwardPage1.data || null),
+    )
+    const forwardPage2 = await request('/napcat/forward/read', { method: 'POST', body: { id: '9000', offset: 1, limit: 5 } })
+    check(
+      '转发深读返回嵌套转发 id，供继续按需读取',
+      forwardPage2.data?.ok === true &&
+        String(forwardPage2.data.items?.[0]?.text || '').includes('转发第二条') &&
+        forwardPage2.data.items?.[0]?.nested_forward?.id === '9001',
+      JSON.stringify(forwardPage2.data || null),
+    )
+    const forwardImagePage = await request('/napcat/forward/read', {
+      method: 'POST',
+      body: { id: '9000', offset: 1, limit: 1, include_images: true, image_limit: 1 },
+    })
+    check(
+      '转发深读按需附图，且最多只带指定张数',
+      forwardImagePage.data?.ok === true &&
+        forwardImagePage.data.items?.[0]?.preview_images?.length === 1 &&
+        forwardImagePage.data.images_shown === 1,
+      JSON.stringify(forwardImagePage.data || null),
+    )
+    const nestedForwardPage = await request('/napcat/forward/read', { method: 'POST', body: { id: '9001', offset: 0, limit: 5 } })
+    check(
+      '嵌套转发按 id 回源读取成功',
+      nestedForwardPage.data?.ok === true && String(nestedForwardPage.data.items?.[0]?.text || '').includes('更深一层'),
+      JSON.stringify(nestedForwardPage.data || null),
+    )
+
+
 
     // 4) 发送：引用 + 艾特
     const beforeActions = actions.length

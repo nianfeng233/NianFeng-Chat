@@ -1059,6 +1059,11 @@ export function apply(ctx) {
         ...(options?.maxTokens === undefined && params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
         ...(options?.extraBody === undefined && params.extraBody !== undefined ? { extraBody: params.extraBody } : {}),
       }
+      // 后端最终图片预算：无论前端 / 工具 / 渠道怎么拼消息，一次请求只保留最近 N 张真图。
+      const configuredImageLimit = Number(settings.get()?.preferences?.chat?.imagesPerRequest)
+      const imageBudget = Number.isFinite(configuredImageLimit) ? Math.max(0, Math.min(8, configuredImageLimit)) : 2
+      const requestMessages = enforceImageBudget(messages || [], imageBudget)
+
 
       const emptyResponseRetries = Math.max(
         0,
@@ -1089,7 +1094,7 @@ export function apply(ctx) {
             {
               provider: cfg,
               model: useModel,
-              messages: messages || [],
+              messages: requestMessages,
               options: effectiveOptions,
               signal: controller.signal,
               onChunk: delta => {
@@ -1578,6 +1583,40 @@ function normalizeArguments(args) {
     return '{}'
   }
 }
+
+const isImageContentPart = part =>
+  !!part && typeof part === 'object' && (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image')
+
+/**
+ * 后端最终边界：一次模型请求最多保留最近 N 张真实图片，更早的图片统一降级为 [图片] 文本。
+ * 前端 context-builder 已经做过一次；这里再兜一层，防止工具结果、渠道拼接、自定义
+ * 适配器等路径绕过占位符，保证“只有最近两张原图进模型”的约定无论什么渠道都成立。
+ */
+function enforceImageBudget(messages = [], maxImages = 2) {
+  const list = Array.isArray(messages) ? messages : []
+  const limit = Math.max(0, Math.min(8, Number(maxImages) || 0))
+  let remaining =
+    list.reduce((count, message) => {
+      if (!message || typeof message !== 'object' || !Array.isArray(message.content)) return count
+      return count + message.content.filter(isImageContentPart).length
+    }, 0) - limit
+  if (remaining <= 0) return list
+  return list.map(message => {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) return message
+    let changed = false
+    const content = message.content.map(part => {
+      if (!isImageContentPart(part)) return part
+      if (remaining > 0) {
+        remaining -= 1
+        changed = true
+        return { type: 'text', text: '[图片]' }
+      }
+      return part
+    })
+    return changed ? { ...message, content } : message
+  })
+}
+
 
 /** 前端上下文 -> OpenAI 兼容 messages（保留 assistant.tool_calls / role=tool） */
 function toOpenAIMessages(messages = [], { keepReasoning = false, padReasoning = false } = {}) {

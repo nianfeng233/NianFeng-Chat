@@ -250,6 +250,61 @@ async function main() {
   check('空回复会自动重试', emptyAttempts === 2, `attempts=${emptyAttempts}`)
   check('重试仍为空后明确报错', !!emptyError && /空回复/.test(emptyError.message), emptyError?.message)
 
+  console.log('\n④e 后端最终图片预算：无论什么渠道只保留最近 2 张真图')
+  let budgetCaptured = null
+  backend.ctx.models.registerAdapter('image-budget-test', {
+    label: 'Image Budget Test',
+    async listModels() {
+      return [{ id: 'image-budget-1', name: 'Image Budget' }]
+    },
+    async test() {
+      return { detail: 'Image Budget Test 可用' }
+    },
+    async stream({ messages, onChunk, onDone }) {
+      budgetCaptured = JSON.parse(JSON.stringify(messages || []))
+      onChunk('ok')
+      onDone({})
+    },
+  })
+  await backend.ctx.settings.update({
+    preferences: { chat: { imagesPerRequest: 2 } },
+    providers: {
+      'image-budget-test': {
+        type: 'image-budget-test',
+        name: 'Image Budget Test',
+        baseURL: 'image-budget://local',
+        enabled: true,
+        models: [{ id: 'image-budget-1', name: 'Image Budget' }],
+        defaultModel: 'image-budget-1',
+      },
+    },
+  })
+  const imagePart = label => ({ type: 'image_url', image_url: { url: `data:image/png;base64,${label}` } })
+  await backend.ctx.models.stream({
+    provider: 'image-budget-test',
+    model: 'image-budget-1',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '旧图' }, imagePart('old-1'), imagePart('old-2')] },
+      { role: 'assistant', content: '收到' },
+      { role: 'user', content: [{ type: 'text', text: '新图' }, imagePart('new-1')] },
+    ],
+    options: {},
+  })
+  const budgetImages = (budgetCaptured || []).flatMap(message =>
+    Array.isArray(message.content) ? message.content.filter(part => part?.type === 'image_url') : [],
+  )
+  const budgetPlaceholders = (budgetCaptured || []).flatMap(message =>
+    Array.isArray(message.content) ? message.content.filter(part => part?.type === 'text' && part.text === '[图片]') : [],
+  )
+  check(
+    '后端最终预算只保留最近 2 张真图，更早的降级为 [图片]',
+    budgetImages.length === 2 &&
+      budgetPlaceholders.length === 1 &&
+      budgetImages.every(part => String(part.image_url?.url || '').includes('new-1') || String(part.image_url?.url || '').includes('old-2')),
+    JSON.stringify({ images: budgetImages.map(part => part.image_url?.url), placeholders: budgetPlaceholders.length }),
+  )
+
+
   // 远端拉取与已有模型合并：用户配置不能被覆盖
   backend.ctx.models.registerAdapter('merge-test', {
     label: 'Merge Test',

@@ -52,12 +52,20 @@ export function apply(ctx) {
         denied: '已拒绝',
         default: '未授权',
         unsupported: '浏览器不支持',
+        insecure: '远程 HTTP 限制（浏览器禁止授权）',
       }[permission] || permission
       const permissionColor = permission === 'granted' ? 'text-good' : permission === 'denied' ? 'text-bad' : 'text-warn'
+        const serverFallback = notification.serverFallbackAvailable?.() === true
       const permissionControl = hosted
         ? `<span class="${permissionColor}">● ${permissionText}</span>`
         : `<span class="${permissionColor}">● ${permissionText}</span>
            <button class="outline-btn" data-action="permission">请求授权</button>`
+        const finalPermissionControl =
+          permission === 'insecure'
+            ? `<span class="${permissionColor}">● ${permissionText}</span>
+               <span class="plugin-tag${serverFallback ? '' : ' disabled'}">${serverFallback ? '已启用服务器端通知兜底' : '无服务器端通知能力'}</span>`
+            : permissionControl
+
 
       const soundPresets = notification.soundPresets?.() || []
       const customSound = !!String(config.get('notify.soundData', '') || '').trim()
@@ -80,8 +88,10 @@ export function apply(ctx) {
              ${customSound ? '<button class="outline-btn danger-btn" data-action="clear-sound">清除</button>' : ''}`),
         ))}
         ${section('系统通知', card(
-          row('通知权限', hosted ? '桌面版由外壳直接发送 Windows 系统通知，不再经过浏览器权限' : '浏览器系统通知需要授权后才能显示', permissionControl) +
+          row('通知权限', hosted ? '桌面版由外壳直接发送 Windows 系统通知，不再经过浏览器权限' : '浏览器系统通知需要授权后才能显示；远程 HTTP 访问时浏览器禁止授权，会自动使用服务器端通知兜底；若已被拒绝，请在浏览器地址栏的站点设置里重置权限', finalPermissionControl) +
           row('发送系统通知', '在右下角通知中心之外，同时发送操作系统级通知；角色消息会带上角色头像', switchBtn('notify.system', true)) +
+          row('服务器端系统通知兜底', serverFallback ? '浏览器无法授权时（远程 HTTP 访问最常见），由运行后端的 Windows 电脑弹通知；只会在服务器本机显示' : '当前后端未检测到服务器端通知能力', switchBtn('notify.serverToast', true)) +
+
           row('测试系统通知', '验证系统级通道；失败时仍会在右下角显示应用内通知', '<button class="outline-btn" data-action="test-system">发送</button>') +
           row('测试角色消息', '按“角色头像 + 角色名 + 消息预览”的样式发送一条示例', '<button class="outline-btn" data-action="test-character">发送</button>'),
         ))}
@@ -99,7 +109,9 @@ export function apply(ctx) {
         const action = e.target.closest('[data-action]')?.dataset.action
         if (action === 'permission') {
           const result = await notification.requestPermission()
-          toast.info(`通知权限：${result}`)
+          if (result === 'insecure') toast.warn('远程 HTTP 页面无法申请浏览器通知权限，已自动改为服务器端通知兜底（在服务器本机弹窗）')
+          else if (result === 'unsupported') toast.warn('当前浏览器不支持系统级通知，仍会显示应用内通知中心')
+          else toast.info(`通知权限：${result}`)
           ctx.inject('settings-container').open('notifications')
           return
         }

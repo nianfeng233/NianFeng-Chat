@@ -846,6 +846,289 @@ async function main() {
   const tinyPlaceholders = tinyParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
   check('图片总字节预算超限时只保留装得下的最近图片', tinyImages.length === 1 && tinyPlaceholders >= 4, JSON.stringify({ images: tinyImages.length, placeholders: tinyPlaceholders }))
   config.set('chat.imageBytesPerRequest', 8 * 1024 * 1024)
+  const convGroupImg = sessions.create({
+    name: '群聊图片预算测试',
+    meta: { roleId: 'role-img-group', channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextRounds: 20 },
+  })
+  sessions.activate(convGroupImg.id)
+  const channelGroupImg = store.channelForConversation(convGroupImg.id)
+  for (let index = 0; index < 6; index++) {
+    store.append(convGroupImg.id, {
+      role: 'user',
+      content: `群图${index}`,
+      sender_id: 'group-user',
+      sender_name: '群友',
+      source: 'napcat',
+      meta: { images: [{ dataUrl: imgData, mime: 'image/png' }] },
+    })
+  }
+  const builtGroupImg = builder.build({ conversationId: convGroupImg.id, roleId: 'role-img-group', persona: '', channelId: channelGroupImg.channelId })
+  const groupImgParts = builtGroupImg.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const groupImageCount = groupImgParts.filter(part => part?.type === 'image_url').length
+  const groupPlaceholderCount = groupImgParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check(
+    '群聊 channel-only 渠道同样只保留最近 2 张原图',
+    groupImageCount === 2 && groupPlaceholderCount >= 4,
+    JSON.stringify({ images: groupImageCount, placeholders: groupPlaceholderCount }),
+  )
+
+
+  console.log('\n⑩h2 入站 imageId 在无 FileReader 的代聊环境也要能进入模型上下文')
+  const hydrationPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const savedImage = await (
+    await api(base, '/api/images', { method: 'POST', body: { dataUrl: hydrationPng, name: 'hydration.png' } })
+  ).json()
+  const convHydrate = sessions.create({ name: '入站图片 Hydration 测试', meta: { roleId: 'role-img-hydrate' } })
+  sessions.activate(convHydrate.id)
+  store.channelForConversation(convHydrate.id)
+  store.append(convHydrate.id, {
+    role: 'user',
+    content: '看看这张入站图片',
+    sender_id: 'qq:10002',
+    sender_name: 'QQ用户',
+    source: 'napcat',
+    meta: { via: 'napcat', images: [savedImage.image] },
+  })
+  const hydrateStreamOrigin = modelService.stream
+  let hydrateCaptured = null
+  modelService.stream = function (modelMessages, options, callbacks) {
+    const textual = value => {
+      if (Array.isArray(value)) return value.map(part => (part?.type === 'text' ? String(part.text || '') : '')).join('\n')
+      return String(value || '')
+    }
+    if (!hydrateCaptured && modelMessages?.some(message => textual(message.content).includes('看看这张入站图片'))) {
+      hydrateCaptured = JSON.parse(JSON.stringify(modelMessages))
+    }
+    return hydrateStreamOrigin.call(this, modelMessages, options, callbacks)
+  }
+  messages.requestSend(convHydrate.id, '看看这张入站图片', { skipUserAppend: true })
+  await waitFor(() => hydrateCaptured, { timeout: 6000 })
+  modelService.stream = hydrateStreamOrigin
+  const hydrateUser = hydrateCaptured?.find(message => message.role === 'user')
+  const hydrateParts = Array.isArray(hydrateUser?.content) ? hydrateUser.content : []
+  const hydrateImages = hydrateParts.filter(part => part?.type === 'image_url')
+  check(
+    '只有 imageId 的入站图片会被 hydration 成 data URL 后交给模型',
+    hydrateImages.length === 1 && String(hydrateImages[0].image_url?.url || '').startsWith('data:image/'),
+    JSON.stringify({ captured: !!hydrateCaptured, imageParts: hydrateImages.length, contentType: typeof hydrateUser?.content }),
+  )
+
+
+
+  console.log('\n⑩h3 引用 / 合并转发 / 卡片会以明确文本进入模型上下文')
+  const referenceWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '你怎么看？',
+      message_id: 'msg-reference-test',
+      sender_name: 'QQ用户',
+      sender_id: 'qq:10002',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        quote: { id: '7001', message_id: '7001', senderName: '小明', text: '今天晚上一起吃饭吗？', available: true },
+        forward: {
+          title: '群聊的聊天记录',
+          count: 2,
+          items: [
+            { sender_name: '甲', text: '第一条转发' },
+            { sender_name: '乙', text: '第二条转发', image_count: 1 },
+          ],
+        },
+        card: { kind: 'group_invite', title: '测试群邀请', summary: '邀请你加入测试群', app: 'com.tencent.qqconnect.group' },
+      },
+    },
+    { roleId: 'role-ref', channelId: 'napcat:test', timezone: 'UTC' },
+  )
+  const referenceJson = JSON.parse(String(referenceWire?.content || '{}'))
+  check(
+    '引用消息包含“引用了谁 + 原文”',
+    String(referenceJson?.content?.text || '').includes('【引用消息】') && String(referenceJson.content.text).includes('今天晚上一起吃饭吗？'),
+    String(referenceJson?.content?.text || '').slice(0, 200),
+  )
+  check(
+    '合并转发构建为“聊天记录转发：甲:… / 乙:…”',
+    String(referenceJson?.content?.text || '').includes('【聊天记录转发】') &&
+      String(referenceJson.content.text).includes('甲: 第一条转发') &&
+      String(referenceJson.content.text).includes('乙: 第二条转发'),
+    String(referenceJson?.content?.text || '').slice(0, 300),
+  )
+  check(
+    '群邀请卡片会被明确标注且不替代用户正文',
+    String(referenceJson?.content?.text || '').includes('【群邀请卡片】') &&
+      String(referenceJson.content.text).includes('你怎么看？') &&
+      referenceJson?.content?.card?.kind === 'group_invite',
+    String(referenceJson?.content?.text || '').slice(0, 300),
+  )
+
+  const quotePreviewPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const quoteImageWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '这句话什么意思？',
+      message_id: 'msg-quote-image-test',
+      sender_name: '念风',
+      sender_id: 'web-user',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        quote: {
+          id: '7001',
+          message_id: '7001',
+          senderName: '蜜语雅时痕',
+          senderId: 'qq:12345',
+          time: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          text: '[图片]',
+          image_count: 1,
+          images: [{ dataUrl: quotePreviewPng, mime: 'image/png', width: 1, height: 1 }],
+          available: true,
+        },
+      },
+    },
+    { roleId: 'role-quote-image', channelId: 'napcat:test', timezone: 'Asia/Shanghai' },
+  )
+  const quoteParts = Array.isArray(quoteImageWire?.content) ? quoteImageWire.content : []
+  const quoteJson = JSON.parse(String(quoteParts.find(part => part?.type === 'text')?.text || '{}'))
+  const quoteImageParts = quoteParts.filter(part => part?.type === 'image_url')
+  check(
+    '引用消息文本包含发送者、发送时间和 message_id',
+    String(quoteJson?.content?.text || '').includes('【引用消息】') &&
+      String(quoteJson.content.text).includes('蜜语雅时痕') &&
+      String(quoteJson.content.text).includes('message_id: 7001') &&
+      /\d{2}:\d{2}/.test(String(quoteJson.content.text)),
+    String(quoteJson?.content?.text || '').slice(0, 240),
+  )
+  check(
+    '被引用的图片会原样注入，而不是只给 [图片] 占位',
+    quoteImageParts.length === 1 &&
+      String(quoteImageParts[0].image_url?.url || '').startsWith('data:image/png') &&
+      Number(quoteJson?.content?.quote?.image_count) === 1,
+    JSON.stringify({ imageParts: quoteImageParts.length, quote: quoteJson?.content?.quote }),
+  )
+
+
+  const forwardPreviewPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const forwardPreviewWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '这些转发你看了吗？',
+      message_id: 'msg-forward-preview-test',
+      sender_name: 'QQ用户',
+      sender_id: 'qq:10002',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        forward: {
+          id: 'fwd-preview-test',
+          title: '群聊的聊天记录',
+          total: 12,
+          preview: [
+            {
+              index: 1,
+              sender_name: '甲',
+              text: '[图片×3]',
+              image_count: 3,
+              preview_images: [{ dataUrl: forwardPreviewPng, mime: 'image/png', width: 1, height: 1 }],
+            },
+          ],
+          preview_count: 1,
+          has_more: true,
+          image_total: 3,
+          images_shown: 1,
+        },
+      },
+    },
+    { roleId: 'role-forward-preview', channelId: 'napcat:test', timezone: 'UTC' },
+  )
+  const forwardParts = Array.isArray(forwardPreviewWire?.content) ? forwardPreviewWire.content : []
+  const forwardJson = JSON.parse(String(forwardParts.find(part => part?.type === 'text')?.text || '{}'))
+  const forwardImageParts = forwardParts.filter(part => part?.type === 'image_url')
+  check(
+    '合并转发默认只给预览，并提示用 read_forward 深读',
+    String(forwardJson?.content?.text || '').includes('read_forward') &&
+      forwardJson?.content?.forward?.has_more === true &&
+      forwardJson?.content?.forward?.preview?.length === 1 &&
+      forwardJson?.content?.forward?.total === 12,
+    JSON.stringify(forwardJson?.content?.forward || null),
+  )
+  check(
+    '合并转发图片只自动附带开头几张，其余留给工具按需读取',
+    forwardImageParts.length === 1 && String(forwardImageParts[0].image_url?.url || '').startsWith('data:image/png'),
+    JSON.stringify({ imageParts: forwardImageParts.length, text: String(forwardJson?.content?.text || '').slice(-160) }),
+  )
+
+  console.log('\n⑩h4 QQ 卡片处理工具（napcat_card）')
+  const cardMessage = store.append(conv1.id, {
+    role: 'user',
+    content: '[卡片消息]',
+    sender_id: 'qq:10002',
+    sender_name: 'QQ用户',
+    source: 'napcat',
+    meta: {
+      card: { kind: 'group_invite', title: '测试群邀请', summary: '邀请加入测试群', app: 'com.tencent.qqconnect.group' },
+      instanceId: 'napcat-test',
+    },
+  })
+  const cardContext = { conversationId: conv1.id, channelId: channel1.channelId, entry: { cancelled: false } }
+  const cardInfo = await tools.execute('napcat_card', { action: 'info', message_id: cardMessage.message_id }, cardContext)
+  check(
+    'napcat_card 能识别群邀请卡片并列出可用动作',
+    cardInfo?.ok === true &&
+      cardInfo.card?.kind === 'group_invite' &&
+      cardInfo.can_auto_handle === false &&
+      cardInfo.available_actions?.includes('info') &&
+      cardInfo.available_actions?.includes('open'),
+    JSON.stringify(cardInfo),
+  )
+  const cardManual = await tools.execute('napcat_card', { action: 'handle', message_id: cardMessage.message_id, approve: true }, cardContext)
+  check(
+    '卡片缺少 request flag 时不会贸然处理，返回人工确认提示',
+    cardManual?.ok === false && cardManual.code === 'MANUAL_REQUIRED',
+    JSON.stringify(cardManual),
+  )
+
+  console.log('\n⑩h5 read_forward 默认从头读，不跳过可能被截断的预览')
+  const apiService = ctx.inject('api')
+  const originalApiPost = apiService.post
+  let forwardRequest = null
+  apiService.post = async (path, body) => {
+    if (path === '/napcat/forward/read') {
+      forwardRequest = { path, body }
+      return {
+        ok: true,
+        id: 'fwd-tool-default-offset',
+        title: '测试转发',
+        total: 2,
+        offset: body?.offset ?? 0,
+        next_offset: null,
+        next_text_offset: null,
+        has_more: false,
+        items: [{ index: 1, sender_name: '甲', text: '完整正文', text_length: 12, text_truncated: undefined }],
+      }
+    }
+    return originalApiPost.call(apiService, path, body)
+  }
+  let forwardToolResult = null
+  try {
+    forwardToolResult = await tools.execute(
+      'read_forward',
+      { forward_id: 'fwd-tool-default-offset' },
+      { conversationId: conv1.id, channelId: channel1.channelId, entry: { cancelled: false } },
+    )
+  } finally {
+    apiService.post = originalApiPost
+  }
+  check(
+    'read_forward 默认 offset=0，确保模型能重新读取被截断的预览原文',
+    forwardRequest?.body?.offset === 0 && forwardToolResult?.ok === true && forwardToolResult.items?.[0]?.text === '完整正文',
+    JSON.stringify({ body: forwardRequest?.body || null, result: forwardToolResult }),
+  )
+
+
+
 
   console.log('\n⑩i 工具协议轨迹进入下一轮上下文')
   registry.select('mock/mock-chat')
