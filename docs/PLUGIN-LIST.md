@@ -57,7 +57,7 @@
 | `user-identity` | L2 | ✅ | 统一用户标识：默认本机配置，联网账号插件可注册 provider |
 | `plugin-health-guard` | L5 | ✅ | 启动插件自检，发现红色错误时弹窗引导到插件设置 |
 | `tool-registry` | L2 | ✅ | 通用 function-calling 工具注册表 |
-| `chat-tools` | L5 | ✅ | read_messages / chat_send / send_document / read_document |
+| `chat-tools` | L5 | ✅ | read_messages / chat_send / send_document（可一次多篇）/ read_document |
 | `context-builder` | L5 | ✅ | 工作记忆 + 渠道记忆合并、去重、token 预算截断 |
 | `settings-item-plugins` | L4 | ✅ | **插件自检、错误/冲突标红、详情、启停** |
 | `settings-item-model` | L4 | ✅ | 内置模型开关 + 自定义提供商 / 模型 / 参数管理 |

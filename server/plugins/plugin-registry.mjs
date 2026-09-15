@@ -55,6 +55,20 @@ export function apply(ctx, config = {}) {
 
   const externalDir = () => normalizeExternalDir(envDir() || configuredDir() || defaultExternalDir())
 
+  /**
+   * 广播插件目录变化：SSE 通知前端刷新，同时让后端启动器可选的 onPluginsChanged
+   * 回调重启服务端代聊 Worker，使 QQ / NapCat 等渠道也能拿到新安装的外部插件工具。
+   */
+  const broadcastPluginsChanged = payload => {
+    hub.broadcast('plugins/changed', payload)
+    try {
+      ctx.emit('plugins/changed', payload)
+    } catch (_) {
+      /* 没有后端监听者时忽略 */
+    }
+  }
+
+
   const isInside = (parent, child) => isInsideDir(parent, child)
 
   const canWrite = async dir => {
@@ -226,7 +240,7 @@ export function apply(ctx, config = {}) {
       await settings.update({ plugins: { dir: target } })
     }
     const next = await scan({ force: true })
-    hub.broadcast('plugins/changed', { action: 'dir-changed', externalDir: next.externalDir })
+    broadcastPluginsChanged({ action: 'dir-changed', externalDir: next.externalDir })
     return publicDirs(next)
   }
 
@@ -240,7 +254,7 @@ export function apply(ctx, config = {}) {
     }
     await rm(target, { recursive: true, force: true })
     const next = await scan({ force: true })
-    hub.broadcast('plugins/changed', { action: 'removed', id })
+    broadcastPluginsChanged({ action: 'removed', id })
     return { ok: true, pluginId: id, dirs: publicDirs(next) }
   }
 
@@ -409,7 +423,7 @@ export function apply(ctx, config = {}) {
     }
 
     const next = await scan({ force: true })
-    hub.broadcast('plugins/changed', { action: 'installed', ids: installed.map(item => item.id) })
+    broadcastPluginsChanged({ action: 'installed', ids: installed.map(item => item.id) })
     return {
       ok: true,
       installed,
@@ -428,7 +442,7 @@ export function apply(ctx, config = {}) {
     dirs: () => scan().then(publicDirs),
     refresh: async () => {
       const next = await scan({ force: true })
-      hub.broadcast('plugins/changed', { action: 'rescan', count: next.count })
+      broadcastPluginsChanged({ action: 'rescan', count: next.count })
       return publicSnapshot(next)
     },
     setExternalDir,

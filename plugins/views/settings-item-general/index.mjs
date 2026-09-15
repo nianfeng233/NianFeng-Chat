@@ -62,17 +62,18 @@ export function apply(ctx) {
               : '<span class="plugin-tag disabled">未安装语言包</span>'),
         ))}
         ${section('聊天链路', card(
-          row('强制调用工具', '模型通过工具发送聊天消息；不支持 function calling 的模型会自动降级为普通回复', switchBtn('chat.toolsEnabled', true)) +
+          row('强制调用工具', '模型通过工具发送聊天消息；不支持原生 function calling 的模型会切换为文本工具协议严格模式，关闭后使用旧版普通回复', switchBtn('chat.toolsEnabled', true)) +
           row('工具选择策略', 'required=每轮强制任一工具；auto=模型自行决定；none=不向模型提供工具',
             select('chat.toolChoice', [
               { value: 'required', label: 'required · 强制工具' },
               { value: 'auto', label: 'auto · 模型决定' },
               { value: 'none', label: 'none · 关闭工具' },
             ], config.get('chat.toolChoice', 'required'))) +
-          row('严格工具模式', '模型直接输出正文时先按纠错提示重试；仍未调用工具则把正文交给 chat_send 发送链兜底，不再直发裸 assistant 正文', switchBtn('chat.requireToolCall', true)) +
+          row('严格工具模式', '模型直接输出正文时先按纠错提示重试；仍未调用工具则把正文交给 chat_send 发送链兜底，保证用户不会因为模型不守协议而收不到回复', switchBtn('chat.requireToolCall', true)) +
           row('每条消息附带工具提醒', '在每条 user 消息的 meta 里附加“必须调用工具回复”的短提醒，缓解长上下文稀释；关闭可以省一点 token', switchBtn('chat.perMessageToolReminder', true)) +
+          row('导入历史自动进入上下文', '默认关闭：风语 / QQ 导入的旧记录只供 read_messages 检索，不会自动塞进最近上下文；开启后按正常轮次规则只带最近几轮', switchBtn('chat.includeImportedHistory', false)) +
           row('工具纠错次数', '严格模式下最多纠正几次；0 = 不纠正，直接走正文兜底。总轮次仍受“最大工具轮次”约束',
-            input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 1), { type: 'number', width: 70 })) +
+            input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 3), { type: 'number', width: 70 })) +
           row('空回复纠正次数', '模型既没输出正文也没调用工具时，最多纠正几次；仍为空则明确报错并停止本轮',
             input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +
           row('最大工具轮次', '一轮回复内最多执行多少次“模型 → 工具 → 模型”循环（1-20）',

@@ -163,8 +163,11 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
       const base = trimSlash(provider.baseURL || defaultBaseURL)
       const deepseekMode = deepseek || isDeepseekProvider(provider, model)
       const toolDefs = options?.toolChoice === 'none' ? [] : Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      // DeepSeek 思考模式明确拒绝 tool_choice，但显式 thinking=disabled 时支持
+      // tool_choice=required；关闭思考时强制工具能显著降低模型直出正文的概率。
+      const deepseekThinkingDisabled = !deepseekMode || options?.reasoningEffort === 'off'
       const flags = {
-        toolChoice: !!options?.toolChoice && !deepseekMode,
+        toolChoice: !!options?.toolChoice && deepseekThinkingDisabled,
         maxTokensField: 'max_tokens',
         temperature: options?.temperature !== undefined,
         streamOptions: true,
@@ -877,6 +880,48 @@ export function apply(ctx) {
         statusCache.set(id, status)
         hub.broadcast('provider/status', { id, status })
         ctx.logger.warn(`[${id}] 拉取模型失败：${detail}`)
+        return { ok: false, detail, models: [] }
+      }
+    },
+    /**
+     * 只拉取远端模型候选，不写入配置。
+     * 设置页「获取模型列表」使用它展示临时候选；用户点击某个候选后才调用
+     * addModel 入库。这样不会像旧 refresh 那样把所有远端模型一次性变成启用状态。
+     */
+    async discover(id) {
+      const provider = getProvider(id)
+      const adapter = requireAdapter(provider.type)
+      try {
+        const fetched = await adapter.listModels(provider, ctx)
+        const installedIds = new Set((provider.models || []).map(model => String(model.id)))
+        const seen = new Set()
+        const models = []
+        for (const remote of fetched || []) {
+          const modelId = String(remote?.id || '').trim()
+          if (!modelId || seen.has(modelId)) continue
+          seen.add(modelId)
+          models.push({
+            id: modelId,
+            name: String(remote.name || modelId),
+            installed: installedIds.has(modelId),
+            ...(remote.ownedBy ? { ownedBy: String(remote.ownedBy) } : {}),
+            ...(remote.size ? { size: Number(remote.size) || 0 } : {}),
+          })
+        }
+        const status = {
+          ok: true,
+          at: Date.now(),
+          detail: models.length ? `发现 ${models.length} 个模型（尚未添加）` : '远端没有返回可用模型',
+        }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        return { ok: true, models, count: models.length, detail: status.detail }
+      } catch (err) {
+        const detail = normalizeError(err)
+        const status = { ok: false, at: Date.now(), detail }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        ctx.logger.warn(`[${id}] 获取临时模型列表失败：${detail}`)
         return { ok: false, detail, models: [] }
       }
     },

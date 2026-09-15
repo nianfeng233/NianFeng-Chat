@@ -18,7 +18,7 @@ a Windows desktop application.
 > security audit. It listens on localhost by default; before exposing it beyond localhost, read
 > “Security and Privacy” and configure an access token.
 
-- Current version: v1.1.7
+- Current version: v1.1.8
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -142,8 +142,9 @@ The model reads and writes messages through tools:
 
 - Read tools: `read_messages` (query message history), `read_document` (read long documents within a
   token budget).
-- Write tools: `chat_send` (send one or more chat messages), `send_document` (send a long document,
-  storing only a reference and summary).
+- Write tools: `chat_send` (send one or more chat messages), `send_document` (send one or more long
+  documents; the full text goes into the document library and is delivered over the channel as a QQ
+  merged-forward record: the first node is the title, the next node is the whole body).
 
 Implementation notes:
 

@@ -9,6 +9,8 @@
  *   read_messages  读取当前 / 有权限的其它渠道历史
  *   chat_send      发送聊天消息（可多条，end=true 结束本轮）
  *   send_document  发送长资料（原文入库，聊天记录只存引用）
+ *                   可一次发送多篇（documents 数组）；渠道侧按「聊天记录转发」发送：
+ *                   转发里第一条是标题，往下是正文；多篇资料各自一条转发。
  *   read_document  按需分段读取资料原文（结果作为 role=tool 返回）
  *
  * 本插件只负责“把业务能力包装成工具”，权限、存储、上下文都是注入的独立服务。
@@ -71,6 +73,23 @@ export function apply(ctx) {
   const isExternalChannel = channelId => {
     const record = store.channelRecord?.(channelId)
     return !!record && record.source !== 'nova' && !String(channelId || '').startsWith('nova:web:')
+  }
+
+  /** 支持「合并转发（聊天记录）」的渠道类型：目前只有 NapCat / OneBot 的 QQ 私聊与群聊。 */
+  const FORWARD_CHANNEL_SOURCES = new Set(['napcat'])
+  const supportsForward = channelId => FORWARD_CHANNEL_SOURCES.has(String(store.channelRecord?.(channelId)?.source || ''))
+
+  /** 资料发送结果给模型看的一句提示：QQ 合并转发 / 其它外部渠道 / 网页资料卡片。 */
+  const documentDeliveryNote = (channelId, count) => {
+    if (supportsForward(channelId)) {
+      return count > 1
+        ? `已按 ${count} 条聊天记录转发到渠道（每份资料一条转发）；不要再用 chat_send 重复正文。`
+        : '资料已按「标题 + 正文」转发到渠道；不要再用 chat_send 重复正文。'
+    }
+    if (isExternalChannel(channelId)) {
+      return `资料已发到渠道（该渠道不支持合并转发，正文按长消息阈值截断）；不要再用 chat_send 重复正文。`
+    }
+    return '资料已存入资料库，聊天记录只保留标题与缩略；需要原文时用 read_document。'
   }
 
   const queuedDelivery = channelId =>
@@ -314,6 +333,30 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * 归一化资料参数：既支持单篇（title / summary / content），
+   * 也支持一次多篇（documents: [{ title?, summary?, content, content_type? }]）。
+   * documents 里没写标题的条目沿用最外层 title，实现“一个标题多篇资料”。
+   */
+  const collectDocuments = args => {
+    const list = []
+    const push = (raw, fallback = {}) => {
+      const item = typeof raw === 'string' ? { content: raw } : raw && typeof raw === 'object' ? raw : {}
+      const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '')
+      if (!content.trim()) return
+      list.push({
+        title: String(item.title || item.name || fallback.title || '').trim() || '未命名资料',
+        summary: String(item.summary || item.digest || fallback.summary || '').trim(),
+        content_type: String(item.content_type || item.contentType || fallback.content_type || 'text/plain').trim() || 'text/plain',
+        content,
+      })
+    }
+    const batch = args.documents ?? args.docs ?? args.items
+    if (Array.isArray(batch)) for (const item of batch) push(item, args)
+    push({ title: args.title, summary: args.summary, content_type: args.content_type, content: args.content })
+    return list.slice(0, 10)
+  }
+
   const sendDocument = async (args, context) => {
     const decision = await authorize(args, context, 'send')
     if (!decision.ok) return denied(decision)
@@ -324,66 +367,82 @@ export function apply(ctx) {
     const targetConv = conversationId ? sessions.get(conversationId) : null
     if (!targetConv) return unavailable()
 
-    const title = String(args.title || '未命名资料').slice(0, 200)
-    const summary = String(args.summary || '').slice(0, 500)
-    const content = String(args.content ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '')
-    if (!content.trim()) return { ok: false, error: '资料内容不能为空' }
-
-    const reference = documents.put({
-      title,
-      summary,
-      content,
-      content_type: args.content_type || 'text/plain',
-      channelId,
-      source: 'nova',
-    })
+    const list = collectDocuments(args)
+    if (!list.length) return { ok: false, error: '资料内容不能为空' }
 
     const delivery = context.delivery || { count: 0 }
     // 跨渠道资料消息同样保留逐条延迟，避免多条资料 / 消息一次性轰炸目标渠道。
     const simulate = config.get('chat.simulateTyping', true)
-    if (simulate && delivery.count > 0) {
-      events.emit('chat:typing', { conversationId, channelId, typing: true })
-      await sleep(typingDelayMs(summary || title), context.entry)
-      events.emit('chat:typing', { conversationId, channelId, typing: false })
-      if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
+    const references = []
+    const messageIds = []
+    for (const item of list) {
+      const reference = documents.put({
+        title: item.title.slice(0, 200),
+        summary: item.summary.slice(0, 500),
+        content: item.content,
+        content_type: item.content_type,
+        channelId,
+        source: 'nova',
+      })
+      references.push(reference)
+
+      if (simulate && delivery.count > 0) {
+        events.emit('chat:typing', { conversationId, channelId, typing: true })
+        await sleep(typingDelayMs(reference.summary || reference.title), context.entry)
+        events.emit('chat:typing', { conversationId, channelId, typing: false })
+        if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
+      }
+
+      // 聊天记录只存引用和缩略，不存资料全文；一份资料 = 一条消息 = 一个转发气泡。
+      const message = store.append(conversationId, {
+        role: 'assistant',
+        content: reference.summary || reference.title,
+        kind: 'document',
+        content_type: 'document',
+        sender_id: `role_${targetConv.id}`,
+        sender_name: targetConv.name,
+        is_bot: true,
+        source: 'nova',
+        visibility: 'shareable',
+        meta: {
+          via: 'send_document',
+          round: context.round,
+          ...(context.reasoningContent ? { reasoningContent: context.reasoningContent } : {}),
+          docId: reference.doc_id,
+          title: reference.title,
+          summary: reference.summary,
+          documentType: reference.content_type,
+          tokens: reference.tokens,
+          length: reference.length,
+          batch: list.length > 1 ? list.length : undefined,
+        },
+      })
+      delivery.count += 1
+      if (message) messageIds.push(message.message_id)
     }
 
-    // 聊天记录只存引用和缩略，不存资料全文
-    const message = store.append(conversationId, {
-      role: 'assistant',
-      content: summary || title,
-      kind: 'document',
-      content_type: 'document',
-      sender_id: `role_${targetConv.id}`,
-      sender_name: targetConv.name,
-      is_bot: true,
-      source: 'nova',
-      visibility: 'shareable',
-      meta: {
-        via: 'send_document',
-        round: context.round,
-        ...(context.reasoningContent ? { reasoningContent: context.reasoningContent } : {}),
-        docId: reference.doc_id,
-        title: reference.title,
-        summary: reference.summary,
-        documentType: reference.content_type,
-        tokens: reference.tokens,
-        length: reference.length,
-      },
-    })
-    delivery.count += 1
-
+    const first = references[0]
     return {
       ok: true,
       channel: channelId,
-      doc_id: reference.doc_id,
-      title: reference.title,
-      summary: reference.summary,
-      content_type: reference.content_type,
-      tokens: reference.tokens,
-      message_ids: message ? [message.message_id] : [],
+      count: references.length,
+      // 兼容单篇调用：顶层仍然直接给出 doc_id / title。
+      doc_id: first.doc_id,
+      title: first.title,
+      summary: first.summary,
+      content_type: first.content_type,
+      tokens: first.tokens,
+      documents: references.map(reference => ({
+        doc_id: reference.doc_id,
+        title: reference.title,
+        summary: reference.summary,
+        tokens: reference.tokens,
+        length: reference.length,
+      })),
+      message_ids: messageIds,
       sent_at: store.toLocalIso(),
       end: args.end === true || args.end === 'true',
+      note: documentDeliveryNote(channelId, references.length),
       ...queuedDelivery(channelId),
     }
   }
@@ -712,18 +771,32 @@ export function apply(ctx) {
       'send_document',
       {
         description:
-          '发送长文本 / 资料 / 文献（例如大段说明、代码、文章，或内容里本来就有大段换行的情况）。原文存入资料库，聊天记录只保存标题、缩略和 doc_id；之后可用 read_document 读取原文。日常短聊天不要用这个工具，改用 chat_send。',
+          '发送长文本 / 资料 / 文献（例如大段说明、代码、文章，或内容里本来就有大段换行的情况）。原文存入资料库，聊天记录只保存标题、缩略和 doc_id；之后可用 read_document 读取原文。在支持合并转发的渠道（NapCat / QQ）会按「聊天记录转发」发送：第一条是标题，往下是一整段正文（多份资料各自一条转发）；网页端仍是资料卡片。日常短聊天不要用这个工具，改用 chat_send；资料发出去以后也不要用 chat_send 重复正文。',
         parameters: {
           type: 'object',
           properties: {
             channel: { type: 'string', description: '目标渠道 ID，默认当前渠道。' },
-            title: { type: 'string', description: '资料标题。' },
+            title: { type: 'string', description: '资料标题（同时作为 documents 里没写标题的条目的默认标题；一个标题可以带多篇资料）。' },
             summary: { type: 'string', description: '一句话缩略，展示在聊天记录里。' },
             content_type: { type: 'string', description: '如 text/markdown、text/plain。' },
-            content: { type: 'string', description: '资料原文。' },
+            content: { type: 'string', description: '资料原文（只发一篇时可以不用 documents，直接传 content）。' },
+            documents: {
+              type: 'array',
+              description:
+                '一次发送多篇资料时使用：每一项是一篇资料，可以是 {"title":"可选标题","content":"正文","summary":"可选缩略"} 对象，也可以直接传正文字符串（沿用最外层 title）。每一项都会单独发一条聊天记录转发，不要为了发多篇而调用多次工具。',
+              items: {
+                type: 'object',
+                properties: {
+                  title: { type: 'string', description: '这一篇的标题；省略时用最外层 title。' },
+                  summary: { type: 'string', description: '这一篇的缩略。' },
+                  content_type: { type: 'string', description: '这一篇的内容类型。' },
+                  content: { type: 'string', description: '这一篇的正文。' },
+                },
+                required: ['content'],
+              },
+            },
             end: { type: 'boolean', description: 'true=发送后结束本轮。' },
           },
-          required: ['content'],
         },
       },
       sendDocument,

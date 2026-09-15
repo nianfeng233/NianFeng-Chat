@@ -50,7 +50,7 @@ async function startTestBackend() {
   backend.ctx.models.registerAdapter('smoke', {
     label: 'Smoke 测试适配器',
     async listModels() {
-      return [{ id: 'smoke-1', name: 'Smoke Model' }]
+      return [{ id: 'smoke-1', name: 'Smoke Model' }, { id: 'smoke-2', name: 'Smoke Model 2' }]
     },
     async test() {
       return { detail: '测试通过' }
@@ -1250,6 +1250,25 @@ async function main() {
   check('提供商详情显示 Base URL', (document.querySelector('.settings-content')?.textContent || '').includes('smoke://local'))
   check('提供商详情展示模型列表', (document.querySelector('.settings-content')?.textContent || '').includes('Smoke Model'))
   check('提供商详情有新增自定义模型入口', !!document.querySelector('.settings-content [data-action="add-model"]'))
+  // 「获取模型列表」必须展示临时列表：点击添加前不能写库 / 自动启用
+  document.querySelector('.settings-content [data-action="refresh"]')?.click()
+  await sleep(100)
+  const discoveredSmoke = document.querySelector('[data-discover-add="smoke-1"]')
+  check('获取模型列表以临时列表展示', !!document.querySelector('.model-discovered') && !!discoveredSmoke)
+  check('已在模型列表中的远端候选标记为已添加', discoveredSmoke?.hasAttribute('disabled') === true)
+  check(
+    '获取模型列表不会自动写入或启用模型',
+    backend.ctx.settings.get().providers.smoke?.models?.length === 1,
+    JSON.stringify(backend.ctx.settings.get().providers.smoke?.models),
+  )
+  const discoveredSmokeNew = document.querySelector('[data-discover-add="smoke-2"]')
+  check('未安装的远端候选提供添加入口', !!discoveredSmokeNew && !discoveredSmokeNew.hasAttribute('disabled'))
+  discoveredSmokeNew?.click()
+  const discoveredModelAdded = await waitFor(
+    () => backend.ctx.settings.get().providers.smoke?.models?.some(model => model.id === 'smoke-2'),
+    { timeout: 3000 },
+  )
+  check('点击「添加」后才写入模型列表', !!discoveredModelAdded)
 
   // 提供商启用开关（曾经是只有 data-toggle 没有绑定事件，点了没反应）
   document.querySelector('.settings-content [data-action="toggle-provider-enabled"]')?.click()

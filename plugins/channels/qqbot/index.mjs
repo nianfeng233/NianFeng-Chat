@@ -465,12 +465,26 @@ export function apply(ctx) {
 
   /* ---------------- QQ 消息 -> 角色模型 -> QQ ---------------- */
 
+  /**
+   * 资料正文兜底：QQ 官方机器人接口没有合并转发，
+   * 只能把原文按“长消息阈值”截断后接在标题 / 缩略下面，避免一条资料刷出几十条消息。
+   */
+  const documentBodyText = message => {
+    const docId = String(message?.meta?.docId || message?.meta?.doc_id || '').trim()
+    const doc = docId ? ctx.registry.get('document-service')?.get?.(docId) : null
+    const content = String(doc?.content || '').trim()
+    if (!content) return ''
+    const limit = Math.max(200, Number(config.get('chat.forwardThreshold', 1500)) || 1500)
+    if (content.length <= limit) return content
+    return `${content.slice(0, limit)}\n……（资料共 ${content.length} 字，其余已省略，可让机器人分段继续发）`
+  }
+
   const buildOutboundText = message => {
     if (!message) return ''
     if (message.kind === 'document') {
       const title = message.meta?.title || message.content || '资料'
       const summary = message.meta?.summary || ''
-      return [`【资料】${title}`, summary].filter(Boolean).join('\n')
+      return [`【资料】${title}`, summary, documentBodyText(message)].filter(Boolean).join('\n')
     }
     return String(message.content || '').trim()
   }

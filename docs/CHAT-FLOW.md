@@ -42,14 +42,14 @@
   │       [chat-tools].execute(...)
   │         · read_messages  读取当前 / 有权限渠道
   │         · chat_send      发送聊天消息（end=true 结束本轮）
-  │         · send_document  资料入库，只发引用 + 缩略
+  │         · send_document  资料入库；渠道侧按「聊天记录转发」发送（首条标题 + 正文）
   │         · read_document  按 token 分段加载资料原文
   │       assistant.tool_calls + role=tool 结果回填到本轮 messages
   │       chat_send / send_document 返回 end=true -> 结束
   │       模型不返回 tool_calls 时的兼容处理：
   │         · 正文含 <tool_call> JSON / DSML·DSLM 标记 -> 解析成工具调用继续执行
   │         · 识别出工具标记但无法解析 -> 立即撤掉流式内容并拦截，绝不进入气泡
-  │         · 普通正文 -> 降级为普通流式回复（兼容不支持工具的模型）
+  │         · 普通正文 -> 严格模式先强化纠错；仍不调用工具则经 chat_send 发送链兜底
   ▼
 [chat-store] -> [message-service]  追加 / 更新消息状态
   │  message:added / message:chunk / message:done / message:error

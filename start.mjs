@@ -13,7 +13,7 @@
  * 所有服务都跑在同一个 Node 进程里，Ctrl+C 一次性退出。
  */
 import { createServer } from 'node:http'
-import { readFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
 import { extname, join, resolve } from 'node:path'
@@ -364,8 +364,9 @@ async function main() {
     network = {}
   }
   const webuiHost = String(process.env.WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
-  const webPort = Number(process.env.WEB_PORT || network.webuiPort || (singlePort ? 5173 : 5173))
+  const webPort = Number(process.env.WEB_PORT || network.webuiPort || process.env.PORT || (singlePort ? 5173 : 5173))
   const accessToken = String(network.webuiToken || '').trim()
+  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
 
   banner(singlePort ? ['念风chat · 单端口模式', '后端同时托管 WebUI 与 API'] : ['念风chat · 开发模式', '后端 + WebUI 一起启动'])
 
@@ -465,8 +466,16 @@ async function main() {
       worker.once('error', err => {
         console.error('服务端代聊 Worker 异常：', err?.stack || err?.message || err)
       })
+      worker.on('message', message => {
+        if (message?.type === 'ready') {
+          console.log(`[headless] 服务端代聊已就绪 · 插件 ${message.plugins}/${message.total} · chat-flow=${message.flowMode}`)
+        }
+      })
       worker.once('exit', code => {
-        if (agentWorker === worker) agentWorker = null
+        // 被 stopHeadlessAgent / reloadHeadlessAgent 主动替换时直接返回：
+        // 新 Worker 已经持有新的 capability，旧 Worker 不能再清理当前引用。
+        if (agentWorker !== worker) return
+        agentWorker = null
         try {
           agentCapabilityDispose?.()
         } catch (_) {
@@ -491,6 +500,37 @@ async function main() {
     }
   }
 
+  let agentReloadTimer = null
+  /** 外部插件清单变化时重启服务端代聊，让代聊 Worker 也加载到新的前端插件与工具。 */
+  const reloadHeadlessAgent = reason => {
+    if (!headlessAgentEnabled || shuttingDown) return
+    if (agentReloadTimer) clearTimeout(agentReloadTimer)
+    agentReloadTimer = setTimeout(() => {
+      agentReloadTimer = null
+      if (shuttingDown) return
+      console.log(`[plugins] 插件变化（${reason || 'changed'}），重启服务端代聊以加载最新工具…`)
+      stopHeadlessAgent()
+      startHeadlessAgent()
+    }, 300)
+    agentReloadTimer.unref?.()
+  }
+
+  /**
+   * 桌面壳 / 部署宿主依赖 HOME/.webui-port 与 .webui-token 导航。
+   * 现在 start.mjs 也负责写这两个文件，保证 exe 走与网页版完全相同的启动链路。
+   */
+  const writeRuntimeHints = async actualPort => {
+    if (!homeEnv || !(Number(actualPort) > 0)) return
+    try {
+      const dir = resolve(homeEnv)
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, '.webui-port'), String(actualPort), 'utf8')
+      if (accessToken) await writeFile(join(dir, '.webui-token'), accessToken, 'utf8')
+      else await rm(join(dir, '.webui-token'), { force: true })
+    } catch (err) {
+      console.warn(`写入运行时端口 / 令牌文件失败：${err?.message || err}`)
+    }
+  }
   backend = await startBackend({
     port: singlePort ? webPort : backendPort,
     host: singlePort ? webuiHost : '127.0.0.1',
@@ -498,11 +538,13 @@ async function main() {
     staticDir: singlePort ? '.' : null,
     accessToken,
     onRestart: restart,
+    onPluginsChanged: payload => reloadHeadlessAgent(payload?.action),
     // 开发模式下 WebUI 与 API 不同端口，需把 WebUI 的 Origin 显式放行给后端；
     // 单端口模式也会包含同一端口，便于本机 IP / hostname 访问。
     allowedOrigins: webuiOriginList(webuiHost, webPort),
   })
   startHeadlessAgent()
+  if (singlePort) await writeRuntimeHints(backend.port)
   let webUrl = backend.url
   if (!singlePort) {
     web = createWebServer({
@@ -526,6 +568,7 @@ async function main() {
       )
       web.listen(webPort, webuiHost, resolve)
     })
+    await writeRuntimeHints(webPort)
     webUrl = `http://${webuiHost === '0.0.0.0' ? '127.0.0.1' : webuiHost}:${webPort}` + (accessToken ? '/?token=你的访问令牌' : '')
   }
 

@@ -24,10 +24,10 @@
 | `scripts/test-security.mjs` | 安全回归（39 项：Origin / Host / CORS、health 脱敏、SSRF、令牌、静态敏感路径、SSE 关闭） | 改 HTTP 安全边界或 /api/rss 后补测试 |
 | `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
 | `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
-| `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，25 项） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送后补测试 |
+| `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，74 项，含合并转发发送与外发组装） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送 / 合并转发后补测试 |
 | `scripts/test-images.mjs` | 图片文件服务测试（保存 / 读取 / 索引无 base64 / 裁剪，8 项） | 改图片存储或 /api/images 路由后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
-| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（118 项，真实 Mock function calling + DeepSeek reasoning 回传 + 空回复纠正；含 chat.db 持久化检查） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
+| `scripts/test-chat-tools.mjs` | Nova 工具链路测试（149 项，真实 Mock function calling + DeepSeek reasoning 回传 + 空回复纠正；含 send_document 多篇资料与 chat.db 持久化检查） | 改工具 / 记忆 / 权限 / 供应商协议后补测试 |
 | `scripts/test-vendors.mjs` | 厂商协议测试（30 项：DeepSeek / Anthropic / Gemini / OpenAI 参数降级） | 改厂商适配后补测试 |
 
 插件模块格式（cordis 原生）：
@@ -182,7 +182,7 @@ export function apply(ctx) { /* ... */ }
 | `channel-base` | `features/channel-base/index.mjs` | 渠道基座：连接钩子 + 入站消息落库为会话 | 新渠道插件继承它 |
 | `model-adapter-backend` | `features/model-adapter-backend/index.mjs` | 把后端提供商注册为前端模型，经 `/api/chat` 流式对话 / 透传 tools | 模型来源与参数传递 |
 | `character-editor` | `features/character-editor/` | 新建 / 编辑会话角色：人格、模型、头像（捏人窗口） | 角色系统 |
-| `chat-tools` | `features/chat-tools/index.mjs` | `read_messages / chat_send / send_document / read_document` 工具实现 | 聊天工具语义 |
+| `chat-tools` | `features/chat-tools/index.mjs` | `read_messages / chat_send / send_document / read_document` 工具实现；`send_document` 支持一次多篇资料（`documents` 数组），渠道侧按「聊天记录转发」发送 | 聊天工具语义 |
 | `context-builder` | `features/context-builder/index.mjs` | 工作记忆 + 渠道记忆合并、去重、token 预算截断、untrusted 包装 | 上下文格式 |
 
 ## L6 · 可选扩展层（`plugins/extras/`，3 个）
@@ -202,7 +202,7 @@ export function apply(ctx) { /* ... */ }
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
-| `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 轮群上下文、发现会话 | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md` |
+| `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` + `outbound.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 轮群上下文、发现会话；资料与超长消息自动折叠成合并转发（聊天记录） | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md`；阈值见 `chat.forward*` 配置 |
 | `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
 | `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` 自动绑定、WebSocket / Webhook、**仅私聊**、图片收发、被动回复与聊天记录 | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md` |
 
@@ -240,9 +240,12 @@ NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通
 | `image-service-bridge` | `domain/image-service/bridge.mjs` | 图片文件存储与 `/api/images` / `/api/images/:id` / `/api/images/prune` 路由；索引写入 `<数据目录>/images.json`（不含 base64） | `imageStore`；通过 `httpApi` 注册 `/api/images*` |
 | （已移除）`telegram` | — | 随 `channel-telegram` 一起移除 | — |
 
-> 后端会在 HTTP 服务就绪后自动扫描 `plugins/channels/**/bridge.mjs` 与外部插件目录里的
-> `bridge.mjs` 并加载；渠道插件通过 `httpApi.route()` 注册自己的接口，不需要修改
-> `server/index.mjs` 或 `server/plugins/http.mjs`。外部 bridge 是 Node 代码，只应安装可信插件。
+> 后端会在 HTTP 服务就绪后自动扫描内置 `plugins/**/bridge.mjs` 并加载一次；外部插件目录里的
+> `bridge.mjs` 会在安装 / 删除 / 重新扫描 / 切换目录时热加载（dispose 旧 fiber 后重新加载），
+> 因此外部插件可以前后端一起热插拔，无需重启念风。服务端代聊 Worker（QQ / NapCat / 微信等由
+> 代聊处理的渠道）也会在插件变化后自动重启，重新读取外部插件与工具；渠道插件通过
+> `httpApi.route()` 注册自己的接口，不需要修改 `server/index.mjs` 或 `server/plugins/http.mjs`。
+> 外部 bridge 是 Node 代码，只应安装可信插件。
 
 保留但暂无前端调用：`GET /api/rss`、`POST /api/translate`（供未来的扩展插件使用，均为真实实现）。
 

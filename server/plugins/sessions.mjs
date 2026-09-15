@@ -400,6 +400,7 @@ export function apply(ctx, config = {}) {
         time: partial.time || '',
         updatedAt: Date.now(),
         createdAt: Date.now(),
+        metaUpdatedAt: Number(partial.metaUpdatedAt) || Date.now(),
         messages: partial.messages || [],
         meta: partial.meta || {},
       }
@@ -421,6 +422,9 @@ export function apply(ctx, config = {}) {
         else scheduleSave()
       }
       const metaPatch = { ...patch }
+      const hasMetaChange = Object.keys(metaPatch).some(key => !['messages', 'updatedAt', 'metaUpdatedAt', 'messageCount'].includes(key))
+      if (metaPatch.metaUpdatedAt === undefined && hasMetaChange) metaPatch.metaUpdatedAt = Date.now()
+      else if (metaPatch.metaUpdatedAt !== undefined) metaPatch.metaUpdatedAt = Number(metaPatch.metaUpdatedAt) || Date.now()
       delete metaPatch.messages
       Object.assign(conv, metaPatch, { id: conv.id, updatedAt: Date.now() })
       afterConversationChange(conv)

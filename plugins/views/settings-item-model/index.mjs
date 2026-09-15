@@ -128,6 +128,9 @@ export function apply(ctx) {
       let creatingProvider = false
       let advancedOpen = false
       let refreshingProvider = ''
+      /** 「获取模型列表」拉到的远端候选：临时态，不写配置；离开本页/切提供商会清空 */
+      let discoveredProviderId = ''
+      let discoveredModels = []
       let unbindConfig = null
       let unbindSliderConfig = null
       let disposed = false
@@ -362,13 +365,47 @@ export function apply(ctx) {
           </div>`
       }
 
+      const discoveredSection = provider => {
+        if (discoveredProviderId !== provider.id || !discoveredModels.length) return ''
+        const installed = discoveredModels.filter(model => model.installed).length
+        return `
+          <div class="model-discovered">
+            <div class="model-discovered-head">
+              <div>
+                <div class="model-list-title">发现 ${discoveredModels.length} 个模型（临时）</div>
+                <div class="model-list-sub">这还不是你的模型：点击「添加」才写入下方模型列表；切换提供商或离开本页会消失。</div>
+              </div>
+              <div class="model-list-sub">${installed ? `已添加 ${installed} 个` : '尚未添加任何模型'}</div>
+            </div>
+            ${discoveredModels
+              .map(
+                model => `
+                <div class="model-item ${model.installed ? 'dim' : ''}">
+                  <div class="model-item-main-row">
+                    <span class="model-status-dot ${model.installed ? 'ok' : ''}"></span>
+                    <div class="model-item-info">
+                      <div class="model-item-name">${escapeHtml(model.name || model.id)}<span class="model-tag">临时</span></div>
+                      <div class="model-item-id">${escapeHtml(model.id)}</div>
+                    </div>
+                    <div class="model-item-actions">
+                      <button class="outline-btn model-mini-btn ${model.installed ? '' : 'primary-soft'}" data-discover-add="${escapeHtml(model.id)}" ${model.installed ? 'disabled' : ''}>${
+                        model.installed ? '已添加' : `${icons.plus}<span>添加</span>`
+                      }</button>
+                    </div>
+                  </div>
+                </div>`,
+              )
+              .join('')}
+          </div>`
+      }
+
       const modelsSection = provider => {
         const models = provider.models || []
         return `
           <div class="model-list-head">
             <div>
               <div class="model-list-title">模型（${models.length}）</div>
-              <div class="model-list-sub">启用的模型会出现在聊天模型选择中；参数会随对话请求一起发送。</div>
+              <div class="model-list-sub">「获取模型列表」只展示临时候选，点击添加后才入库；启用的模型会出现在聊天模型选择中，参数会随对话请求一起发送。</div>
             </div>
             ${
               provider.managed
@@ -393,7 +430,8 @@ export function apply(ctx) {
             models.length
               ? models.map(model => modelRow(provider, model)).join('')
               : '<div class="model-empty"><div class="model-empty-desc">还没有模型。点击「获取模型列表」从远端真实拉取，或添加一个自定义模型。</div></div>'
-          }`
+          }
+          ${discoveredSection(provider)}`
       }
 
       const providerForm = provider => {
@@ -625,7 +663,7 @@ export function apply(ctx) {
         const official = officialService()
         const useBuiltin = !!official && config.get('model.useBuiltin', true) !== false
         const backendOnline = !!health
-        const staleBackend = backendOnline && !(health?.capabilities || []).includes('provider-crud')
+        const staleBackend = backendOnline && ['provider-crud', 'provider-model-discover'].some(name => !(health?.capabilities || []).includes(name))
         unbindConfig?.()
         unbindSliderConfig?.()
         container.innerHTML = page(
@@ -649,7 +687,7 @@ export function apply(ctx) {
           }
           ${
             staleBackend
-              ? '<div class="settings-note model-stale">检测到正在运行的后端进程缺少最新接口（provider-crud 等）。请完全关闭念风（旧窗口 / 终端）后重新运行 start.cmd 或 npm start，再回来配置模型。</div>'
+              ? '<div class="settings-note model-stale">检测到正在运行的后端进程缺少最新接口（provider-crud / provider-model-discover 等）。请完全关闭念风（旧窗口 / 终端）后重新运行 start.cmd 或 npm start，再回来配置模型。</div>'
               : ''
           }
           ${useBuiltin ? builtinPanel() : customPanel()}
@@ -702,6 +740,10 @@ export function apply(ctx) {
           // 只有拿到最新列表后才校正选中项；新建表单打开期间保持当前选择
           if (!creatingProvider && (!selectedId || !list.some(p => p.id === selectedId))) {
             selectedId = list[0]?.id || ''
+          }
+          if (discoveredProviderId && !list.some(p => p.id === discoveredProviderId)) {
+            discoveredProviderId = ''
+            discoveredModels = []
           }
           await adapter?.sync?.({ silent: true })
           render()
@@ -771,7 +813,35 @@ export function apply(ctx) {
         addingModel = false
         creatingProvider = false
         advancedOpen = false
+        // 临时候选列表绑定在当前提供商上：显式切走时清空，避免看起来像已入库的模型。
+        discoveredProviderId = ''
+        discoveredModels = []
         render()
+      }
+
+      /** 把一条临时候选添加为真正模型；只有这个动作会写入配置。 */
+      const addDiscoveredModel = async modelId => {
+        const provider = (providerPayload.providers || []).find(item => item.id === discoveredProviderId) || selectedProvider()
+        if (!provider || provider.managed || !modelId) return
+        const item = discoveredModels.find(model => String(model.id) === String(modelId))
+        if (item?.installed) {
+          toast.info('该模型已在模型列表中')
+          return
+        }
+        try {
+          await api.addModel(provider.id, { id: item?.id || modelId, name: item?.name || modelId })
+          if (item) item.installed = true
+          toast.success(`已添加模型「${item?.name || modelId}」`)
+          await syncAndReload()
+        } catch (err) {
+          if (err?.status === 409) {
+            if (item) item.installed = true
+            render()
+            toast.info('该模型已在模型列表中')
+            return
+          }
+          toast.error(friendlyError(err))
+        }
       }
 
       /** 渲染后给每个控件挂直接监听（不依赖事件冒泡，Node DOM 垫片同样可用） */
@@ -796,6 +866,12 @@ export function apply(ctx) {
         for (const flag of ['data-model-toggle', 'data-model-edit', 'data-model-delete', 'data-model-cancel', 'data-model-save']) {
           container.querySelectorAll(`[${flag}]`).forEach(el => el.addEventListener('click', () => handleAction('', el)))
         }
+        container.querySelectorAll('[data-discover-add]').forEach(el => {
+          el.addEventListener('click', event => {
+            event.stopPropagation()
+            addDiscoveredModel(el.dataset.discoverAdd)
+          })
+        })
         container.querySelectorAll('[data-active-model]').forEach(select => {
           select.addEventListener('change', () => {
             try {
@@ -1029,13 +1105,39 @@ export function apply(ctx) {
                 button.disabled = true
               })
               if (target) target.textContent = '获取中…'
+                if (!provider.managed) {
+                  discoveredProviderId = provider.id
+                  discoveredModels = []
+                }
               toast.info(`正在获取「${provider.name || provider.id}」的模型列表…`)
               try {
-                const result = await api.refreshProvider(provider.id)
-                if (result?.ok) toast.success(result.detail || `已更新 ${result.models?.length || 0} 个模型`)
-                else toast.error(`获取失败：${result?.detail || '未知错误'}`)
+                const result = provider.managed ? await api.refreshProvider(provider.id) : await api.remoteModels(provider.id)
+                if (result?.ok) {
+                  if (provider.managed) {
+                    toast.success(result.detail || `已更新 ${result.models?.length || 0} 个模型`)
+                  } else {
+                    discoveredProviderId = provider.id
+                    discoveredModels = Array.isArray(result.models) ? result.models : []
+                    const fresh = discoveredModels.filter(model => !model.installed).length
+                    toast.success(
+                      fresh
+                        ? `发现 ${discoveredModels.length} 个模型，其中 ${fresh} 个尚未添加；点击「添加」才会写入模型列表`
+                        : `发现 ${discoveredModels.length} 个模型，全部已在模型列表中`,
+                    )
+                  }
+                } else {
+                  if (!provider.managed) {
+                    discoveredProviderId = ''
+                    discoveredModels = []
+                  }
+                  toast.error(`获取失败：${result?.detail || '未知错误'}`)
+                }
               } catch (err) {
-                toast.error(`获取失败：${err.message}`)
+                toast.error(`获取失败：${friendlyError(err)}`)
+                if (!provider.managed) {
+                  discoveredProviderId = ''
+                  discoveredModels = []
+                }
               } finally {
                 refreshingProvider = ''
               }

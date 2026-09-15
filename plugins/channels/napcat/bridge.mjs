@@ -24,6 +24,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { fetchWithNetworkRetry } from '../request-utils.mjs'
 
 export const name = 'napcat-bridge'
 export const version = '1.0.0'
@@ -43,6 +44,9 @@ const MAX_IMAGES = 4
 const MAX_MEDIA_BYTES = 4 * 1024 * 1024
 const ACTION_TIMEOUT = 20000
 const TEXT_CHUNK = 3600
+// 合并转发（聊天记录）：节点数与单节点字数都留余量，避免超长资料把 QQ 接口打爆。
+const MAX_FORWARD_NODES = 60
+const MAX_FORWARD_NODE_CHARS = 5000
 // 应用层心跳：同机内网 WebSocket 也可能半开，readyState 无法发现“假在线”。
 const HEARTBEAT_PROBE_AFTER = 30000
 const HEARTBEAT_DEAD_AFTER = 90000
@@ -563,6 +567,32 @@ function batchOutboundSegments(segments) {
   if (current.length) batches.push(current)
   return batches
 }
+
+/**
+ * 合并转发（聊天记录）节点清洗。
+ *
+ * 只接受纯文本节点，避免模型通过 node 段塞 CQ 码 / 文件段读取本机文件；
+ * 空节点丢弃，节点数与单节点字数都有上限，防止超长资料把 QQ 接口打爆。
+ */
+function normalizeForwardNodes(input) {
+  const nodes = Array.isArray(input?.nodes) ? input.nodes : Array.isArray(input) ? input : []
+  const out = []
+  for (const raw of nodes) {
+    if (out.length >= MAX_FORWARD_NODES) break
+    const source = typeof raw === 'string' ? { text: raw } : raw || {}
+    const text = String(source.text ?? source.content ?? '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .trim()
+    if (!text) continue
+    const name = String(source.name || source.nickname || '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 40)
+    out.push({ name, text: text.slice(0, MAX_FORWARD_NODE_CHARS) })
+  }
+  return out
+}
+
 
 /* ------------------------------------------------------------------ */
 /* 极简 RFC6455 服务端（NapCat reverse WebSocket）                       */
@@ -1508,7 +1538,7 @@ export function apply(ctx) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(new Error('图片下载超时')), 15000)
       try {
-        const response = await fetch(source, { signal: controller.signal })
+        const response = await fetchWithNetworkRetry(source, { signal: controller.signal })
         if (!response.ok) return null
         const buffer = Buffer.from(await response.arrayBuffer())
         return buffer.length <= MAX_MEDIA_BYTES ? buffer : null
@@ -2150,6 +2180,41 @@ export function apply(ctx) {
     return parts
   }
 
+  /**
+   * 合并转发（聊天记录）发送：
+   *   - 群聊走 send_group_forward_msg，私聊走 send_private_forward_msg；
+   *   - 节点都由机器人账号发出，昵称优先用节点自带值，否则用当前登录 QQ 的昵称；
+   *   - 引用 / 艾特无法与转发混发（对齐 AstrBot：转发链里不再插入 reply / at）。
+   */
+  async function sendForwardMessage(rt, { targetType, targetId, nodes, images = [], nickname = '' }) {
+    const selfName = String(nickname || rt.login?.nickname || data.instances[rt.id]?.remark || '念风').slice(0, 40)
+    const messages = nodes.map(node => ({
+      type: 'node',
+      data: {
+        user_id: String(rt.login?.userId || ''),
+        nickname: node.name || selfName,
+        content: [{ type: 'text', data: { text: node.text } }],
+      },
+    }))
+    if (images.length && messages.length) {
+      // 图片只能挂在最后一个节点上（NapCat 每个节点是一段独立消息链）。
+      const content = messages[messages.length - 1].data.content
+      for (const image of images) {
+        const media = await resolveImageBase64(image)
+        if (media) content.push({ type: 'image', data: { file: `base64://${media.base64}` } })
+      }
+    }
+    if (!messages.length) return { ok: false, code: 'EMPTY', error: '转发内容为空' }
+    const action = targetType === 'group' ? 'send_group_forward_msg' : 'send_private_forward_msg'
+    const params = targetType === 'group' ? { group_id: Number(targetId), messages } : { user_id: Number(targetId), messages }
+    const result = await sendAction(rt, action, params)
+    if (actionFail(result)) {
+      return { ok: false, code: result?.code || 'SEND_FAILED', error: result?.error || result?.message || 'NapCat 转发失败', data: result?.data || null }
+    }
+    const messageId = result.data?.message_id ?? result.data?.messageId ?? null
+    return { ok: true, messageIds: [messageId], messageId, count: 1, forward: true, nodes: messages.length }
+  }
+
   async function sendChannelMessage(body = {}) {
     const channelId = String(body.channelId || '').trim()
     const channel = channelId ? data.channels[channelId] : null
@@ -2167,6 +2232,17 @@ export function apply(ctx) {
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES) : []
     const quoteMsgId = String(body.quoteMsgId || '').trim()
     const mentionUserId = toNumericId(body.mentionUserId)
+    // 合并转发（聊天记录）优先：带 forward.nodes 时不再走普通文本 / CQ 分块路径。
+    const forwardNodes = normalizeForwardNodes(body.forward)
+    if (forwardNodes.length) {
+      return sendForwardMessage(rt, {
+        targetType,
+        targetId,
+        nodes: forwardNodes,
+        images,
+        nickname: String(body.forward?.name || body.forward?.nickname || '').trim().slice(0, 40),
+      })
+    }
     // 含 CQ 码 / [at:qq] 时按消息段发送；纯文本保持原来的分块逻辑不变。
     const richSegments = parseOutboundSegments(text)
     if (richSegments === null && !splitText(text).length && !images.length) {

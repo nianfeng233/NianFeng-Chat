@@ -202,6 +202,34 @@ export function apply(ctx) {
   }
 
   /**
+   * 元数据版本：消息写入只会刷新 updatedAt，而角色人格 / 模型这类 meta 改动
+   * 会刷新 metaUpdatedAt。合并多端会话时必须按它对元数据做取舍，否则服务端代聊
+   * 进程里“消息更新但 meta 还旧”的副本会一直压住用户在 WebUI 改的新模型，
+   * 表现就是“切换角色模型后必须重启才生效”。
+   */
+  const shouldUseRemoteMeta = (localConv, remoteConv) => {
+    const localMeta = Number(localConv?.metaUpdatedAt) || 0
+    const remoteMeta = Number(remoteConv?.metaUpdatedAt) || 0
+    // 显式元数据版本优先于带消息含义的 updatedAt：避免任一端的消息时间压住元数据修改。
+    if (localMeta && remoteMeta) return remoteMeta >= localMeta
+    if (localMeta) return false
+    if (remoteMeta) return true
+    return Number(remoteConv?.updatedAt || remoteConv?.createdAt || 0) >= Number(localConv?.updatedAt || localConv?.createdAt || 0)
+  }
+  const changedMetaPatch = (conv, patch) => {
+    if (!conv || !patch || typeof patch !== 'object') return false
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === 'messages' || key === 'updatedAt' || key === 'metaUpdatedAt' || key === 'localTruncated') continue
+      try {
+        if (JSON.stringify(value) !== JSON.stringify(conv[key])) return true
+      } catch (_) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
    * 后端会话与本地会话合并：
    *   - 删除墓碑中的 id 不参与合并（避免已删除会话复活）
    *   - 同一 id 的元数据取 updatedAt 更新的；消息记录做并集，本地截断缓存不能覆盖后端全量
@@ -221,7 +249,7 @@ export function apply(ctx) {
         continue
       }
       const mergedMessages = mergeConversationMessages(localConv, remote)
-      const metaSource = isNewerConversation(localConv, remote) ? localConv : remote
+      const metaSource = shouldUseRemoteMeta(localConv, remote) ? remote : localConv
       merged.set(localConv.id, {
         ...metaSource,
         messages: mergedMessages.messages,
@@ -409,6 +437,7 @@ export function apply(ctx) {
         time: partial.time || '',
         updatedAt: Date.now(),
         createdAt: Date.now(),
+        metaUpdatedAt: Date.now(),
         messages: partial.messages || [],
         meta: partial.meta || {},
       }
@@ -448,6 +477,7 @@ export function apply(ctx) {
       }
       const metaPatch = { ...patch }
       delete metaPatch.messages
+      if (changedMetaPatch(conv, metaPatch) && metaPatch.metaUpdatedAt === undefined) metaPatch.metaUpdatedAt = Date.now()
       Object.assign(conv, metaPatch)
       conv.updatedAt = patch.updatedAt || Date.now()
       persistLocal()
@@ -594,7 +624,7 @@ export function apply(ctx) {
       if (local) {
         const merged = mergeConversationMessages(local, remote)
         next = {
-          ...(isNewerConversation(local, remote) ? local : remote),
+          ...(shouldUseRemoteMeta(local, remote) ? remote : local),
           messages: merged.messages,
           messageCount: merged.messageCount,
           updatedAt: Math.max(Number(local.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || remote.updatedAt,

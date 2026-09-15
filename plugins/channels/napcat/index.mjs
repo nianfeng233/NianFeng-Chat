@@ -10,12 +10,15 @@
  *  - 同一个 NapCat 登录 QQ 只需要建立一条连接，多个渠道可以复用；
  *  - QQ 名、QQ 号、群号、群昵称、实际昵称都会写入消息身份与上下文；
  *  - 群聊支持黑名单 / 仅艾特 / 回复概率 / 引用回复 / 艾特触发者 / 静默上下文；
+ *  - 长消息 / 资料消息自动折叠成 QQ 合并转发（聊天记录），转发里第一条是标题、其后是正文；
+ *    阈值见 chat.forwardThreshold / chat.forwardNodeChars / chat.forwardMaxNodes；
  *  - 通过 napcat:* 事件、napcat-channel 服务和 /api/napcat/* 路由给其它插件扩展。
  */
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
 import { NAPCAT_CSS } from './style.mjs'
+import { createOutboundPlanner } from './outbound.mjs'
 
 export const name = 'napcat'
 export const version = '1.0.0'
@@ -647,15 +650,15 @@ export function apply(ctx) {
 
   const qqUserId = userId => `qq:${String(userId || '').trim()}`
 
-  function buildOutboundText(message) {
-    if (!message) return ''
-    if (message.kind === 'document') {
-      const title = message.meta?.title || message.content || '资料'
-      const summary = message.meta?.summary || ''
-      return [`【资料】${title}`, summary].filter(Boolean).join('\n')
-    }
-    return String(message.content || '').trim()
-  }
+  /* ---------------- 外发内容组装（含合并转发） ---------------- */
+
+  // 资料 / 超长消息 -> 合并转发（聊天记录）：第一条是标题，往下是正文。
+  // 阈值与节点上限见 chat.forwardThreshold / chat.forwardNodeChars / chat.forwardMaxNodes。
+  const outbound = createOutboundPlanner({
+    config,
+    resolveDocument: docId => ctx.registry.get('document-service')?.get?.(docId) || null,
+  })
+  const buildOutboundContent = message => outbound.buildOutboundContent(message)
 
   function triggerDecision(channel, message) {
     const category = categoryOf(channel)
@@ -730,18 +733,24 @@ export function apply(ctx) {
     const active = activeTurns.get(conversationId)
     const inbound = active && String(active.channel?.id || '') === String(channel.id) ? active.message : null
     const rules = groupRulesOf(channel)
-    const text = buildOutboundText(message)
-    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+    const content = buildOutboundContent(message)
+    const forwarding = Array.isArray(content.forward) && content.forward.length > 0
+    // 转发路径下图片会被挂到最后一个节点上（见 bridge 的 sendForwardMessage）。
+    const images = content.images
 
     const body = {
       channelId: channel.id,
       instanceId,
       targetType,
       targetId,
-      text,
+      text: content.text,
       images,
-      quoteMsgId: targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
-      mentionUserId: targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
+      // 合并转发无法与引用 / 艾特混发：转发记录本身就是一条消息。
+      quoteMsgId: !forwarding && targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
+      mentionUserId: !forwarding && targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
+      ...(forwarding
+        ? { forward: { name: String(sessions.get(conversationId)?.meta?.napcatBotName || '').trim(), nodes: content.forward } }
+        : {}),
     }
     const result = await bridgePost('/send', body)
     if (result?.ok === false) return { ok: false, error: result.error || 'NapCat 返回发送失败' }
@@ -758,6 +767,8 @@ export function apply(ctx) {
         quoteMessageId: body.quoteMsgId || '',
         mentionUserId: body.mentionUserId || '',
         imagesSent: images.length > 0,
+        forwarded: forwarding || undefined,
+        forwardNodes: forwarding ? content.forward.length : undefined,
         outboundError: '',
       },
     })

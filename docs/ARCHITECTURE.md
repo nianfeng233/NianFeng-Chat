@@ -160,7 +160,7 @@ composer ──message:send──▶ chat-permissions（敏感确认拦截）
         │    │        ├─ send_document ──▶ document-service（聊天记录只存引用）
         │    │        └─ read_document（role=tool 分段返回原文）
         │    └─ chat_send / send_document end=true -> 结束本轮
-        └─ 模型完全不返回 tool_calls -> 降级为普通流式回复（兼容小模型）
+        └─ 模型完全不返回 tool_calls -> 严格纠错后经 chat_send 发送链兜底
 session-service 在新增 / 更新消息后防抖写回 /api/sessions/:id
 ```
 

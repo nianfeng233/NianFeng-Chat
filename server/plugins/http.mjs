@@ -389,7 +389,7 @@ export function apply(ctx, config = {}) {
       capabilities: [
         'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
         'external-plugins', 'plugin-dirs', 'plugin-upload', 'webui-auth', 'system-restart', 'plugin-http-routes',
-        'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'health-detail-auth',
+        'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'health-detail-auth', 'provider-model-discover',
         ...extraCapabilities,
       ],
       authRequired: !!accessToken,
@@ -546,6 +546,12 @@ export function apply(ctx, config = {}) {
 
   route('POST', '/api/providers/:id/refresh', async (req, res, params) => {
     const result = await models.refresh(params.id)
+    sendJson(res, result.ok ? 200 : 502, result)
+  })
+
+  /** 获取远端模型候选（临时列表）：不写配置、不自动启用，用户点添加后才入库。 */
+  route('GET', '/api/providers/:id/models/remote', async (req, res, params) => {
+    const result = await models.discover(params.id)
     sendJson(res, result.ok ? 200 : 502, result)
   })
 

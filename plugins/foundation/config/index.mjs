@@ -132,15 +132,24 @@ const DEFAULTS = {
   'chat.typingMinMs': 500,
   'chat.typingMaxMs': 5000,
   'chat.typingPerCharMs': 35,
+  // 合并转发（QQ 聊天记录）：单条消息超过阈值字数后自动折叠，避免大段长文刷屏
+  'chat.forwardThreshold': 1500,
+  // 转发记录里单个节点的正文上限；超长正文拆成多个节点
+  'chat.forwardNodeChars': 1500,
+  // 单条转发记录最多多少个节点（超长资料会被截断并标注省略字数）
+  'chat.forwardMaxNodes': 20,
   // 渠道输入状态：NapCat 输入中会很快消失，需要定时重报；微信原生输入中可以持续到整轮结束
   'napcat.inputState.enabled': true,
   'napcat.inputState.intervalMs': 3000,
   'napcat.inputState.timeoutMs': 10 * 60 * 1000,
   'chat.requireToolCall': true,
-  // 严格模式的纠正次数；上限由 chat.maxToolRounds 兜底，不再写死为 1。
-  'chat.toolRetryLimit': 1,
+  // 严格模式的纠正次数；达到上限后经 chat_send 发送链兜底，不直发裸正文。
+  'chat.toolRetryLimit': 3,
   // 每条 user 消息的 meta 里附一句“必须调用工具回复”的短提醒，缓解长上下文稀释。
   'chat.perMessageToolReminder': true,
+  // 导入的旧聊天记录默认不自动进入最近上下文，只供 read_messages 检索；
+  // 打开后按 user 起始的正常轮次规则，只带最近几轮。
+  'chat.includeImportedHistory': false,
   'chat.emptyRetryLimit': 2,
   'chat.composerHeight': 0,
   'chat.userId': 'web-user',
@@ -195,6 +204,7 @@ export function apply(ctx) {
     ['chat.contextTokens', 4096, 0],
     ['chat.imagesPerRequest', 4, 2],
     ['chat.imagesPerMessage', 4, 2],
+    ['chat.toolRetryLimit', 1, 3],
   ]
   const migrateLegacyDefaults = () => {
     const changed = []

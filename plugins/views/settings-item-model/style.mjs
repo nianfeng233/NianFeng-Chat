@@ -88,6 +88,10 @@ export const MODEL_PAGE_CSS = `
   .model-param-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px}
   .model-chip{font-size:10px;color:var(--text-2);background:rgba(0,0,0,.045);border-radius:5px;padding:1px 6px}
   .model-item-actions{display:flex;gap:6px;flex:0 0 auto}
+  .model-discovered{background:rgba(59,108,246,.035);border-top:1px solid rgba(59,108,246,.12)}
+  .model-discovered-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:11px 15px;flex-wrap:wrap}
+  .model-discovered .model-item{background:rgba(255,255,255,.42)}
+  .model-discovered .model-mini-btn[disabled]{opacity:.7;cursor:default}
 
   .model-editor{padding:2px 15px 15px 54px}
   .model-editor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:9px}

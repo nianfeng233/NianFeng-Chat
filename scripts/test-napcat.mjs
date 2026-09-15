@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startBackend } from '../server/index.mjs'
 import { isBacklogMessage } from '../plugins/channels/napcat/index.mjs'
+import { createOutboundPlanner } from '../plugins/channels/napcat/outbound.mjs'
 
 const results = []
 let failed = 0
@@ -122,6 +123,8 @@ async function main() {
         },
         echo: payload.echo,
       })
+    } else if (payload.action === 'send_group_forward_msg' || payload.action === 'send_private_forward_msg') {
+      send({ status: 'ok', retcode: 0, data: { message_id: 9100 }, echo: payload.echo })
     } else if (payload.action === 'send_group_msg' || payload.action === 'send_private_msg') {
       send({ status: 'ok', retcode: 0, data: { message_id: 9001 }, echo: payload.echo })
     } else {
@@ -476,6 +479,51 @@ async function main() {
     )
     check('回复文本正确', segments.some(segment => segment.type === 'text' && segment.data?.text === '收到，测试回复'), JSON.stringify(segments))
 
+    // 4a) 合并转发（聊天记录）：长消息 / 资料在 QQ 侧折叠成转发记录
+    const forwardBefore = actions.length
+    const forwardSend = await request('/napcat/send', {
+      method: 'POST',
+      body: {
+        channelId,
+        quoteMsgId: '1001',
+        mentionUserId: '10002',
+        forward: {
+          name: '测试机器人',
+          nodes: [{ text: '资料标题节点' }, { text: '正文第一段' }, { text: '正文第二段' }],
+        },
+      },
+    })
+    check(
+      '转发发送接口返回成功',
+      forwardSend.data?.ok === true && forwardSend.data?.forward === true && forwardSend.data?.nodes === 3,
+      JSON.stringify(forwardSend.data),
+    )
+    const forwardAction = await waitFor(() => actions.slice(forwardBefore).find(item => item.action === 'send_group_forward_msg') || null)
+    check('群聊转发走 send_group_forward_msg', !!forwardAction, JSON.stringify(forwardAction))
+    const forwardMessages = forwardAction?.params?.messages || []
+    check(
+      '转发节点结构为 OneBot node（机器人昵称 + 文本段）',
+      forwardMessages.length === 3 &&
+        forwardMessages.every(item => item.type === 'node' && Array.isArray(item.data?.content)) &&
+        forwardMessages[0].data.nickname === '测试机器人' &&
+        String(forwardMessages[0].data.user_id) === '10001' &&
+        String(forwardMessages[0].data.content[0]?.data?.text).includes('资料标题节点') &&
+        String(forwardMessages[1].data.content[0]?.data?.text).includes('正文第一段'),
+      JSON.stringify(forwardMessages).slice(0, 300),
+    )
+    check(
+      '转发不与引用 / 艾特混发',
+      (forwardAction?.params?.message === undefined) && forwardMessages.every(item => (item.data.content || []).every(segment => segment.type === 'text')),
+      JSON.stringify(forwardMessages).slice(0, 200),
+    )
+    const manyNodes = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId, forward: { nodes: Array.from({ length: 70 }, (_, index) => ({ text: `第 ${index} 个节点` })) } },
+    })
+    check('转发节点数有上限（最多 60 个）', manyNodes.data?.ok === true && manyNodes.data?.nodes === 60, JSON.stringify(manyNodes.data))
+    const emptyForward = await request('/napcat/send', { method: 'POST', body: { channelId, forward: { nodes: [{ text: '   ' }] } } })
+    check('空转发被拒绝', emptyForward.data?.ok === false && emptyForward.data?.code === 'EMPTY', JSON.stringify(emptyForward.data))
+
     // 4b) 私聊渠道：目标 QQ 路由与私聊发送
     const privateChannelId = 'napcat-test-private'
     const privateSync = await request('/napcat/channels/sync', {
@@ -529,6 +577,26 @@ async function main() {
         (privateAction.params?.message || []).every(segment => segment.type !== 'reply' && segment.type !== 'at') &&
         (privateAction.params?.message || []).some(segment => segment.type === 'text' && segment.data?.text === '私聊回复'),
       JSON.stringify(privateAction?.params || {}),
+    )
+
+    const privateForwardBefore = actions.length
+    const privateForward = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId: privateChannelId, forward: { nodes: [{ text: '私聊转发正文' }] } },
+    })
+    check(
+      '私聊转发发送成功（不依赖引用 / 艾特）',
+      privateForward.data?.ok === true && privateForward.data?.forward === true && privateForward.data?.nodes === 1,
+      JSON.stringify(privateForward.data),
+    )
+    const privateForwardAction = await waitFor(
+      () => actions.slice(privateForwardBefore).find(item => item.action === 'send_private_forward_msg') || null,
+    )
+    check(
+      '私聊转发走 send_private_forward_msg',
+      privateForwardAction?.params?.user_id === 10002 &&
+        String(privateForwardAction?.params?.messages?.[0]?.data?.content?.[0]?.data?.text || '').includes('私聊转发正文'),
+      JSON.stringify(privateForwardAction?.params || {}).slice(0, 240),
     )
 
     // 4c) 助手直接输出 CQ 码 / [at:qq] 简写时转换为真实消息段
@@ -686,6 +754,68 @@ async function main() {
     )
     check('积压判定：napcat.replyBacklog=true 时恢复回复', isBacklogMessage({ receivedAt: backlogNow - 60000 }, { sessionStartedAt: backlogNow, replyBacklog: true }) === false)
     check('积压判定：没有时间信息的新消息不算积压', isBacklogMessage({}, { sessionStartedAt: backlogNow }) === false)
+    // 9) 外发组装：资料 / 超长消息 -> 合并转发（聊天记录）
+    const planner = createOutboundPlanner({
+      config: {
+        get: (key, fallback) =>
+          ({ 'chat.forwardThreshold': 100, 'chat.forwardNodeChars': 200, 'chat.forwardMaxNodes': 3 })[key] ?? fallback,
+      },
+      resolveDocument: docId => (docId === 'doc_demo' ? { doc_id: docId, title: '教程', content: '正文'.repeat(80) } : null),
+    })
+    const shortPlan = planner.buildOutboundContent({ role: 'assistant', content: '短消息' })
+    check('外发组装：短消息不折叠成转发', !shortPlan.forward && shortPlan.text === '短消息', JSON.stringify(shortPlan))
+    const shortWithImages = planner.buildOutboundContent({ role: 'assistant', content: '带图短消息', meta: { images: [{ id: 'img-1' }] } })
+    check(
+      '外发组装：带图短消息仍走普通消息路径',
+      !shortWithImages.forward && shortWithImages.text === '带图短消息' && shortWithImages.images.length === 1,
+      JSON.stringify(shortWithImages),
+    )
+
+    const longPlan = planner.buildOutboundContent({ role: 'assistant', content: '长'.repeat(900) })
+    check(
+      '外发组装：超过阈值的单条消息自动折叠成转发（按节点字数切段）',
+      Array.isArray(longPlan.forward) && longPlan.forward.length === 3 && longPlan.text === '' && longPlan.forward[0].text.length === 200,
+      JSON.stringify(longPlan).slice(0, 160),
+    )
+    check(
+      '外发组装：超长文本在节点上限处截断并标注省略字数',
+      String(longPlan.forward[2]?.text || '').includes('已省略约'),
+      JSON.stringify(longPlan.forward[2] || null).slice(0, 120),
+    )
+
+    const cqLongPlan = planner.buildOutboundContent({ role: 'assistant', content: '[CQ:json,data={' + 'x'.repeat(400) + '}]' })
+    check(
+      '外发组装：含 CQ 码的长消息不折叠（仍按消息段解析）',
+      !cqLongPlan.forward && String(cqLongPlan.text).startsWith('[CQ:json'),
+      JSON.stringify(cqLongPlan).slice(0, 120),
+    )
+    const docPlan = planner.buildOutboundContent({
+      role: 'assistant',
+      kind: 'document',
+      content: '一句缩略',
+      meta: { docId: 'doc_demo', title: '教程标题', summary: '一句缩略' },
+    })
+    check(
+      '外发组装：资料消息第一条是标题、往下是正文',
+      docPlan.text === '' &&
+        docPlan.forward?.length === 2 &&
+        docPlan.forward[0].text === '教程标题' &&
+        String(docPlan.forward[1]?.text || '').startsWith('正文'),
+      JSON.stringify(docPlan).slice(0, 160),
+    )
+    const missingDocPlan = planner.buildOutboundContent({
+      kind: 'document',
+      content: '一句缩略',
+      meta: { docId: 'doc_missing', title: '找不到的资料', summary: '一句缩略' },
+    })
+    check(
+      '外发组装：资料原文缺失时退回标题 + 缩略',
+      missingDocPlan.forward?.length === 2 && missingDocPlan.forward[1].text === '一句缩略',
+      JSON.stringify(missingDocPlan),
+    )
+    const noTitlePlan = planner.buildOutboundContent({ kind: 'document', content: '', meta: { docId: 'doc_missing' } })
+    check('外发组装：没有标题时给出占位标题', noTitlePlan.forward?.[0]?.text === '资料', JSON.stringify(noTitlePlan))
+
   } finally {
     try {
       ws?.close()

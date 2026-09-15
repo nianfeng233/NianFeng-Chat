@@ -17,7 +17,8 @@
  * 兼容策略（模型能力差异兜底）：
  *   1. 模型不返回 tool_calls，但正文是 <tool_call> JSON / DSML·DSLM 标记 -> 解析成工具调用继续执行；
  *   2. 识别出工具标记但无法解析 -> 立即撤掉流式内容并拦截，绝不把标记展示给用户；
- *   3. 只有普通正文才回退为“普通流式回复”。
+ *   3. 模型坚持直出普通正文时：严格模式下先强化纠错；仍不调用工具则通过
+ *      chat_send 发送链兜底，避免用户什么都收不到。
  * chat-flow 自己不认识 OpenAI / Ollama / 任何具体工具实现，只编排服务。
  */
 export const name = 'chat-flow'
@@ -86,6 +87,8 @@ export function apply(ctx) {
     napcat_card: '处理 QQ 卡片',
   }
   const TYPING_TOOLS = new Set(['chat_send', 'send_document'])
+  /** 严格纠错时只给模型保留回复工具，避免它继续输出“解释为什么没调工具”的正文。 */
+  const STRICT_REPLY_TOOLS = new Set(['chat_send', 'send_document'])
 
   const emitStatus = (conversationId, status, extra = {}) => {
     events.emit('chat:status', { conversationId, status, at: Date.now(), ...extra })
@@ -336,22 +339,52 @@ export function apply(ctx) {
     })
   }
 
-  const isToolUnsupported = err =>
-    /tool_choice|tool_calls|function.?call|tools? (?:are )?(?:not|unsupported)|(?:not support|unsupported|invalid).{0,20}(?:tool|function)|不支持.{0,6}工具/i.test(
-      String(err?.message || err),
+  /** 提供商是否明确拒绝 tool_choice 参数（与“完全不支持 tools”要分开处理）。 */
+  const isToolChoiceRejected = err => /tool_choice/i.test(String(err?.message || err))
+
+  const isToolUnsupported = err => {
+    const message = String(err?.message || err)
+    if (isToolChoiceRejected(err)) return false
+    return /tool_calls|function.?call|tools? (?:are )?(?:not|unsupported)|(?:not support|unsupported|invalid|unknown).{0,20}(?:tool|function)|不支持.{0,6}工具/i.test(
+      message,
     )
+  }
+
+  const switchToTextualTools = (entry, conversationId, messagesToSend, options, reason) => {
+    // 部分模型 / 提供商完全不支持原生 function calling：移除 tools，但仍保留
+    // “必须通过文本工具协议回复”的严格约束，而不是回退成裸正文直出。
+    entry.toolUnsupported = true
+    entry.suppressStream = true
+    ctx.logger.warn(`模型不支持原生工具调用，切换为文本工具协议严格模式：${reason || 'unknown'}`)
+    removeDraft(entry, conversationId)
+    return attemptStream(entry, conversationId, messagesToSend, { ...options, tools: undefined, toolChoice: undefined })
+  }
 
   async function streamRound(entry, conversationId, messagesToSend, options) {
     try {
       return await attemptStream(entry, conversationId, messagesToSend, options)
     } catch (err) {
-      if (options.tools?.length && isToolUnsupported(err) && !entry.cancelled) {
-        // 部分模型 / 提供商不支持 function calling：移除工具重试，走普通流式回复
-        entry.toolUnsupported = true
-        entry.suppressStream = false
-        ctx.logger.warn(`模型不支持工具调用，回退为普通回复：${err?.message || err}`)
-        removeDraft(entry, conversationId)
-        return attemptStream(entry, conversationId, messagesToSend, { ...options, tools: undefined, toolChoice: undefined })
+      if (entry.cancelled) throw err
+      const toolsPresent = Array.isArray(options.tools) && options.tools.length > 0
+      // required 不是所有 OpenAI 兼容网关都支持：先降级为 auto 保留 tools；
+      // 如果改用 auto 后仍然报 tool_choice / tools 相关错误，再切换文本工具协议。
+      if (toolsPresent && isToolChoiceRejected(err)) {
+        if (!entry.toolChoiceDowngraded && options.toolChoice !== 'auto') {
+          entry.toolChoiceDowngraded = true
+          ctx.logger.warn(`提供商不接受 tool_choice=${options.toolChoice}，保留工具并改用 auto 重试：${err?.message || err}`)
+          removeDraft(entry, conversationId)
+          try {
+            return await attemptStream(entry, conversationId, messagesToSend, { ...options, toolChoice: 'auto' })
+          } catch (retryErr) {
+            if (entry.cancelled) throw retryErr
+            if (!isToolChoiceRejected(retryErr) && !isToolUnsupported(retryErr)) throw retryErr
+            return switchToTextualTools(entry, conversationId, messagesToSend, options, retryErr?.message || retryErr)
+          }
+        }
+        return switchToTextualTools(entry, conversationId, messagesToSend, options, err?.message || err)
+      }
+      if (toolsPresent && isToolUnsupported(err)) {
+        return switchToTextualTools(entry, conversationId, messagesToSend, options, err?.message || err)
       }
       throw err
     }
@@ -406,7 +439,8 @@ export function apply(ctx) {
 
   /**
    * 严格模式的正文兜底：模型坚持不调工具时，不让裸 assistant 正文直接走渠道，
-   * 而是复用 chat_send 的标准发送链（零宽字符清理、去重、模拟输入、落库、渠道外发）。
+   * 而是复用 chat_send 的标准发送链（零宽字符清理、去重、模拟输入、落库、渠道外发），
+   * 这样用户至少能收到回复，同时仍保留工具链路的发送行为。
    */
   async function fallbackViaChatSend(entry, conversationId, content, reasoning, contextBase = {}) {
     const text = String(content ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
@@ -618,10 +652,23 @@ export function apply(ctx) {
       let textualMode = false
       let toolRetries = 0
       // DeepSeek 官方适配器按 harness 约定不发 tool_choice，模型有时会直接输出正文。
-      // 纠正次数由 chat.toolRetryLimit 控制（不再硬编码封顶为 1）；达到上限后走
-      // “经过发送链处理”的正文兜底，而不是把裸 assistant 正文直接丢给渠道。
-      const retryLimitRaw = Number(config.get('chat.toolRetryLimit', 1))
-      const toolRetryLimit = Number.isFinite(retryLimitRaw) ? Math.max(0, Math.floor(retryLimitRaw)) : 1
+      // 纠正次数由 chat.toolRetryLimit 控制；达到上限后走 chat_send 发送链兜底，
+      // 不把模型正文直接当普通 assistant 消息发给渠道。
+      const retryLimitRaw = Number(config.get('chat.toolRetryLimit', 3))
+      const toolRetryLimit = Number.isFinite(retryLimitRaw) ? Math.max(0, Math.floor(retryLimitRaw)) : 3
+      // 严格工具模式：模型没有真正调用工具时，正文永远不能算作回复。
+      // 即使提供商不支持原生 function calling，也只允许走文本工具协议，不允许裸正文降级。
+      const strictToolsRequired =
+        toolsEnabled() &&
+        config.get('chat.requireToolCall', true) !== false &&
+        config.get('chat.toolChoice', 'required') !== 'none'
+      const replyToolDefinitions = () => {
+        try {
+          return (tools.definitions?.() || []).filter(tool => STRICT_REPLY_TOOLS.has(tool?.function?.name || tool?.name))
+        } catch (_) {
+          return []
+        }
+      }
       let emptyRetries = 0
       const emptyRetryLimit = Math.max(0, Number(config.get('chat.emptyRetryLimit', 2)) || 0)
       while (round < maxRounds && !entry.cancelled) {
@@ -630,16 +677,25 @@ export function apply(ctx) {
         ensureDraft(entry, conversationId)
         emitStatus(conversationId, 'thinking', { round, label: '正在思考' })
         const roundStartedAt = Date.now()
-        const roundOptions = textualMode ? { ...options, tools: undefined, toolChoice: undefined } : options
-        // 原生工具调用模式下，模型有时会先流出一小段正文再给出 tool_call；
-        // 这段正文只暂存、不上屏，最终由 chat_send 工具消息呈现，避免闪现后消失。
+        const useTextualTools = textualMode || entry.toolUnsupported === true
+        const roundOptions = useTextualTools
+          ? { ...options, tools: undefined, toolChoice: undefined }
+          : { ...options }
+        // 已经纠正过至少一次时，只给回复工具并强制 required：模型没有别的工具可用，
+        // 只能把最终回复放进 chat_send / send_document 参数里。
+        if (strictToolsRequired && toolRetries > 0 && !useTextualTools) {
+          const replyTools = replyToolDefinitions()
+          if (replyTools.length) roundOptions.tools = replyTools
+          roundOptions.toolChoice = 'required'
+        }
+        // 如果第一轮已经确认网关不接受 required，就保持 auto + tools，不要每轮重复撞墙。
+        if (entry.toolChoiceDowngraded && !useTextualTools && roundOptions.toolChoice !== 'auto') roundOptions.toolChoice = 'auto'
+        // 严格模式下正文只暂存、不上屏，等解析成工具调用后才呈现；文本协议同样先拦截，
+        // 避免模型在纠错后仍把正文直接显示给用户。
         entry.suppressStream =
-          !textualMode &&
-          Array.isArray(roundOptions.tools) &&
-          roundOptions.tools.length > 0 &&
-          roundOptions.toolChoice !== 'none' &&
-          config.get('chat.requireToolCall', true) !== false &&
-          !entry.toolUnsupported
+          strictToolsRequired &&
+          (useTextualTools ||
+            (Array.isArray(roundOptions.tools) && roundOptions.tools.length > 0 && roundOptions.toolChoice !== 'none'))
         const result = await streamRound(entry, conversationId, [...base.messages, ...roundMessages], roundOptions)
         if (entry.cancelled) throw abortError()
         const roundThinkingMs = Date.now() - roundStartedAt
@@ -723,36 +779,41 @@ export function apply(ctx) {
             ended = true
             break
           }
-          const strict = toolsEnabled() && config.get('chat.requireToolCall', true) !== false && !entry.toolUnsupported && options.toolChoice !== 'none'
+          const strict = strictToolsRequired
           if (strict && toolRetries < toolRetryLimit) {
-            // 严格模式：模型直接输出正文时不展示，但也不要用“普通状态”再问一遍。
-            // 必须把“上一轮正文已被驳回、原因是没调工具”这条信息回传给模型，
-            // 让它在明确的驳回上下文里重试；否则模型容易把纠正当成新用户话题，
-            // 连续两次都继续直出正文。
+            // 严格模式：模型直接输出正文时不展示。纠正提示必须把“上一轮正文已被驳回、
+            // 原因是没调工具”讲清楚，并告诉它本轮只剩回复工具，只能给出 tool_calls。
             toolRetries += 1
             if (entry.draftId) removeDraft(entry, conversationId)
             const rejectedText = String(result.text || '').trim().slice(0, 1200)
             const rejectedAt = new Date().toLocaleTimeString()
+            const textualOnly = entry.toolUnsupported === true || useTextualTools
+            const replyInstruction = textualOnly
+              ? '原生工具协议不可用；本轮只允许使用文本工具调用格式，不要输出任何面向用户的 assistant 正文。\n' +
+                '只输出这一种格式（可调用多次）：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>\n' +
+                '长文本 / 资料 / 大段代码请改用：<tool_call>{"name":"send_document","arguments":{"title":"标题","content":"完整正文"}}</tool_call>'
+              : '你只能调用 chat_send / send_document，不要输出任何解释、计划、心理活动或面向用户的 assistant 正文。\n' +
+                '日常回复必须调用 chat_send（参数 {"messages":["要发送的内容"],"end":true}）；\n' +
+                '长文本 / 资料 / 大段代码 / 文章必须调用 send_document（title + content，或 summary）。'
             roundMessages.push({
               role: 'user',
               content:
                 `[系统纠正 ${toolRetries}/${toolRetryLimit}] 系统消息：你上一轮的回复已被驳回，尚未发送给用户。\n` +
                 `驳回时间：${rejectedAt}\n` +
-                '驳回原因：当前是严格工具模式，只有工具调用（tool_calls）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
-                '请注意：无论是一句话还是长文本，你都必须调用回复工具进行回复；直接输出 assistant 正文永远会被驳回。\n' +
+                '驳回原因：当前是严格工具模式，只有真正的工具调用（tool_calls / 文本工具协议）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
+                '请注意：无论是一句话还是长文本，你都必须调用回复工具；直接输出 assistant 正文永远会被驳回，也不会出现在聊天记录里。\n' +
                 '被驳回的正文（仅用于让你知道上一轮生成了什么；不要把它当成本轮最终回复，也不要原样直接返回）：\n' +
                 `--- 被驳回正文开始 ---\n${rejectedText || '（空）'}\n--- 被驳回正文结束 ---\n` +
-                '请重新处理本轮用户请求，按内容长度二选一：\n' +
-                '1）日常短回复：必须调用回复工具 chat_send，参数为 {"messages":["要发送给用户的内容"],"end":true}；不支持原生工具时只输出 <tool_call>{"name":"chat_send","arguments":{"messages":["要发送给用户的内容"],"end":true}}</tool_call>\n' +
-                '2）长文本 / 资料 / 大段代码 / 文章：必须调用资料工具 send_document（title + content，或 summary），由资料库保存原文，不要再硬塞进 chat_send 或直接输出正文。\n' +
-                '无论哪种情况，都必须调用回复工具；不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
+                '这是强制工具回合：本轮工具列表只保留回复工具（或只接受文本工具协议），不要再尝试解释原因。\n' +
+                replyInstruction,
             })
             ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
             continue
           }
           if (strict && toolRetries >= toolRetryLimit) {
-            // 纠错达到上限：正文兜底仍然保留，但不把裸 assistant 正文直接丢给渠道，
-            // 而是复用 chat_send 的标准发送链处理（清理 / 去重 / 模拟输入 / 落库 / 外发）。
+            // 纠错达到上限：模型仍未调用工具。正文兜底仍然保留，但不直接展示裸
+            // assistant 正文，而是复用 chat_send 的标准发送链（清理 / 去重 / 模拟输入 /
+            // 落库 / 渠道外发），确保用户不会因为模型不守协议而什么都收不到。
             const fallbackText = String(result.text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
             if (entry.draftId) removeDraft(entry, conversationId)
             const fallbackOutput = await fallbackViaChatSend(entry, conversationId, fallbackText, reasoning, {
@@ -776,7 +837,7 @@ export function apply(ctx) {
               ended = true
               break
             }
-            // chat_send 服务 / 权限异常时，退回原来的 finalizeFallback；此时正文已做清理
+            // chat_send 服务 / 权限异常时，退回 finalizeFallback，至少保证普通正文能发出。
             ctx.logger.warn(`[chat-flow] 严格工具模式：chat_send 兜底失败，退回普通正文（${fallbackOutput?.error || '未知错误'}）`)
             ctx.inject('toast')?.warn?.(`模型未按工具协议返回，兜底发送失败：${fallbackOutput?.error || '未知错误'}`)
             if (fallbackText) {
@@ -790,7 +851,7 @@ export function apply(ctx) {
             ended = true
             break
           }
-          // 普通正文：兼容为普通流式回复（文档路径之外的降级）
+          // 普通正文：兼容为普通流式回复（仅在用户关闭严格工具模式时才会走到这里）
           if (result.text) {
             entry.finalWire = {
               role: 'assistant',

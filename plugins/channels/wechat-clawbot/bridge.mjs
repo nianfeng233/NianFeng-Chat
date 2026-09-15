@@ -16,6 +16,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { fetchWithNetworkRetry, networkErrorText } from '../request-utils.mjs'
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto'
 
 export const name = 'wechat-clawbot-bridge'
@@ -200,7 +201,7 @@ async function downloadWxImage(imageItem) {
       : '')
   const key = parseWxAesKey(imageItem.aeskey || media.aes_key)
   if (!fullUrl || !key) return null
-  const response = await fetch(fullUrl, { signal: AbortSignal.timeout(25000) })
+  const response = await fetchWithNetworkRetry(fullUrl, { signal: AbortSignal.timeout(25000) })
   if (!response.ok) return null
   const encrypted = Buffer.from(await response.arrayBuffer())
   if (!encrypted.length || encrypted.length > 3 * 1024 * 1024) return null
@@ -405,7 +406,7 @@ export function apply(ctx) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), Math.max(1000, Number(timeoutMs) || 20000))
     try {
-      const response = await fetch(`${base}${path}`, {
+      const response = await fetchWithNetworkRetry(`${base}${path}`, {
         method,
         headers: token ? authHeaders(token) : jsonHeaders(),
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -421,7 +422,7 @@ export function apply(ctx) {
       if (!response.ok) data._httpStatus = response.status
       return data
     } catch (err) {
-      return { _error: err?.name === 'AbortError' ? '请求超时' : err?.message || String(err) }
+      return { _error: err?.name === 'AbortError' ? '请求超时' : networkErrorText(err) }
     } finally {
       clearTimeout(timer)
     }
@@ -862,7 +863,7 @@ export function apply(ctx) {
           const match = /^data:[^;,]+;base64,([\s\S]+)$/.exec(source)
           if (match) bytes = Buffer.from(match[1].replace(/\s+/g, ''), 'base64')
         } else if (/^https?:/i.test(source)) {
-          const response = await fetch(source, { signal: AbortSignal.timeout(30000) })
+          const response = await fetchWithNetworkRetry(source, { signal: AbortSignal.timeout(30000) })
           if (!response.ok) throw Object.assign(new Error(`下载图片失败：HTTP ${response.status}`), { status: 502 })
           bytes = Buffer.from(await response.arrayBuffer())
         } else {
@@ -909,7 +910,7 @@ export function apply(ctx) {
       const cipher = createCipheriv('aes-128-ecb', aeskey, null)
       cipher.setAutoPadding(false)
       const ciphertext = Buffer.concat([cipher.update(padded), cipher.final()])
-      const cdnResponse = await fetch(uploadUrl, {
+      const cdnResponse = await fetchWithNetworkRetry(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: ciphertext,
