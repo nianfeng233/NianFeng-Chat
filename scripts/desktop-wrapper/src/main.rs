@@ -675,12 +675,16 @@ fn spawn_node(
 ) -> Result<Child, Box<dyn std::error::Error>> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let _ = fs::remove_file(home_dir.join(".webui-port"));
+    let _ = fs::remove_file(home_dir.join(".webui-token"));
     let child = Command::new(node_path)
-        .arg("server/index.mjs")
+        .arg("start.mjs")
+        .arg("--serve")
+        .arg("--no-open")
         .current_dir(app_dir)
         .env("PORT", port.to_string())
-        .env("NIANFENG_STATIC_DIR", ".")
         .env("NIANFENG_HOME_DIR", home_dir)
+        .env("NIANFENG_NO_OPEN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -696,12 +700,16 @@ fn spawn_node(
     home_dir: &Path,
     port: u16,
 ) -> Result<Child, Box<dyn std::error::Error>> {
+    let _ = fs::remove_file(home_dir.join(".webui-port"));
+    let _ = fs::remove_file(home_dir.join(".webui-token"));
     let child = Command::new(node_path)
-        .arg("server/index.mjs")
+        .arg("start.mjs")
+        .arg("--serve")
+        .arg("--no-open")
         .current_dir(app_dir)
         .env("PORT", port.to_string())
-        .env("NIANFENG_STATIC_DIR", ".")
         .env("NIANFENG_HOME_DIR", home_dir)
+        .env("NIANFENG_NO_OPEN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

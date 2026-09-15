@@ -250,6 +250,61 @@ async function main() {
   check('空回复会自动重试', emptyAttempts === 2, `attempts=${emptyAttempts}`)
   check('重试仍为空后明确报错', !!emptyError && /空回复/.test(emptyError.message), emptyError?.message)
 
+  console.log('\n④e 后端最终图片预算：无论什么渠道只保留最近 2 张真图')
+  let budgetCaptured = null
+  backend.ctx.models.registerAdapter('image-budget-test', {
+    label: 'Image Budget Test',
+    async listModels() {
+      return [{ id: 'image-budget-1', name: 'Image Budget' }]
+    },
+    async test() {
+      return { detail: 'Image Budget Test 可用' }
+    },
+    async stream({ messages, onChunk, onDone }) {
+      budgetCaptured = JSON.parse(JSON.stringify(messages || []))
+      onChunk('ok')
+      onDone({})
+    },
+  })
+  await backend.ctx.settings.update({
+    preferences: { chat: { imagesPerRequest: 2 } },
+    providers: {
+      'image-budget-test': {
+        type: 'image-budget-test',
+        name: 'Image Budget Test',
+        baseURL: 'image-budget://local',
+        enabled: true,
+        models: [{ id: 'image-budget-1', name: 'Image Budget' }],
+        defaultModel: 'image-budget-1',
+      },
+    },
+  })
+  const imagePart = label => ({ type: 'image_url', image_url: { url: `data:image/png;base64,${label}` } })
+  await backend.ctx.models.stream({
+    provider: 'image-budget-test',
+    model: 'image-budget-1',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '旧图' }, imagePart('old-1'), imagePart('old-2')] },
+      { role: 'assistant', content: '收到' },
+      { role: 'user', content: [{ type: 'text', text: '新图' }, imagePart('new-1')] },
+    ],
+    options: {},
+  })
+  const budgetImages = (budgetCaptured || []).flatMap(message =>
+    Array.isArray(message.content) ? message.content.filter(part => part?.type === 'image_url') : [],
+  )
+  const budgetPlaceholders = (budgetCaptured || []).flatMap(message =>
+    Array.isArray(message.content) ? message.content.filter(part => part?.type === 'text' && part.text === '[图片]') : [],
+  )
+  check(
+    '后端最终预算只保留最近 2 张真图，更早的降级为 [图片]',
+    budgetImages.length === 2 &&
+      budgetPlaceholders.length === 1 &&
+      budgetImages.every(part => String(part.image_url?.url || '').includes('new-1') || String(part.image_url?.url || '').includes('old-2')),
+    JSON.stringify({ images: budgetImages.map(part => part.image_url?.url), placeholders: budgetPlaceholders.length }),
+  )
+
+
   // 远端拉取与已有模型合并：用户配置不能被覆盖
   backend.ctx.models.registerAdapter('merge-test', {
     label: 'Merge Test',
@@ -267,6 +322,26 @@ async function main() {
   check('拉取模型会追加远端新模型', refreshed.ok === true && mergedProvider?.models?.some(m => m.id === 'remote-1'), JSON.stringify(mergedProvider?.models))
   const keptModel = mergedProvider?.models?.find(m => m.id === 'keep-1')
   check('拉取不会覆盖用户已有的模型配置', keptModel?.name === 'User Keep' && keptModel?.params?.temperature === 0.5, JSON.stringify(keptModel))
+
+  // 「获取模型列表」必须只返回临时候选，不能像旧 refresh 一样全部写入并启用
+  backend.ctx.models.registerAdapter('discover-test', {
+    label: 'Discover Test',
+    async listModels() {
+      return [{ id: 'discover-1', name: 'Discover 1' }]
+    },
+  })
+  await api(base, '/api/providers', { method: 'POST', body: { id: 'discover-test', name: 'Discover Test', type: 'discover-test' } })
+  const discoveredRes = await api(base, '/api/providers/discover-test/models/remote')
+  const discoveredBody = await discoveredRes.json()
+  check(
+    '获取模型列表返回临时候选并标记未安装',
+    discoveredRes.status === 200 && discoveredBody.models?.[0]?.id === 'discover-1' && discoveredBody.models?.[0]?.installed === false,
+    JSON.stringify(discoveredBody),
+  )
+  const discoverProvider = (await (await api(base, '/api/providers')).json()).providers.find(p => p.id === 'discover-test')
+  check('获取模型列表不会自动写入 / 启用模型', !discoverProvider?.models?.length, JSON.stringify(discoverProvider?.models))
+  await api(base, '/api/providers/discover-test', { method: 'DELETE' })
+
 
   const delModel = await api(base, modelPath, { method: 'DELETE' })
   check('删除模型成功', delModel.status === 200, `HTTP ${delModel.status}`)

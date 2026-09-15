@@ -65,7 +65,9 @@ export function apply(ctx, config = {}) {
 
   const writeJsonAtomic = async (target, payload) => {
     await mkdir(dirname(target), { recursive: true })
-    const tmp = `${target}.${process.pid}.tmp`
+    // 并发持久化时不能用固定 tmp 名：两个异步保存可能互相 rename 掉对方的临时文件，
+    // 在测试或高频写入下会出现 ENOENT。每次写盘用独立临时名，rename 本身是原子替换。
+    const tmp = `${target}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
     await writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
     await rename(tmp, target)
   }
@@ -398,6 +400,7 @@ export function apply(ctx, config = {}) {
         time: partial.time || '',
         updatedAt: Date.now(),
         createdAt: Date.now(),
+        metaUpdatedAt: Number(partial.metaUpdatedAt) || Date.now(),
         messages: partial.messages || [],
         meta: partial.meta || {},
       }
@@ -419,6 +422,9 @@ export function apply(ctx, config = {}) {
         else scheduleSave()
       }
       const metaPatch = { ...patch }
+      const hasMetaChange = Object.keys(metaPatch).some(key => !['messages', 'updatedAt', 'metaUpdatedAt', 'messageCount'].includes(key))
+      if (metaPatch.metaUpdatedAt === undefined && hasMetaChange) metaPatch.metaUpdatedAt = Date.now()
+      else if (metaPatch.metaUpdatedAt !== undefined) metaPatch.metaUpdatedAt = Number(metaPatch.metaUpdatedAt) || Date.now()
       delete metaPatch.messages
       Object.assign(conv, metaPatch, { id: conv.id, updatedAt: Date.now() })
       afterConversationChange(conv)

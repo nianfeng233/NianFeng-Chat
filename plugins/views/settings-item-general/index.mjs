@@ -62,22 +62,26 @@ export function apply(ctx) {
               : '<span class="plugin-tag disabled">未安装语言包</span>'),
         ))}
         ${section('聊天链路', card(
-          row('强制调用工具', '模型通过工具发送聊天消息；不支持 function calling 的模型会自动降级为普通回复', switchBtn('chat.toolsEnabled', true)) +
+          row('强制调用工具', '模型通过工具发送聊天消息；不支持原生 function calling 的模型会切换为文本工具协议严格模式，关闭后使用旧版普通回复', switchBtn('chat.toolsEnabled', true)) +
           row('工具选择策略', 'required=每轮强制任一工具；auto=模型自行决定；none=不向模型提供工具',
             select('chat.toolChoice', [
               { value: 'required', label: 'required · 强制工具' },
               { value: 'auto', label: 'auto · 模型决定' },
               { value: 'none', label: 'none · 关闭工具' },
             ], config.get('chat.toolChoice', 'required'))) +
-          row('严格工具模式', '模型直接输出正文时先按纠错提示重试一次；仍未调用工具就把正文作为回复发出，不再让用户空等或直接报错', switchBtn('chat.requireToolCall', true)) +
-          row('工具纠错次数', '严格模式下最多纠正几次（为提高响应速度，超过 1 次会按 1 次上限执行；0 = 不纠正，直接按普通文本降级）',
-            input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 1), { type: 'number', width: 70 })) +
+          row('严格工具模式', '模型直接输出正文时先按纠错提示重试；仍未调用工具则把正文交给 chat_send 发送链兜底，保证用户不会因为模型不守协议而收不到回复', switchBtn('chat.requireToolCall', true)) +
+          row('每条消息附带工具提醒', '在每条 user 消息的 meta 里附加“必须调用工具回复”的短提醒，缓解长上下文稀释；关闭可以省一点 token', switchBtn('chat.perMessageToolReminder', true)) +
+          row('导入历史自动进入上下文', '默认关闭：风语 / QQ 导入的旧记录只供 read_messages 检索，不会自动塞进最近上下文；开启后按正常轮次规则只带最近几轮', switchBtn('chat.includeImportedHistory', false)) +
+          row('工具纠错次数', '严格模式下最多纠正几次；0 = 不纠正，直接走正文兜底。总轮次仍受“最大工具轮次”约束',
+            input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 3), { type: 'number', width: 70 })) +
           row('空回复纠正次数', '模型既没输出正文也没调用工具时，最多纠正几次；仍为空则明确报错并停止本轮',
             input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +
           row('最大工具轮次', '一轮回复内最多执行多少次“模型 → 工具 → 模型”循环（1-20）',
             input('chat.maxToolRounds', config.get('chat.maxToolRounds', 10), { type: 'number', width: 90 })) +
-          row('上下文 token 预算', '工作记忆 + 渠道记忆的粗略 token 上限，超出时整轮丢弃最旧内容',
-            input('chat.contextTokens', config.get('chat.contextTokens', 4096), { type: 'number', width: 110 })) +
+          row('输入上下文上限', '0 = 不按 token 截断（推荐），只受工作 / 渠道记忆轮数约束；填正数时才按预算丢弃最旧内容；模型参数里填了“上下文长度”时会自动用它减去输出预留',
+            input('chat.contextTokens', config.get('chat.contextTokens', 0), { type: 'number', width: 110 })) +
+          row('单次输出上限', '每次回复最多生成的 token 数，默认 8192；模型设置里单独填了 max_tokens 时以模型级为准',
+            input('chat.maxOutputTokens', config.get('chat.maxOutputTokens', 8192), { type: 'number', width: 110 })) +
           row('工作记忆轮数', '角色级普通私聊记忆保留轮数',
             input('chat.memoryRounds', config.get('chat.memoryRounds', 5), { type: 'number', width: 80 })) +
           row('渠道记忆轮数', '当前渠道最近消息保留轮数',
@@ -91,7 +95,9 @@ export function apply(ctx) {
           row('打字最大延迟（毫秒）', '后续消息的动态延迟上限，默认 5000ms',
             input('chat.typingMaxMs', config.get('chat.typingMaxMs', 5000), { type: 'number', width: 90 })) +
           row('每字延迟（毫秒）', '延迟按消息字数线性增长，默认 35ms/字',
-            input('chat.typingPerCharMs', config.get('chat.typingPerCharMs', 35), { type: 'number', width: 80 })),
+            input('chat.typingPerCharMs', config.get('chat.typingPerCharMs', 35), { type: 'number', width: 80 })) +
+          row('本地图片保留数量', '本地图片文件最多保留多少张；超过后自动删除最旧的图片，默认 30 张',
+            input('chat.imageStoreLimit', config.get('chat.imageStoreLimit', 30), { type: 'number', width: 80 })),
         ))}`)
 
       const unbind = bindConfigControls(container, ctx, {

@@ -57,15 +57,23 @@ export function apply(ctx) {
       'POST',
       '/api/images',
       safe(async (req, res) => {
-        const body = await http.readBody(req)
+        // 前端会把 data URL 作为 JSON 上传；压缩目标 720KB 左右，但保留高像素原图时
+        // 2MB 默认上限偏紧（base64 另有 33% 膨胀）。这里单独放宽到 12MB，
+        // 解码后的真实图片仍由 store.mjs 的 MAX_IMAGE_BYTES 限制。
+        const body = await http.readBody(req, 12 * 1024 * 1024)
         const decoded = decodeImageBody(body)
         if (!decoded?.buffer?.length) throw Object.assign(new Error('缺少图片内容'), { status: 400 })
-        const record = await saveImageBuffer(settings.dataDir, decoded.buffer, {
-          mime: decoded.mime,
-          name: body.name,
-          width: body.width,
-          height: body.height,
-        })
+        const record = await saveImageBuffer(
+          settings.dataDir,
+          decoded.buffer,
+          {
+            mime: decoded.mime,
+            name: body.name,
+            width: body.width,
+            height: body.height,
+          },
+          { keep: Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined },
+        )
         http.sendJson(res, 200, { ok: true, image: imagePublicRecord(record) })
       }),
     ),
@@ -79,7 +87,6 @@ export function apply(ctx) {
           'Content-Type': result.record.mime || 'application/octet-stream',
           'Content-Length': result.buffer.length,
           'Cache-Control': 'public, max-age=31536000, immutable',
-          'Access-Control-Allow-Origin': '*',
         })
         res.end(result.buffer)
       }),
@@ -99,7 +106,7 @@ export function apply(ctx) {
     'imageStore',
     {
       name: 'imageStore',
-      save: (buffer, meta) => saveImageBuffer(settings.dataDir, buffer, meta),
+      save: (buffer, meta, options) => saveImageBuffer(settings.dataDir, buffer, meta, options),
       get: id => getImageRecord(settings.dataDir, id),
       read: id => readImageBuffer(settings.dataDir, id),
       prune: options => pruneImages(settings.dataDir, options),

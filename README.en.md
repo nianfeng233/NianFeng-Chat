@@ -14,8 +14,11 @@ a Windows desktop application.
 
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
+> Project status: fast-moving iteration; `v1.x` marks feature milestones, not production maturity or a
+> security audit. It listens on localhost by default; before exposing it beyond localhost, read
+> “Security and Privacy” and configure an access token.
 
-- Current version: v1.1.7
+- Current version: v1.1.8
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -31,8 +34,10 @@ built as cordis plugins. The points below are implemented today in code, with pa
   `(conversation_id, seq)`; environments without `node:sqlite` fall back to JSON persistence.
   `read_messages` can then recall history by keyword, exact `seq`, relative sequence range, time range,
   and cursor pagination.
-- The default context budget is only `chat.contextTokens = 4096`, but memory itself is not capped at
-  4096: only recent rounds are injected, and older history is retrieved on demand.
+- Input context is not truncated by tokens by default (`chat.contextTokens = 0`; a positive value acts as
+  a safety cap, and if the model defines a context length the budget becomes `context length - output
+  reserve`). Only recent rounds are injected and older history is retrieved on demand. Output is limited
+  by `chat.maxOutputTokens` (default 8192), overridable per model with `max_tokens`.
 - Long documents go into `document-service`: each document can hold up to 2M characters, while chat
   records keep only `doc_id + title + summary`. `read_document` reads it in chunks 100–4000 tokens at a
   time and returns `next_offset` so the model can continue to the end.
@@ -137,8 +142,9 @@ The model reads and writes messages through tools:
 
 - Read tools: `read_messages` (query message history), `read_document` (read long documents within a
   token budget).
-- Write tools: `chat_send` (send one or more chat messages), `send_document` (send a long document,
-  storing only a reference and summary).
+- Write tools: `chat_send` (send one or more chat messages), `send_document` (send one or more long
+  documents; the full text goes into the document library and is delivered over the channel as a QQ
+  merged-forward record: the first node is the title, the next node is the whole body).
 
 Implementation notes:
 
@@ -171,7 +177,9 @@ On Windows you can also double-click `start.cmd`.
 - **Plugins**: the built-in plugin directory is read-only; the external plugin directory can be
   selected, opened, rescanned, and external plugins can be deleted.
 - **Network**: WebUI host, port, and access token. When a token is set, open
-  `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores a cookie.
+  `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores an HttpOnly cookie and strips
+  the token from the URL. Subsequent API requests use the cookie or the `X-NianFeng-Token` /
+  `Authorization` header.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
 - **Runtime logs**: independent full-width sidebar view (not inside Settings); free level checkboxes (error / warn / info / debug, remembered),
@@ -287,11 +295,25 @@ numbers, `user_data`, and similar content.
 
 - Listens on `127.0.0.1` by default; public access requires explicitly configuring the bind address
   and an access token.
+- The backend validates both `Host` and `Origin`; CORS echoes an explicit allow-list instead of `*`,
+  which blocks DNS rebinding and arbitrary web pages reading the local API.
+- With an access token configured, `/api/health` and `/api/version` expose liveness information
+  only; data directory, config path, provider state, and session statistics require the token
+  (cookie or request header).
+- `?token=` is only a first-navigation bootstrap: it exchanges the token for an HttpOnly cookie and
+  immediately redirects to a clean URL. API requests never accept the query token, and token
+  comparison is constant-time.
+- `/api/rss` blocks SSRF targets: localhost, loopback/private/link-local/metadata addresses, non-http(s)
+  schemes, plus per-hop DNS and redirect validation.
 - API keys and sensitive request headers are stored locally as AES-256-GCM ciphertext in the data
   directory.
 - When backing up data, copy the `.secret-key` file in the same directory as well.
 - User data and the external plugin directory are independent of the source tree; Git repositories
   never contain user data.
+
+> Non-default deployments (WebUI on another port, reverse proxy to a custom domain) can append
+> allow-list entries via `NIANFENG_ALLOWED_ORIGINS` / `NIANFENG_ALLOWED_HOSTS` (comma-separated).
+> Security regression test: `npm run test:security`.
 
 ## Directory Layout
 
@@ -322,5 +344,6 @@ numbers, `user_data`, and similar content.
 - [`docs/PLUGIN-GUIDE.md`](docs/PLUGIN-GUIDE.md) — plugin development guide
 - [`docs/PLUGIN-LIST.md`](docs/PLUGIN-LIST.md) — plugin inventory
 - [`docs/RELEASING.md`](docs/RELEASING.md) — versioning and release process
+- [`docs/SECURITY-HARDENING.md`](docs/SECURITY-HARDENING.md) — security hardening log for the 2026-09 review
 - [`docs/WINDOWS.md`](docs/WINDOWS.md) — Windows usage and troubleshooting
 - [`docs/DESKTOP.md`](docs/DESKTOP.md) — desktop shell build

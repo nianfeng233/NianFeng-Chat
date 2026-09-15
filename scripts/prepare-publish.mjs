@@ -27,7 +27,7 @@ const SOURCE = resolve(ROOT, args.get('source') || 'release/web/source')
 const DEST = resolve(ROOT, args.get('dest') || 'release/publish')
 const KEEP_GIT = true
 
-const SKIP_NAMES = new Set(['.git', 'node_modules', '.tmp', '.local', 'data', 'user_data', 'release'])
+const SKIP_NAMES = new Set(['.git', 'node_modules', '.tmp', '.local', '.workbuddy', 'data', 'user_data', 'release', 'tools'])
 
 async function copyTree(from, to) {
   await mkdir(to, { recursive: true })
@@ -50,7 +50,7 @@ async function removeTreeExceptGit(dir) {
 }
 
 const TEXT_EXT = /\.(mjs|js|cjs|json|md|txt|html|css|ps1|cmd|rs|toml|yml|yaml|gitattributes|gitignore|notice|license)$/i
-const SKIP_SCAN_FILE = /^([a-z0-9]+_html_\d{8}_[a-z0-9]+\.html|.*\.log)$/i
+const SKIP_SCAN_FILE = /^([a-z0-9]+_html_\d{8}_[a-z0-9]+\.html|.*\.log|【[^】]*】.*\.md)$/i
 
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const localUser = String(process.env.USERNAME || process.env.USER || '').trim()

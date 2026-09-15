@@ -61,6 +61,7 @@ async function main() {
   const mock = await startMockOpenAI({ port: 0, apiKey: 'sk-mock' })
   const backend = await startBackend({ port: 0, host: '127.0.0.1', dataDir })
   const base = backend.url
+  const plainRequests = []
 
   // 一个明确不支持 function calling 的适配器：验证 chat-flow 的降级路径
   backend.ctx.models.registerAdapter('plain', {
@@ -71,7 +72,8 @@ async function main() {
     async test() {
       return { detail: '纯文本适配器可用' }
     },
-    async stream({ options, onChunk, onDone }) {
+    async stream({ messages, options, onChunk, onDone }) {
+      plainRequests.push({ messages: JSON.parse(JSON.stringify(messages || [])), options: JSON.parse(JSON.stringify(options || {})) })
       if (options?.tools?.length) throw new Error('tool_choice is not supported by this provider')
       const text = '这是模型不支持工具时的普通降级回复。'
       for (const char of text) {
@@ -91,7 +93,7 @@ async function main() {
     async test() {
       return { detail: 'DSLM 适配器可用' }
     },
-    async stream({ messages, onChunk, onDone }) {
+    async stream({ messages, options, onChunk, onDone }) {
       const hasToolResult = (messages || []).some(
         message => message.role === 'tool' || (message.role === 'user' && String(message.content || '').startsWith('[工具结果]')),
       )
@@ -132,6 +134,7 @@ async function main() {
 
   // 一个忽略 tools、始终直接输出正文的适配器：验证严格工具模式
   const chattyRequests = []
+  const chattyOptions = []
   backend.ctx.models.registerAdapter('chatty', {
     label: '直出正文测试',
     async listModels() {
@@ -140,8 +143,9 @@ async function main() {
     async test() {
       return { detail: '直出正文适配器可用' }
     },
-    async stream({ messages, onChunk, onDone }) {
+    async stream({ messages, options, onChunk, onDone }) {
       chattyRequests.push(JSON.parse(JSON.stringify(messages || [])))
+      chattyOptions.push(JSON.parse(JSON.stringify(options || {})))
       const text = '我是直接输出的正文。'
       for (const char of text) {
         onChunk(char)
@@ -249,6 +253,8 @@ async function main() {
 
   check('chat-flow 运行在工具模式', flow.mode() === 'tools', flow.mode())
 
+
+
   console.log('\n② 发送第一条消息：模型通过 chat_send 工具回复')
   const conv1 = sessions.create({ name: 'Nova 测试角色', meta: { roleId: 'role-test', persona: '你是冒烟测试角色，说话简短。' } })
   sessions.activate(conv1.id)
@@ -269,6 +275,7 @@ async function main() {
 
   check('模型请求带上了工具定义', Array.isArray(captured?.options?.tools) && captured.options.tools.some(tool => tool.function?.name === 'chat_send'), JSON.stringify(captured?.options?.tools?.map(tool => tool.function?.name)))
   check('system 段落包含人设与工具规则', captured?.messages?.[0]?.role === 'system' && captured.messages[0].content.includes('冒烟测试角色') && captured.messages[0].content.includes('chat_send'), captured?.messages?.[0]?.content?.slice(0, 80))
+  check('全局输出 token 上限已传入模型请求', Number(captured?.options?.maxTokens) === 8192, JSON.stringify({ maxTokens: captured?.options?.maxTokens }))
   const wrappedUser = captured?.messages?.find(message => message.role === 'user')
   check('用户内容按 untrusted 紧凑 JSON 包装', typeof wrappedUser?.content === 'string' && wrappedUser.content.includes('"trust":"untrusted"'), String(wrappedUser?.content || '').slice(0, 120))
 
@@ -338,6 +345,60 @@ async function main() {
     sentContents: new Map(),
   })
   check('read_document 按 token 上限分段读取', readDoc.ok === true && readDoc.truncated === true && readDoc.next_offset > 0, JSON.stringify(readDoc).slice(0, 160))
+  console.log('\n⑤b send_document：一次多篇资料（documents 数组），各自一条消息')
+  const multiDoc = await tools.execute(
+    'send_document',
+    {
+      title: '统一标题',
+      documents: [
+        { title: '第一篇', content: '第一份资料原文：' + '甲'.repeat(200) },
+        { content: '第二份资料原文：' + '乙'.repeat(200) },
+        '第三份资料原文：' + '丙'.repeat(200),
+        { title: '空的', content: '   ' },
+      ],
+      end: true,
+    },
+    {
+      conversationId: conv1.id,
+      channelId: channel1.channelId,
+      roleId: 'role-test',
+      userId: 'web-user',
+      sentContents: new Map(),
+    },
+  )
+  check('多篇资料一次发送成功', multiDoc.ok === true && multiDoc.count === 3, JSON.stringify(multiDoc).slice(0, 240))
+  check(
+    '每篇资料各自一条消息（3 条转发气泡）',
+    multiDoc.message_ids?.length === 3 && new Set(multiDoc.message_ids).size === 3,
+    JSON.stringify(multiDoc.message_ids),
+  )
+  check(
+    'documents 里没写标题的条目沿用外层标题',
+    multiDoc.documents?.[1]?.title === '统一标题' && multiDoc.documents?.[0]?.title === '第一篇',
+    JSON.stringify(multiDoc.documents),
+  )
+  check(
+    '返回 documents 列表且首篇仍给出 doc_id',
+    multiDoc.documents?.length === 3 && multiDoc.doc_id === multiDoc.documents[0].doc_id && !!multiDoc.doc_id?.startsWith('doc_'),
+    JSON.stringify(multiDoc.documents),
+  )
+  check('网页渠道资料提示只指向资料库（不外发）', String(multiDoc.note || '').includes('资料库'), String(multiDoc.note || ''))
+  const multiMessages = sessions.messages(conv1.id).filter(message => multiDoc.message_ids.includes(message.message_id))
+  check(
+    '空内容条目被忽略，聊天记录只存缩略 / 标题（不存资料全文）',
+    multiMessages.length === 3 &&
+      multiMessages.every(message => message.kind === 'document') &&
+      multiMessages.every(
+        (message, index) => message.content.length < (documents.get(multiDoc.documents[index]?.doc_id)?.content || '').length,
+      ),
+    JSON.stringify(multiMessages.map(message => message.content)),
+  )
+  check(
+    '资料库保存了三份原文',
+    multiDoc.documents.every(reference => documents.get(reference.doc_id)?.content.includes('资料原文')),
+    JSON.stringify(multiDoc.documents.map(reference => documents.get(reference.doc_id)?.length || 0)),
+  )
+
 
   console.log('\n⑥ 普通用户跨渠道：统一返回“目标渠道不可用”')
   const denied = await tools.execute('chat_send', { channel: 'qq:private:99999', messages: ['越权消息'], end: true }, {
@@ -386,7 +447,11 @@ async function main() {
       builtUserPayload?.content?.trust === 'untrusted',
     JSON.stringify(builtUserPayload?.meta || null),
   )
-  check('context-builder 受 token 预算约束', built.stats.memoryTokens <= built.stats.budget, JSON.stringify(built.stats))
+  check(
+    'context-builder 输入预算语义正确（默认 0=不限；正数时受约束）',
+    built.stats.budget === 0 || built.stats.memoryTokens <= built.stats.budget,
+    JSON.stringify(built.stats),
+  )
 
   console.log('\n⑦b 渠道设置里勾选跨渠道权限：来源侧策略直接生效')
   sessions.update(conv1.id, { meta: { ...sessions.get(conv1.id).meta, crossReadable: true, sensitiveConfirm: false } })
@@ -444,7 +509,7 @@ async function main() {
   check('拒绝输入同样不会进入聊天记录', sessions.messages(conv1.id).length === beforeRejectCount, `${beforeRejectCount} → ${sessions.messages(conv1.id).length}`)
   check('审计日志记录了敏感操作', permissions.audit(20).length >= 3, `${permissions.audit(20).length} 条`)
 
-  console.log('\n⑨ 模型不支持工具时的兼容降级')
+  console.log('\n⑨ 模型不支持原生工具：切文本协议纠错，仍不守协议则经 chat_send 兜底')
   const registry = ctx.inject('model-registry')
   await waitFor(() => registry.list().some(item => item.key === 'plain/plain-chat'), { timeout: 4000 })
   check('纯文本模型已同步到前端注册表', registry.list().some(item => item.key === 'plain/plain-chat'))
@@ -452,12 +517,14 @@ async function main() {
   const conv3 = sessions.create({ name: '降级测试会话', meta: { roleId: 'role-plain', persona: '你是纯文本测试角色。' } })
   sessions.activate(conv3.id)
   messages.requestSend(conv3.id, '你好')
-  const fallbackReply = await waitFor(() => {
-    const last = sessions.messages(conv3.id).at(-1)
-    return last?.role === 'assistant' && last.content.includes('普通降级回复') ? last : null
-  }, { timeout: 6000 })
-  check('模型拒绝 tool_choice 后自动回退为普通流式回复', !!fallbackReply, JSON.stringify(sessions.messages(conv3.id).slice(-2)))
-  check('降级回复不带工具痕迹', (fallbackReply?.content || '').includes('普通降级回复') && flow.mode() === 'tools')
+  const plainReply = await waitFor(() => {
+    return sessions.messages(conv3.id).find(message => message.role === 'assistant' && String(message.content || '').includes('普通降级回复')) || null
+  }, { timeout: 8000 })
+  const plainContents = sessions.messages(conv3.id).map(message => String(message.content || ''))
+  check('模型不支持工具时仍经 chat_send 兜底回复', !!plainReply && plainReply.meta?.via === 'chat_send', JSON.stringify(sessions.messages(conv3.id).slice(-2)))
+  check('兜底正文最终进入聊天气泡', plainContents.some(text => text.includes('普通降级回复')), JSON.stringify(plainContents.slice(-3)))
+  const plainTail = plainRequests.slice(-4)
+  check('原生工具不可用时改为无 tools 的文本协议请求', plainTail.some(item => !item.options?.tools?.length) && flow.mode() === 'tools', JSON.stringify(plainTail.map(item => ({ tools: item.options?.tools?.length || 0, toolChoice: item.options?.toolChoice || '' }))))
 
   console.log('\n⑩ 文本工具调用（DSLM 标记）兼容')
   const sample = `<|DSLM|calls>
@@ -484,10 +551,10 @@ async function main() {
   const conv4 = sessions.create({ name: '文本协议测试会话', meta: { roleId: 'role-dslm', persona: '你是文本协议测试角色。' } })
   sessions.activate(conv4.id)
   messages.requestSend(conv4.id, '你好')
-  const firstTextual = await waitFor(() => {
-    const last = sessions.messages(conv4.id).at(-1)
-    return last?.role === 'assistant' && last.content === '文本工具协议第一句' ? last : null
-  }, { timeout: 6000 })
+  const firstTextual = await waitFor(
+    () => sessions.messages(conv4.id).find(message => message.role === 'assistant' && message.content === '文本工具协议第一句') || null,
+    { timeout: 6000 },
+  )
   const secondTextual = await waitFor(
     () => sessions.messages(conv4.id).find(message => message.role === 'assistant' && message.content === '第二句也发完了') || null,
     { timeout: 6000 },
@@ -545,8 +612,29 @@ async function main() {
     JSON.stringify(deepseekRequests[1]?.messages?.slice(-4) || []),
   )
   config.set('chat.reasoningEffort', 'off')
+  const beforeDeepseekOff = mock.requests.length
+  const conv6b = sessions.create({ name: 'DeepSeek 强制工具测试', meta: { roleId: 'role-deepseek-off' } })
+  sessions.activate(conv6b.id)
+  messages.requestSend(conv6b.id, '强制工具')
+  await waitFor(
+    () => mock.requests.slice(beforeDeepseekOff).some(body => body.model === 'deepseek-v4-flash' && body.tool_choice === 'required'),
+    { timeout: 6000 },
+  )
+  const offRequest = mock.requests.slice(beforeDeepseekOff).find(body => body.model === 'deepseek-v4-flash')
+  check(
+    'DeepSeek 关闭思考时透传 tool_choice=required',
+    offRequest?.tool_choice === 'required' &&
+      offRequest?.thinking?.type === 'disabled' &&
+      Array.isArray(offRequest.tools) &&
+      offRequest.tools.length > 0,
+    JSON.stringify(offRequest && { tool_choice: offRequest.tool_choice, thinking: offRequest.thinking, tools: offRequest.tools?.length }),
+  )
+  await waitFor(
+    () => sessions.messages(conv6b.id).some(message => message.role === 'assistant' && String(message.content || '').includes('我处理好了')),
+    { timeout: 6000 },
+  )
 
-  console.log('\n⑩d 严格工具模式：直出正文先纠错一次，仍不调用工具则按正文发送')
+  console.log('\n⑩d 严格工具模式：先强化纠错，仍不调用工具时经 chat_send 兜底正文')
   await waitFor(() => registry.list().some(item => item.key === 'chatty/chatty-1'), { timeout: 4000 })
   check('直出正文模型已同步到前端注册表', registry.list().some(item => item.key === 'chatty/chatty-1'))
   registry.select('chatty/chatty-1')
@@ -557,15 +645,16 @@ async function main() {
   sessions.activate(conv7.id)
   messages.requestSend(conv7.id, '你好')
   const strictReply = await waitFor(
-    () => sessions.messages(conv7.id).find(message => message.role === 'assistant' && message.content.includes('我是直接输出的正文')) || null,
+    () => sessions.messages(conv7.id).find(message => message.role === 'assistant' && String(message.content || '').includes('我是直接输出的正文')) || null,
     { timeout: 6000 },
   )
-  check('纠正后仍未调用工具时按正文发送，不再空等或终止', !!strictReply, JSON.stringify(sessions.messages(conv7.id).slice(-2)))
-  check('模型直出的正文最终进入聊天气泡', !!strictReply)
+  check('多次纠正后仍未调用工具时通过 chat_send 兜底发送', !!strictReply && strictReply.meta?.via === 'chat_send', JSON.stringify(sessions.messages(conv7.id).slice(-2)))
+  const strictContents = sessions.messages(conv7.id).map(message => String(message.content || ''))
+  check('兜底正文最终进入聊天气泡', strictContents.some(text => text.includes('我是直接输出的正文')), JSON.stringify(strictContents.slice(-3)))
   const strictRounds = chattyRequests.slice(beforeChatty)
   check(
-    '严格模式最多只做一次纠错（响应速度优先）',
-    strictRounds.length === 2,
+    '严格模式按 chat.toolRetryLimit 执行配置次数的纠错',
+    strictRounds.length === 3,
     `模型调用 ${strictRounds.length} 次`,
   )
   const strictCorrection = (strictRounds[1] || []).find(
@@ -582,6 +671,15 @@ async function main() {
       String(strictCorrection?.content || '').includes('没有调用任何工具') &&
       String(strictCorrection?.content || '').includes('我是直接输出的正文。'),
     String(strictCorrection?.content || '').slice(0, 240),
+  )
+  const strictRetryOptions = chattyOptions.slice(beforeChatty)[1] || {}
+  const strictRetryToolNames = (strictRetryOptions.tools || []).map(tool => tool?.function?.name || tool?.name)
+  check(
+    '纠正回合改为 required，并且只暴露回复工具',
+    strictRetryOptions.toolChoice === 'required' &&
+      strictRetryToolNames.length > 0 &&
+      strictRetryToolNames.every(name => ['chat_send', 'send_document'].includes(name)),
+    JSON.stringify({ toolChoice: strictRetryOptions.toolChoice, tools: strictRetryToolNames }),
   )
   config.set('chat.requireToolCall', false)
 
@@ -810,6 +908,320 @@ async function main() {
   )
   const builtRoles = builtContext.messages.map(message => message.role).join(',')
   check('构建上下文顺序与聊天记录一致', builtRoles === 'system,user,assistant,user,assistant' || builtRoles === 'system,user,assistant,user', builtRoles)
+
+
+  console.log('\n⑩h 图片自动上下文预算（只保留最近 2 张）')
+  const convImg = sessions.create({ name: '图片预算测试', meta: { roleId: 'role-img' } })
+  sessions.activate(convImg.id)
+  const channelImg = store.channelForConversation(convImg.id)
+  const imgData = 'data:image/png;base64,' + 'A'.repeat(200000)
+  for (let i = 0; i < 5; i++) {
+    store.append(convImg.id, {
+      role: 'user',
+      content: '第' + (i + 1) + '张图',
+      sender_id: 'user-img',
+      sender_name: '图片用户',
+      meta: { images: [{ dataUrl: imgData, mime: 'image/png' }] },
+    })
+  }
+  check('默认输入上下文不再按 token 截断', config.get('chat.contextTokens', -1) === 0, JSON.stringify({ contextTokens: config.get('chat.contextTokens', -1) }))
+  check('默认单次输出上限为 8192', Number(config.get('chat.maxOutputTokens', 0)) === 8192, JSON.stringify({ maxOutputTokens: config.get('chat.maxOutputTokens', 0) }))
+  const builtImg = builder.build({ conversationId: convImg.id, roleId: 'role-img', persona: '', channelId: channelImg.channelId })
+  const imgParts = builtImg.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const imageParts = imgParts.filter(part => part?.type === 'image_url')
+  const placeholderCount = imgParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check('自动上下文最多保留最近 2 张原图', imageParts.length === 2, JSON.stringify({ images: imageParts.length, placeholders: placeholderCount }))
+  check('其余图片全部降级为 [图片] 占位', placeholderCount >= 3, JSON.stringify({ placeholders: placeholderCount }))
+  config.set('chat.imageBytesPerRequest', 300000)
+  const builtImgTiny = builder.build({ conversationId: convImg.id, roleId: 'role-img', persona: '', channelId: channelImg.channelId })
+  const tinyParts = builtImgTiny.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const tinyImages = tinyParts.filter(part => part?.type === 'image_url')
+  const tinyPlaceholders = tinyParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check('图片总字节预算超限时只保留装得下的最近图片', tinyImages.length === 1 && tinyPlaceholders >= 4, JSON.stringify({ images: tinyImages.length, placeholders: tinyPlaceholders }))
+  config.set('chat.imageBytesPerRequest', 8 * 1024 * 1024)
+  const convGroupImg = sessions.create({
+    name: '群聊图片预算测试',
+    meta: { roleId: 'role-img-group', channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextRounds: 20 },
+  })
+  sessions.activate(convGroupImg.id)
+  const channelGroupImg = store.channelForConversation(convGroupImg.id)
+  for (let index = 0; index < 6; index++) {
+    store.append(convGroupImg.id, {
+      role: 'user',
+      content: `群图${index}`,
+      sender_id: 'group-user',
+      sender_name: '群友',
+      source: 'napcat',
+      meta: { images: [{ dataUrl: imgData, mime: 'image/png' }] },
+    })
+  }
+  const builtGroupImg = builder.build({ conversationId: convGroupImg.id, roleId: 'role-img-group', persona: '', channelId: channelGroupImg.channelId })
+  const groupImgParts = builtGroupImg.messages.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+  const groupImageCount = groupImgParts.filter(part => part?.type === 'image_url').length
+  const groupPlaceholderCount = groupImgParts.filter(part => part?.type === 'text' && part.text === '[图片]').length
+  check(
+    '群聊 channel-only 渠道同样只保留最近 2 张原图',
+    groupImageCount === 2 && groupPlaceholderCount >= 4,
+    JSON.stringify({ images: groupImageCount, placeholders: groupPlaceholderCount }),
+  )
+
+
+  console.log('\n⑩h2 入站 imageId 在无 FileReader 的代聊环境也要能进入模型上下文')
+  const hydrationPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const savedImage = await (
+    await api(base, '/api/images', { method: 'POST', body: { dataUrl: hydrationPng, name: 'hydration.png' } })
+  ).json()
+  const convHydrate = sessions.create({ name: '入站图片 Hydration 测试', meta: { roleId: 'role-img-hydrate' } })
+  sessions.activate(convHydrate.id)
+  store.channelForConversation(convHydrate.id)
+  store.append(convHydrate.id, {
+    role: 'user',
+    content: '看看这张入站图片',
+    sender_id: 'qq:10002',
+    sender_name: 'QQ用户',
+    source: 'napcat',
+    meta: { via: 'napcat', images: [savedImage.image] },
+  })
+  const hydrateStreamOrigin = modelService.stream
+  let hydrateCaptured = null
+  modelService.stream = function (modelMessages, options, callbacks) {
+    const textual = value => {
+      if (Array.isArray(value)) return value.map(part => (part?.type === 'text' ? String(part.text || '') : '')).join('\n')
+      return String(value || '')
+    }
+    if (!hydrateCaptured && modelMessages?.some(message => textual(message.content).includes('看看这张入站图片'))) {
+      hydrateCaptured = JSON.parse(JSON.stringify(modelMessages))
+    }
+    return hydrateStreamOrigin.call(this, modelMessages, options, callbacks)
+  }
+  messages.requestSend(convHydrate.id, '看看这张入站图片', { skipUserAppend: true })
+  await waitFor(() => hydrateCaptured, { timeout: 6000 })
+  modelService.stream = hydrateStreamOrigin
+  const hydrateUser = hydrateCaptured?.find(message => message.role === 'user')
+  const hydrateParts = Array.isArray(hydrateUser?.content) ? hydrateUser.content : []
+  const hydrateImages = hydrateParts.filter(part => part?.type === 'image_url')
+  check(
+    '只有 imageId 的入站图片会被 hydration 成 data URL 后交给模型',
+    hydrateImages.length === 1 && String(hydrateImages[0].image_url?.url || '').startsWith('data:image/'),
+    JSON.stringify({ captured: !!hydrateCaptured, imageParts: hydrateImages.length, contentType: typeof hydrateUser?.content }),
+  )
+
+
+
+  console.log('\n⑩h3 引用 / 合并转发 / 卡片会以明确文本进入模型上下文')
+  const referenceWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '你怎么看？',
+      message_id: 'msg-reference-test',
+      sender_name: 'QQ用户',
+      sender_id: 'qq:10002',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        quote: { id: '7001', message_id: '7001', senderName: '小明', text: '今天晚上一起吃饭吗？', available: true },
+        forward: {
+          title: '群聊的聊天记录',
+          count: 2,
+          items: [
+            { sender_name: '甲', text: '第一条转发' },
+            { sender_name: '乙', text: '第二条转发', image_count: 1 },
+          ],
+        },
+        card: { kind: 'group_invite', title: '测试群邀请', summary: '邀请你加入测试群', app: 'com.tencent.qqconnect.group' },
+      },
+    },
+    { roleId: 'role-ref', channelId: 'napcat:test', timezone: 'UTC' },
+  )
+  const referenceJson = JSON.parse(String(referenceWire?.content || '{}'))
+  check(
+    '引用消息包含“引用了谁 + 原文”',
+    String(referenceJson?.content?.text || '').includes('【引用消息】') && String(referenceJson.content.text).includes('今天晚上一起吃饭吗？'),
+    String(referenceJson?.content?.text || '').slice(0, 200),
+  )
+  check(
+    '合并转发构建为“聊天记录转发：甲:… / 乙:…”',
+    String(referenceJson?.content?.text || '').includes('【聊天记录转发】') &&
+      String(referenceJson.content.text).includes('甲: 第一条转发') &&
+      String(referenceJson.content.text).includes('乙: 第二条转发'),
+    String(referenceJson?.content?.text || '').slice(0, 300),
+  )
+  check(
+    '群邀请卡片会被明确标注且不替代用户正文',
+    String(referenceJson?.content?.text || '').includes('【群邀请卡片】') &&
+      String(referenceJson.content.text).includes('你怎么看？') &&
+      referenceJson?.content?.card?.kind === 'group_invite',
+    String(referenceJson?.content?.text || '').slice(0, 300),
+  )
+
+  const quotePreviewPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const quoteImageWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '这句话什么意思？',
+      message_id: 'msg-quote-image-test',
+      sender_name: '念风',
+      sender_id: 'web-user',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        quote: {
+          id: '7001',
+          message_id: '7001',
+          senderName: '蜜语雅时痕',
+          senderId: 'qq:12345',
+          time: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          text: '[图片]',
+          image_count: 1,
+          images: [{ dataUrl: quotePreviewPng, mime: 'image/png', width: 1, height: 1 }],
+          available: true,
+        },
+      },
+    },
+    { roleId: 'role-quote-image', channelId: 'napcat:test', timezone: 'Asia/Shanghai' },
+  )
+  const quoteParts = Array.isArray(quoteImageWire?.content) ? quoteImageWire.content : []
+  const quoteJson = JSON.parse(String(quoteParts.find(part => part?.type === 'text')?.text || '{}'))
+  const quoteImageParts = quoteParts.filter(part => part?.type === 'image_url')
+  check(
+    '引用消息文本包含发送者、发送时间和 message_id',
+    String(quoteJson?.content?.text || '').includes('【引用消息】') &&
+      String(quoteJson.content.text).includes('蜜语雅时痕') &&
+      String(quoteJson.content.text).includes('message_id: 7001') &&
+      /\d{2}:\d{2}/.test(String(quoteJson.content.text)),
+    String(quoteJson?.content?.text || '').slice(0, 240),
+  )
+  check(
+    '被引用的图片会原样注入，而不是只给 [图片] 占位',
+    quoteImageParts.length === 1 &&
+      String(quoteImageParts[0].image_url?.url || '').startsWith('data:image/png') &&
+      Number(quoteJson?.content?.quote?.image_count) === 1,
+    JSON.stringify({ imageParts: quoteImageParts.length, quote: quoteJson?.content?.quote }),
+  )
+
+
+  const forwardPreviewPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
+  const forwardPreviewWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '这些转发你看了吗？',
+      message_id: 'msg-forward-preview-test',
+      sender_name: 'QQ用户',
+      sender_id: 'qq:10002',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: {
+        forward: {
+          id: 'fwd-preview-test',
+          title: '群聊的聊天记录',
+          total: 12,
+          preview: [
+            {
+              index: 1,
+              sender_name: '甲',
+              text: '[图片×3]',
+              image_count: 3,
+              preview_images: [{ dataUrl: forwardPreviewPng, mime: 'image/png', width: 1, height: 1 }],
+            },
+          ],
+          preview_count: 1,
+          has_more: true,
+          image_total: 3,
+          images_shown: 1,
+        },
+      },
+    },
+    { roleId: 'role-forward-preview', channelId: 'napcat:test', timezone: 'UTC' },
+  )
+  const forwardParts = Array.isArray(forwardPreviewWire?.content) ? forwardPreviewWire.content : []
+  const forwardJson = JSON.parse(String(forwardParts.find(part => part?.type === 'text')?.text || '{}'))
+  const forwardImageParts = forwardParts.filter(part => part?.type === 'image_url')
+  check(
+    '合并转发默认只给预览，并提示用 read_forward 深读',
+    String(forwardJson?.content?.text || '').includes('read_forward') &&
+      forwardJson?.content?.forward?.has_more === true &&
+      forwardJson?.content?.forward?.preview?.length === 1 &&
+      forwardJson?.content?.forward?.total === 12,
+    JSON.stringify(forwardJson?.content?.forward || null),
+  )
+  check(
+    '合并转发图片只自动附带开头几张，其余留给工具按需读取',
+    forwardImageParts.length === 1 && String(forwardImageParts[0].image_url?.url || '').startsWith('data:image/png'),
+    JSON.stringify({ imageParts: forwardImageParts.length, text: String(forwardJson?.content?.text || '').slice(-160) }),
+  )
+
+  console.log('\n⑩h4 QQ 卡片处理工具（napcat_card）')
+  const cardMessage = store.append(conv1.id, {
+    role: 'user',
+    content: '[卡片消息]',
+    sender_id: 'qq:10002',
+    sender_name: 'QQ用户',
+    source: 'napcat',
+    meta: {
+      card: { kind: 'group_invite', title: '测试群邀请', summary: '邀请加入测试群', app: 'com.tencent.qqconnect.group' },
+      instanceId: 'napcat-test',
+    },
+  })
+  const cardContext = { conversationId: conv1.id, channelId: channel1.channelId, entry: { cancelled: false } }
+  const cardInfo = await tools.execute('napcat_card', { action: 'info', message_id: cardMessage.message_id }, cardContext)
+  check(
+    'napcat_card 能识别群邀请卡片并列出可用动作',
+    cardInfo?.ok === true &&
+      cardInfo.card?.kind === 'group_invite' &&
+      cardInfo.can_auto_handle === false &&
+      cardInfo.available_actions?.includes('info') &&
+      cardInfo.available_actions?.includes('open'),
+    JSON.stringify(cardInfo),
+  )
+  const cardManual = await tools.execute('napcat_card', { action: 'handle', message_id: cardMessage.message_id, approve: true }, cardContext)
+  check(
+    '卡片缺少 request flag 时不会贸然处理，返回人工确认提示',
+    cardManual?.ok === false && cardManual.code === 'MANUAL_REQUIRED',
+    JSON.stringify(cardManual),
+  )
+
+  console.log('\n⑩h5 read_forward 默认从头读，不跳过可能被截断的预览')
+  const apiService = ctx.inject('api')
+  const originalApiPost = apiService.post
+  let forwardRequest = null
+  apiService.post = async (path, body) => {
+    if (path === '/napcat/forward/read') {
+      forwardRequest = { path, body }
+      return {
+        ok: true,
+        id: 'fwd-tool-default-offset',
+        title: '测试转发',
+        total: 2,
+        offset: body?.offset ?? 0,
+        next_offset: null,
+        next_text_offset: null,
+        has_more: false,
+        items: [{ index: 1, sender_name: '甲', text: '完整正文', text_length: 12, text_truncated: undefined }],
+      }
+    }
+    return originalApiPost.call(apiService, path, body)
+  }
+  let forwardToolResult = null
+  try {
+    forwardToolResult = await tools.execute(
+      'read_forward',
+      { forward_id: 'fwd-tool-default-offset' },
+      { conversationId: conv1.id, channelId: channel1.channelId, entry: { cancelled: false } },
+    )
+  } finally {
+    apiService.post = originalApiPost
+  }
+  check(
+    'read_forward 默认 offset=0，确保模型能重新读取被截断的预览原文',
+    forwardRequest?.body?.offset === 0 && forwardToolResult?.ok === true && forwardToolResult.items?.[0]?.text === '完整正文',
+    JSON.stringify({ body: forwardRequest?.body || null, result: forwardToolResult }),
+  )
+
+
+
 
   console.log('\n⑩i 工具协议轨迹进入下一轮上下文')
   registry.select('mock/mock-chat')
@@ -1064,6 +1476,26 @@ async function main() {
     JSON.stringify(channelRegistry.channels('private').map(channel => channel.id)),
   )
 
+  console.log('\n⑪b metaUpdatedAt：另一端修改角色模型后，本地更新的消息时间不能压住新模型')
+  const metaConv = sessions.create({ name: '元数据版本回归', meta: { model: 'provider/old' } })
+  const remoteMetaTime = Date.now() + 60 * 60 * 1000
+  await api(base, `/api/sessions/${metaConv.id}`, {
+    method: 'PUT',
+    body: { name: metaConv.name, meta: { model: 'provider/new' }, metaUpdatedAt: remoteMetaTime },
+  })
+  const localMetaCopy = sessions.get(metaConv.id)
+  localMetaCopy.updatedAt = Date.now() + 2 * 60 * 60 * 1000 // 模拟本地后来写过消息：只有 updatedAt 变新
+  await sessions.sync()
+  const afterMetaSync = sessions.get(metaConv.id)
+  check(
+    'metaUpdatedAt 让远端的新模型胜出',
+    afterMetaSync?.meta?.model === 'provider/new',
+    JSON.stringify({ meta: afterMetaSync?.meta, metaUpdatedAt: afterMetaSync?.metaUpdatedAt, updatedAt: afterMetaSync?.updatedAt }),
+  )
+  const persistedMetaList = await (await api(base, '/api/sessions')).json()
+  const persistedMeta = (persistedMetaList.conversations || []).find(conv => conv.id === metaConv.id)
+  check('同步后角色新模型仍保留在后端', persistedMeta?.meta?.model === 'provider/new', JSON.stringify(persistedMeta?.meta))
+  sessions.remove(metaConv.id)
   console.log('\n⑫ 收尾')
   await backend.ctx.sessions.flush()
   const rawData = JSON.parse(await readFile(join(dataDir, 'sessions.json'), 'utf8'))

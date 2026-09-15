@@ -82,6 +82,8 @@ export function apply(ctx) {
   }
 
   const initialPaneFor = viewId => {
+    // 全宽视图（运行日志等）没有左侧列表，直接进入主内容区。
+    if (router.isFullWidth?.(viewId)) return 'main'
     if (viewId === 'chat') return sessions.active() ? 'main' : 'list'
     if (viewId === 'channel') return activeChannel() ? 'main' : 'list'
     return 'list'
@@ -101,12 +103,13 @@ export function apply(ctx) {
 
   const syncTabs = () => {
     if (!tabsEl) return
-    const views = router.list().filter(item => item.rail !== false)
+    // 桌面侧栏有独立的「日志」按钮（rail=false）；手机端底部也要有，避免只剩会话 / 渠道 / 设置。
+    const views = router.list().filter(item => item.rail !== false || item.id === 'logs')
     tabsEl.innerHTML =
       views
         .map(
           view => `<button class="mobile-tab ${!settingsOpen && router.active() === view.id ? 'active' : ''}" data-mobile-view="${view.id}">
-            ${view.icon || icons.info}<span class="mobile-tab-label">${view.label}</span>
+            ${view.icon || icons.info}<span class="mobile-tab-label">${view.id === 'logs' ? '日志' : view.label}</span>
           </button>`,
         )
         .join('') +
@@ -142,6 +145,14 @@ export function apply(ctx) {
       events.emit('settings:close', null)
       return
     }
+    if (router.isFullWidth?.(router.active())) {
+      // 日志等全宽视图没有左侧列表，返回键回到会话视图。
+      router.switch('chat')
+      setPane(initialPaneFor('chat'))
+      syncTitle()
+      syncTabs()
+      return
+    }
     if (pane === 'main') setPane('list')
   }
 
@@ -157,9 +168,11 @@ export function apply(ctx) {
     const view = button.dataset.mobileView
     events.emit('settings:close', null)
     if (router.active() === view) {
-      setPane(pane === 'main' ? 'list' : initialPaneFor(view))
+      // 全宽视图永远保持 main，避免切到空列表。
+      setPane(router.isFullWidth?.(view) ? 'main' : pane === 'main' ? 'list' : initialPaneFor(view))
     } else {
       router.switch(view)
+      if (router.isFullWidth?.(view)) setPane('main')
     }
     syncTitle()
     syncTabs()

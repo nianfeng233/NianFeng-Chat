@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 
 import { resolveDataDir } from './data-dir.mjs'
+import { applyNetworkDefaults } from './network-defaults.mjs'
 import { ensurePortsFree } from './port-utils.mjs'
 import * as settingsPlugin from './plugins/settings.mjs'
 import * as sessionsPlugin from './plugins/sessions.mjs'
@@ -27,6 +28,7 @@ import * as logsPlugin from './plugins/logs.mjs'
 import { attachRuntimeLogStore } from './plugins/logs.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
+applyNetworkDefaults()
 
 /**
  * 通用插件后端桥加载器：
@@ -54,26 +56,93 @@ async function collectBridgeFiles(root, depth = 0, out = []) {
   return out
 }
 
-async function loadChannelBridges(roots, ctx) {
-  const seen = new Set()
+async function loadBridgeFile(ctx, file) {
+  const mod = await import(pathToFileURL(file).href + `?v=${Date.now()}`)
+  if (typeof mod.apply !== 'function') return null
+  // 不 await fiber 本身：cordis 的 fiber 是 thenable，await 会改变启动时序。
+  return { fiber: ctx.plugin(mod, {}) }
+}
+
+async function loadChannelBridges(roots, ctx, loaded = new Set()) {
   for (const root of roots) {
     const files = (await collectBridgeFiles(root)).sort()
     for (const file of files) {
-      if (seen.has(file)) continue
-      seen.add(file)
+      if (loaded.has(file)) continue
+      loaded.add(file)
       try {
-        const mod = await import(pathToFileURL(file).href + `?v=${Date.now()}`)
-        if (typeof mod.apply === 'function') ctx.plugin(mod, {})
+        await loadBridgeFile(ctx, file)
       } catch (err) {
         console.warn(`[channel-bridge] 加载 ${file} 失败：${err?.message || err}`)
       }
     }
   }
+  return loaded
 }
 
-export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, staticDir, logLevel, accessToken = '', onRestart = null } = {}) {
+/**
+ * 外部插件 bridge 热加载器：
+ *   - 只跟踪外部插件目录（默认 <数据目录>/plugins）下的 bridge.mjs；
+ *   - 内置渠道桥在启动阶段加载一次，不参与热重载；
+ *   - 安装 / 删除 / 重新扫描 / 切换外部插件目录时 dispose 旧 fiber 并重新加载，
+ *     外部插件因此可以前后端一起热插拔，不需要重启念风后端。
+ * 安全提示：外部 bridge.mjs 仍是本机 Node 代码，只对可信插件开放该目录。
+ */
+function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
+  const handles = new Map()
+
+  const load = async dir => {
+    const files = (await collectBridgeFiles(dir)).sort()
+    for (const file of files) {
+      if (exclude.has(file) || handles.has(file)) continue
+      try {
+        const loaded = await loadBridgeFile(ctx, file)
+        if (loaded?.fiber) {
+          handles.set(file, loaded.fiber)
+          console.info(`[channel-bridge] 已热加载外部桥：${file}`)
+        }
+      } catch (err) {
+        console.warn(`[channel-bridge] 热加载 ${file} 失败：${err?.message || err}`)
+      }
+    }
+    return { loaded: handles.size, dir }
+  }
+
+  const reload = async dir => {
+    const previous = [...handles.entries()]
+    handles.clear()
+    for (const [file, fiber] of previous) {
+      try {
+        await fiber?.dispose?.()
+        console.info(`[channel-bridge] 已卸载外部桥：${file}`)
+      } catch (err) {
+        console.warn(`[channel-bridge] 卸载 ${file} 失败：${err?.message || err}`)
+      }
+    }
+    return load(dir)
+  }
+
+  return { load, reload, handles }
+}
+
+export async function startBackend({
+  port = 8788,
+  host = '127.0.0.1',
+  dataDir,
+  staticDir,
+  logLevel,
+  accessToken = '',
+  onRestart = null,
+  onPluginsChanged = null,
+  allowedOrigins = [],
+  allowedHosts = [],
+} = {}) {
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
   const ctx = new Context()
+  const envList = name =>
+    String(process.env[name] || '')
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean)
 
   ctx.provide('info', {
     name: '念风chat 后端',
@@ -122,7 +191,18 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
     [modelsPlugin, {}],
     [instancePlugin, paths],
     [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
-    [httpPlugin, { port, host, staticDir: staticDir ? join(ROOT, staticDir) : null, accessToken, onRestart }],
+    [
+      httpPlugin,
+      {
+        port,
+        host,
+        staticDir: staticDir ? join(ROOT, staticDir) : null,
+        accessToken,
+        onRestart,
+        allowedOrigins: [...new Set([...allowedOrigins, ...envList('NIANFENG_ALLOWED_ORIGINS'), ...envList('FENGYU_ALLOWED_ORIGINS')])],
+        allowedHosts: [...new Set([...allowedHosts, ...envList('NIANFENG_ALLOWED_HOSTS'), ...envList('FENGYU_ALLOWED_HOSTS')])],
+      },
+    ],
     [logsPlugin, {}],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)
@@ -133,14 +213,61 @@ export async function startBackend({ port = 8788, host = '127.0.0.1', dataDir, s
   paths.dataDir = ctx.instance?.info?.().dataDir || paths.dataDir
 
   // HTTP 服务已就绪、httpApi 已 provide 后，再自动加载渠道后端桥（无需逐个写进本文件）。
+  // 内置桥只加载一次；外部插件桥交给热加载器跟踪，安装/删除/重新扫描时动态加载。
+  const builtinBridges = await loadChannelBridges([join(ROOT, 'plugins')], ctx)
+
   // 外部插件目录优先级：环境变量 > 设置页配置 > 默认 <数据目录>/plugins。
-  const configuredPluginDir = String(ctx.settings?.get?.()?.plugins?.dir || '').trim()
-  const externalPluginDir =
-    process.env.NIANFENG_PLUGINS_DIR ||
-    process.env.FENGYU_PLUGINS_DIR ||
-    configuredPluginDir ||
-    join(paths.dataDir || dataDir || join(ROOT, 'user_data'), 'plugins')
-  await loadChannelBridges([join(ROOT, 'plugins'), externalPluginDir], ctx)
+  const resolveExternalPluginDir = () => {
+    const configuredPluginDir = String(ctx.settings?.get?.()?.plugins?.dir || '').trim()
+    return (
+      process.env.NIANFENG_PLUGINS_DIR ||
+      process.env.FENGYU_PLUGINS_DIR ||
+      configuredPluginDir ||
+      join(ctx.instance?.info?.().dataDir || paths.dataDir || dataDir || join(ROOT, 'user_data'), 'plugins')
+    )
+  }
+  const externalBridges = createExternalBridgeLoader(ctx, { exclude: builtinBridges })
+  await externalBridges.load(resolveExternalPluginDir())
+
+  // 外部插件安装 / 删除 / 重新扫描 / 切换目录后即时重载 bridge，使其可以热插拔。
+  const pluginRegistry = ctx.pluginRegistry
+  if (pluginRegistry) {
+    const wrapBridgeReload = (method, { onlyFulfilled = false } = {}) => {
+      const original = pluginRegistry[method]
+      if (typeof original !== 'function') return
+      pluginRegistry[method] = async (...args) => {
+        const result = await original.apply(pluginRegistry, args)
+        if (onlyFulfilled && result?.ok === false) return result
+        try {
+          await externalBridges.reload(resolveExternalPluginDir())
+        } catch (err) {
+          console.warn(`[channel-bridge] 重载外部桥失败：${err?.message || err}`)
+        }
+        return result
+      }
+    }
+    wrapBridgeReload('installZip', { onlyFulfilled: true })
+    wrapBridgeReload('removeExternal', { onlyFulfilled: true })
+    wrapBridgeReload('refresh')
+    wrapBridgeReload('setExternalDir')
+    wrapBridgeReload('resetExternalDir')
+  }
+
+  // 外部插件清单变化（安装 / 删除 / 重新扫描 / 切换目录）时，通知宿主重启服务端代聊 Worker，
+  // 让 QQ / NapCat 等由代聊处理的渠道也能拿到最新工具；800ms 合并连续的目录变更。
+  if (typeof onPluginsChanged === 'function') {
+    let pluginChangeTimer = null
+    ctx.on('plugins/changed', payload => {
+      if (pluginChangeTimer) clearTimeout(pluginChangeTimer)
+      pluginChangeTimer = setTimeout(() => {
+        pluginChangeTimer = null
+        Promise.resolve(onPluginsChanged(payload)).catch(err => {
+          console.warn(`[plugins] onPluginsChanged 回调失败：${err?.message || err}`)
+        })
+      }, 800)
+      pluginChangeTimer.unref?.()
+    })
+  }
   await new Promise(resolve => setTimeout(resolve, 0))
 
   return {

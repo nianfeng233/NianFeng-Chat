@@ -163,8 +163,11 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
       const base = trimSlash(provider.baseURL || defaultBaseURL)
       const deepseekMode = deepseek || isDeepseekProvider(provider, model)
       const toolDefs = options?.toolChoice === 'none' ? [] : Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
+      // DeepSeek 思考模式明确拒绝 tool_choice，但显式 thinking=disabled 时支持
+      // tool_choice=required；关闭思考时强制工具能显著降低模型直出正文的概率。
+      const deepseekThinkingDisabled = !deepseekMode || options?.reasoningEffort === 'off'
       const flags = {
-        toolChoice: !!options?.toolChoice && !deepseekMode,
+        toolChoice: !!options?.toolChoice && deepseekThinkingDisabled,
         maxTokensField: 'max_tokens',
         temperature: options?.temperature !== undefined,
         streamOptions: true,
@@ -880,6 +883,48 @@ export function apply(ctx) {
         return { ok: false, detail, models: [] }
       }
     },
+    /**
+     * 只拉取远端模型候选，不写入配置。
+     * 设置页「获取模型列表」使用它展示临时候选；用户点击某个候选后才调用
+     * addModel 入库。这样不会像旧 refresh 那样把所有远端模型一次性变成启用状态。
+     */
+    async discover(id) {
+      const provider = getProvider(id)
+      const adapter = requireAdapter(provider.type)
+      try {
+        const fetched = await adapter.listModels(provider, ctx)
+        const installedIds = new Set((provider.models || []).map(model => String(model.id)))
+        const seen = new Set()
+        const models = []
+        for (const remote of fetched || []) {
+          const modelId = String(remote?.id || '').trim()
+          if (!modelId || seen.has(modelId)) continue
+          seen.add(modelId)
+          models.push({
+            id: modelId,
+            name: String(remote.name || modelId),
+            installed: installedIds.has(modelId),
+            ...(remote.ownedBy ? { ownedBy: String(remote.ownedBy) } : {}),
+            ...(remote.size ? { size: Number(remote.size) || 0 } : {}),
+          })
+        }
+        const status = {
+          ok: true,
+          at: Date.now(),
+          detail: models.length ? `发现 ${models.length} 个模型（尚未添加）` : '远端没有返回可用模型',
+        }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        return { ok: true, models, count: models.length, detail: status.detail }
+      } catch (err) {
+        const detail = normalizeError(err)
+        const status = { ok: false, at: Date.now(), detail }
+        statusCache.set(id, status)
+        hub.broadcast('provider/status', { id, status })
+        ctx.logger.warn(`[${id}] 获取临时模型列表失败：${detail}`)
+        return { ok: false, detail, models: [] }
+      }
+    },
 
     /** 真实连通性测试 */
     async test(id) {
@@ -1059,6 +1104,11 @@ export function apply(ctx) {
         ...(options?.maxTokens === undefined && params.maxTokens !== undefined ? { maxTokens: params.maxTokens } : {}),
         ...(options?.extraBody === undefined && params.extraBody !== undefined ? { extraBody: params.extraBody } : {}),
       }
+      // 后端最终图片预算：无论前端 / 工具 / 渠道怎么拼消息，一次请求只保留最近 N 张真图。
+      const configuredImageLimit = Number(settings.get()?.preferences?.chat?.imagesPerRequest)
+      const imageBudget = Number.isFinite(configuredImageLimit) ? Math.max(0, Math.min(8, configuredImageLimit)) : 2
+      const requestMessages = enforceImageBudget(messages || [], imageBudget)
+
 
       const emptyResponseRetries = Math.max(
         0,
@@ -1089,7 +1139,7 @@ export function apply(ctx) {
             {
               provider: cfg,
               model: useModel,
-              messages: messages || [],
+              messages: requestMessages,
               options: effectiveOptions,
               signal: controller.signal,
               onChunk: delta => {
@@ -1579,6 +1629,40 @@ function normalizeArguments(args) {
   }
 }
 
+const isImageContentPart = part =>
+  !!part && typeof part === 'object' && (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image')
+
+/**
+ * 后端最终边界：一次模型请求最多保留最近 N 张真实图片，更早的图片统一降级为 [图片] 文本。
+ * 前端 context-builder 已经做过一次；这里再兜一层，防止工具结果、渠道拼接、自定义
+ * 适配器等路径绕过占位符，保证“只有最近两张原图进模型”的约定无论什么渠道都成立。
+ */
+function enforceImageBudget(messages = [], maxImages = 2) {
+  const list = Array.isArray(messages) ? messages : []
+  const limit = Math.max(0, Math.min(8, Number(maxImages) || 0))
+  let remaining =
+    list.reduce((count, message) => {
+      if (!message || typeof message !== 'object' || !Array.isArray(message.content)) return count
+      return count + message.content.filter(isImageContentPart).length
+    }, 0) - limit
+  if (remaining <= 0) return list
+  return list.map(message => {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) return message
+    let changed = false
+    const content = message.content.map(part => {
+      if (!isImageContentPart(part)) return part
+      if (remaining > 0) {
+        remaining -= 1
+        changed = true
+        return { type: 'text', text: '[图片]' }
+      }
+      return part
+    })
+    return changed ? { ...message, content } : message
+  })
+}
+
+
 /** 前端上下文 -> OpenAI 兼容 messages（保留 assistant.tool_calls / role=tool） */
 function toOpenAIMessages(messages = [], { keepReasoning = false, padReasoning = false } = {}) {
   return (Array.isArray(messages) ? messages : []).map(message => {
@@ -1705,7 +1789,13 @@ function normalizeError(err) {
     return `无法连接远端服务${code ? `（${code}）` : ''}：${detail}`
   }
   const status = err.status || err.statusCode
-  return status ? `HTTP ${status} · ${err.message}` : err.message || String(err)
+  if (status) {
+    const text = String(err.message || '').trim()
+    if (!text) return `HTTP ${status}`
+    // 上游错误正文优先原样返回；只有消息里完全没有状态码时才补前缀。
+    return /^\d{3}\b/.test(text) ? text : `HTTP ${status} · ${text}`
+  }
+  return err.message || String(err)
 }
 
 /**
@@ -1725,7 +1815,7 @@ async function request(ctx, url, { method = 'GET', headers = {}, body, signal, t
       : await fetch(url, { method, headers, body, signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 200) : ''}`)
+      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 600) : ''}`)
       err.status = res.status
       throw err
     }

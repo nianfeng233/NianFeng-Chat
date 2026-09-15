@@ -37,6 +37,10 @@ export function apply(ctx) {
   let latency = 0
   let eventSource = null
   let pollTimer = null
+  // 单次健康检查超时 / 网络抖动不能直接把整个 WebUI 判成离线：
+  // 连续失败 3 次（约 30 秒）才切到离线，期间保持原状态并继续重试。
+  let healthFailures = 0
+  let healthProbeTimer = null
 
   const baseUrl = () => String(config.get('backend.url', '/api') || '/api').replace(/\/+$/, '')
 
@@ -51,6 +55,9 @@ export function apply(ctx) {
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
+        // 允许部署时把后端地址配成绝对地址（如 http://127.0.0.1:8788/api）：
+        // 跨源请求也需要带上 WebUI 访问令牌 Cookie。
+        credentials: 'include',
         // 本地后端接口一律不走缓存：避免代理 / 浏览器把日志、会话等
         // 动态接口的旧响应当成新数据，导致界面看起来“刷新没反应”。
         cache: 'no-store',
@@ -63,7 +70,8 @@ export function apply(ctx) {
         data = { raw: text }
       }
       if (!res.ok) {
-        const message = data?.error?.message || data?.message || `HTTP ${res.status} ${res.statusText}`
+        const detail = String(data?.error?.message || data?.message || data?.raw || '').trim()
+        const message = detail ? detail.slice(0, 1200) : `HTTP ${res.status} ${res.statusText}`
         const err = new Error(message)
         err.status = res.status
         throw err
@@ -92,14 +100,19 @@ export function apply(ctx) {
     async health() {
       const started = Date.now()
       try {
-        const data = await request('/health', { timeoutMs: 4000 })
+        const data = await request('/health', { timeoutMs: 8000 })
         latency = Date.now() - started
         lastHealth = data
+        healthFailures = 0
         setOnline(true, '')
         return data
       } catch (err) {
+        healthFailures += 1
         lastError = err.message
-        setOnline(false, err.message)
+        // 已经离线时立即保持离线；在线时给 2 次重试机会，避免健康检查偶发超时
+        // 导致界面“一会儿连上一会儿又连不上”。
+        if (!online || healthFailures >= 3) setOnline(false, err.message)
+        else ctx.logger.debug(`后端健康检查失败（${healthFailures}/3）：${err.message}`)
         throw err
       }
     },
@@ -115,6 +128,7 @@ export function apply(ctx) {
     removeProvider: id => request(`/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     updateProvider: (id, patch) => request(`/providers/${encodeURIComponent(id)}`, { method: 'PUT', body: patch }),
     refreshProvider: id => request(`/providers/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+    remoteModels: id => request(`/providers/${encodeURIComponent(id)}/models/remote`),
     testProvider: id => request(`/providers/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     addModel: (providerId, model) => request(`/providers/${encodeURIComponent(providerId)}/models`, { method: 'POST', body: model }),
     updateModel: (providerId, modelId, patch) =>
@@ -129,6 +143,7 @@ export function apply(ctx) {
     pickPluginsDir: () => request('/plugins/pick-dir', { method: 'POST', timeoutMs: 200000 }),
     openPluginsDir: () => request('/plugins/open-dir', { method: 'POST' }),
     removeExternalPlugin: id => request(`/plugins/external/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    uploadPlugin: payload => request('/plugins/upload', { method: 'POST', body: payload, timeoutMs: 180000 }),
     restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
 
     sessions: (options = {}) => request(`/sessions${options?.compact ? '?compact=1' : ''}`),
@@ -184,16 +199,28 @@ export function apply(ctx) {
             ...(Array.isArray(tools) && tools.length ? { tools, toolChoice } : {}),
           }),
           signal: controller.signal,
+          credentials: 'include',
         })
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '')
-          let message = `HTTP ${res.status}`
+          let detail = ''
           try {
-            message = JSON.parse(text)?.error?.message || message
+            const parsed = text ? JSON.parse(text) : null
+            detail = String(parsed?.error?.message || parsed?.message || '').trim()
           } catch (_) {
-            /* ignore */
+            // 非 JSON（反向代理 HTML / 网关错误页）：原样保留响应正文，
+            // 不要只抛 “HTTP 502”，否则渠道里只能看到没有诊断信息的泛化错误。
+            detail = String(text || '').trim()
           }
-          throw new Error(message)
+          const statusText = res.statusText ? ` ${res.statusText}` : ''
+          const message = detail
+            ? detail.slice(0, 1200)
+            : res.body
+              ? `HTTP ${res.status}${statusText}`
+              : `HTTP ${res.status}${statusText}：响应没有可读取的正文`
+          const error = new Error(message)
+          error.status = res.status
+          throw error
         }
 
         const reader = res.body.getReader()
@@ -244,7 +271,7 @@ export function apply(ctx) {
     subscribe() {
       if (eventSource || typeof EventSource === 'undefined') return false
       try {
-        eventSource = new EventSource(`${baseUrl()}/events`)
+        eventSource = new EventSource(`${baseUrl()}/events`, { withCredentials: true })
         eventSource.onmessage = e => {
           try {
             ctx.emit('backend:event', { event: 'message', data: JSON.parse(e.data) })
@@ -253,6 +280,7 @@ export function apply(ctx) {
           }
         }
         const forward = type => e => {
+          healthFailures = 0
           setOnline(true, '')
           let data = null
           try {
@@ -266,11 +294,21 @@ export function apply(ctx) {
           eventSource.addEventListener(type, forward(type))
         }
         eventSource.onerror = () => {
-          setOnline(false, '实时通道断开，正在重连…')
+          // EventSource 会自动重连，不能因为一次瞬断就切换离线状态；
+          // 只安排一次真实健康检查，由 health() 的连续失败阈值决定是否离线。
+          if (healthProbeTimer) return
+          healthProbeTimer = setTimeout(() => {
+            healthProbeTimer = null
+            service.health().catch(() => {})
+          }, 1500)
         }
         ctx.effect(() => {
           eventSource?.close()
           eventSource = null
+          if (healthProbeTimer) {
+            clearTimeout(healthProbeTimer)
+            healthProbeTimer = null
+          }
         })
         return true
       } catch (err) {

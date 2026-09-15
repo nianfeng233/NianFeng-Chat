@@ -33,8 +33,10 @@ export const depends = {
   'config': '^1.0.0',
   'event-bus': '*',
 }
-export const optionalDepends = {}
-export const inject = ['config', 'event-bus']
+export const optionalDepends = {
+  'backend-client': '>=1.0.0',
+}
+export const inject = ['config', 'event-bus', 'api?']
 export const provides = [{ name: 'notification', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -75,6 +77,7 @@ const SOUND_PRESETS = {
 
 export function apply(ctx) {
   const config = ctx.inject('config')
+  const api = ctx.inject('api?')
 
   // 旧版「后台活动」默认关闭，升级后默认开启；只迁移一次，之后尊重用户选择。
   if (!config.get('notify.backgroundDefaultMigrated', false)) {
@@ -313,6 +316,32 @@ export function apply(ctx) {
     }
     return imageToDataUrl(new URL(BRAND_LOGO, typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/').href)
   }
+  const isSecureContext = () => (typeof window === 'undefined' ? true : window.isSecureContext !== false)
+
+  const serverToastAvailable = () => api?.supports?.('server-toast') === true
+
+  /**
+   * 浏览器系统通知不可用时的服务器端兜底：
+   * 远程通过 http://IP 访问时浏览器禁止申请 Notification 权限，只能由后端所在机器弹窗。
+   */
+  const shouldUseServerFallback = () => {
+    if (hostNotify) return false
+    if (typeof Notification === 'undefined') return true
+    return !isSecureContext()
+  }
+
+  const notifyServer = async ({ title, body }) => {
+    if (!api || !serverToastAvailable()) return false
+    if (config.get('notify.serverToast', true) === false) return false
+    if (!shouldUseServerFallback()) return false
+    try {
+      const result = await api.post('/notify/system', { title, body })
+      return result?.delivered === true
+    } catch (_) {
+      return false
+    }
+  }
+
 
   /** 系统级通知：桌面宿主优先，其次浏览器 Notification */
   const nativeNotify = async ({ kind, title, body, avatarImage, avatarText, avatar, c1, c2, onClick }) => {
@@ -352,6 +381,9 @@ export function apply(ctx) {
         /* 某些环境构造 Notification 会抛错 */
       }
     }
+      // 浏览器系统通知不可用：远程 HTTP WebUI 会在这里回退到服务器端 Windows 通知。
+      if (await notifyServer({ title, body })) return true
+
     return false
   }
 
@@ -360,16 +392,27 @@ export function apply(ctx) {
 
     /** 是否由桌面宿主接管系统通知（exe 版） */
     isHosted: () => hostNotify,
+    /** 后端是否支持服务器端系统通知（用于设置页展示与远程访问兜底） */
+    serverFallbackAvailable: serverToastAvailable,
+    isSecureContext,
 
     permission() {
       if (hostNotify) return 'granted'
-      return typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+      const permission = typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
+      // HTTP + 非 localhost 属于非安全上下文：浏览器会直接拒绝授权，返回 denied/unsupported。
+      // 这里单独报告 insecure，让设置页能解释清楚并提示服务器端兜底，而不是只显示“已拒绝”。
+      if (permission !== 'granted' && !isSecureContext()) return 'insecure'
+      return permission
     },
 
     async requestPermission() {
       if (hostNotify) {
         ctx.emit('notification:permission', 'granted')
         return 'granted'
+      }
+      if (!isSecureContext() && !(typeof Notification !== 'undefined' && Notification.permission === 'granted')) {
+        ctx.emit('notification:permission', 'insecure')
+        return 'insecure'
       }
       if (typeof Notification === 'undefined') return 'unsupported'
       const result = await Notification.requestPermission()

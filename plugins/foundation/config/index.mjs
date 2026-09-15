@@ -114,7 +114,8 @@ const DEFAULTS = {
   'chat.toolsEnabled': true,
   'chat.toolChoice': 'required',
   'chat.maxToolRounds': 10,
-  'chat.contextTokens': 4096,
+  'chat.contextTokens': 0,
+  'chat.maxOutputTokens': 8192,
   'chat.memoryRounds': 5,
   'chat.channelRounds': 5,
   'chat.readTokens': 1500,
@@ -122,19 +123,33 @@ const DEFAULTS = {
   'chat.imagesPerRequest': 2,
   'chat.imagesPerMessage': 2,
   'chat.imageTokens': 800,
+  // 自动上下文内联图片的总字节预算（data URL 字符数近似）：超过后降级为 [图片] 占位，防止 /api/chat 请求体爆掉
+  'chat.imageBytesPerRequest': 8 * 1024 * 1024,
+    // 本地图片文件保留数量：超过后自动删除最旧的图片，避免硬盘无限增长
+    'chat.imageStoreLimit': 30,
   'chat.confirmSensitive': true,
   'chat.simulateTyping': true,
   'chat.typingMinMs': 500,
   'chat.typingMaxMs': 5000,
   'chat.typingPerCharMs': 35,
+  // 合并转发（QQ 聊天记录）：单条消息超过阈值字数后自动折叠，避免大段长文刷屏
+  'chat.forwardThreshold': 1500,
+  // 转发记录里单个节点的正文上限；超长正文拆成多个节点
+  'chat.forwardNodeChars': 1500,
+  // 单条转发记录最多多少个节点（超长资料会被截断并标注省略字数）
+  'chat.forwardMaxNodes': 20,
   // 渠道输入状态：NapCat 输入中会很快消失，需要定时重报；微信原生输入中可以持续到整轮结束
   'napcat.inputState.enabled': true,
   'napcat.inputState.intervalMs': 3000,
   'napcat.inputState.timeoutMs': 10 * 60 * 1000,
   'chat.requireToolCall': true,
-  // 严格模式最多纠正一次；之后直接把正文当回复发出，避免 DeepSeek 等模型
-  // 不返回 tool_calls 时一次普通聊天连续等待数分钟。
-  'chat.toolRetryLimit': 1,
+  // 严格模式的纠正次数；达到上限后经 chat_send 发送链兜底，不直发裸正文。
+  'chat.toolRetryLimit': 3,
+  // 每条 user 消息的 meta 里附一句“必须调用工具回复”的短提醒，缓解长上下文稀释。
+  'chat.perMessageToolReminder': true,
+  // 导入的旧聊天记录默认不自动进入最近上下文，只供 read_messages 检索；
+  // 打开后按 user 起始的正常轮次规则，只带最近几轮。
+  'chat.includeImportedHistory': false,
   'chat.emptyRetryLimit': 2,
   'chat.composerHeight': 0,
   'chat.userId': 'web-user',
@@ -151,6 +166,8 @@ const DEFAULTS = {
   'notify.background': true,
   // 旧版「后台活动默认关闭」的一次性迁移标记
   'notify.backgroundDefaultMigrated': false,
+    // 服务器端系统通知兜底：远程 HTTP 访问浏览器禁止授权时，由后端所在机器弹系统通知
+    'notify.serverToast': true,
   'notify.pluginAllowed': true,
 }
 
@@ -176,6 +193,39 @@ export function apply(ctx) {
 
   const persist = () => storage.set(NS, KEY, data)
   const persistMeta = () => storage.set(NS, META_KEY, meta)
+
+  /**
+   * 旧默认值一次性迁移（只迁移“没有在设置里显式改过”的键）：
+   *   - contextTokens 4096 会把输入上下文卡得很小（工具定义一多就没历史了），
+   *     新默认 0 = 不做本地 token 截断；
+   *   - 自动上下文图片旧默认 4 张，新默认只保留最近 2 张，其余用 [图片] 占位。
+   */
+  const LEGACY_DEFAULT_MIGRATIONS = [
+    ['chat.contextTokens', 4096, 0],
+    ['chat.imagesPerRequest', 4, 2],
+    ['chat.imagesPerMessage', 4, 2],
+    ['chat.toolRetryLimit', 1, 3],
+  ]
+  const migrateLegacyDefaults = () => {
+    const changed = []
+    for (const [key, oldValue, newValue] of LEGACY_DEFAULT_MIGRATIONS) {
+      if (!hasPath(data, key)) continue
+      if (getPath(data, key) !== oldValue) continue
+      // 只有“用户真正改过”的键才跳过迁移；早期自动写入的 meta 可能是 {at:0}，
+      // 不能让它挡住旧默认值（如 imagesPerRequest=4）升级到新默认 2。
+      const metaAt = Number(meta[key]?.at)
+      if (Number.isFinite(metaAt) && metaAt > 0) continue
+      setPath(data, key, newValue)
+      changed.push({ key, value: newValue })
+    }
+    if (changed.length) {
+      persist()
+      for (const change of changed) ctx.emit('config:changed', change)
+      ctx.logger.debug(`已迁移旧默认值 ${changed.map(item => item.key).join('、')}`)
+    }
+    return changed.length
+  }
+  migrateLegacyDefaults()
 
   const syncablePreferences = () => pruneLocalOnlyPreferences(structuredClone(data))
   const syncableMeta = () => {
@@ -216,7 +266,8 @@ export function apply(ctx) {
     const metaChanged = !deepEqual(merged.meta, meta)
     data = merged.data
     meta = merged.meta
-    if (merged.changes.length || metaChanged) {
+    const migrated = migrateLegacyDefaults()
+    if (merged.changes.length || metaChanged || migrated) {
       persist()
       persistMeta()
     }

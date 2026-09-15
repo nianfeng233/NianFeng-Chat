@@ -119,6 +119,27 @@ export const PLUGIN_PAGE_CSS = `
   .plugin-footnote{font-size:11px;color:var(--text-4);margin-top:14px;}
   html[data-theme="dark"] .plugin-item.error{background:rgba(198,91,91,.14);}
   html[data-theme="dark"] .plugin-item.warning{background:rgba(201,162,39,.12);}
+
+  /* ---------- 插件目录卡片：输入框 / 按钮不再挤成一行 ---------- */
+  .plugin-dirs{margin-bottom:4px;}
+  .plugin-dirs .settings-section{padding:0;}
+  .plugin-dirs .settings-section-title{margin:0 0 8px;}
+  .plugin-dirs .settings-card{padding:14px 16px;display:flex;flex-direction:column;gap:12px;}
+  .plugin-dirs .setting-row{padding:0;align-items:flex-start;gap:12px;}
+  .plugin-dirs .setting-main{flex:0 1 300px;min-width:200px;}
+  .plugin-dirs .setting-control.plugin-dir-controls{
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;
+    flex:1 1 360px;min-width:0;
+  }
+  .plugin-dirs .plugin-dir-input{flex:1 1 260px;min-width:180px;width:auto !important;}
+  .plugin-dirs .plugin-dir-controls .outline-btn{white-space:nowrap;flex:0 0 auto;}
+  .plugin-dirs .plugin-upload-btn{border-color:var(--accent-soft-2);background:var(--accent-soft);color:var(--accent);font-weight:500;}
+  .plugin-dirs .plugin-upload-btn:hover{background:var(--accent-soft-2);color:var(--accent-hover);}
+  @media (max-width:760px){
+    .plugin-dirs .setting-row{flex-direction:column;gap:8px;}
+    .plugin-dirs .setting-main,
+    .plugin-dirs .setting-control.plugin-dir-controls{flex:1 1 auto;width:100%;justify-content:flex-start;}
+  }
   html[data-theme="dark"] .plugin-chip{background:rgba(255,255,255,.06);}
 "
 `

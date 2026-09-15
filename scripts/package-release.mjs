@@ -36,10 +36,11 @@ const onlyWeb = args.has('--web-only')
 const onlyDesktop = args.has('--desktop-only')
 const buildId = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
 
-const SOURCE_SKIP_DIRS = new Set(['release', 'node_modules', '.git', '.tmp', '.local', 'user_data', 'data'])
+// extensions/ 是独立外部插件工作目录，不随本体发布（按用户要求：插件不打包进本体）。
+const SOURCE_SKIP_DIRS = new Set(['release', 'node_modules', '.git', '.tmp', '.local', '.workbuddy', 'user_data', 'data', 'extensions', 'tools'])
 /** 只跳过特定路径下的目录：避免把本机编译缓存（可能含绝对路径）打进源码包 */
 const SOURCE_SKIP_RELATIVE_DIRS = new Set(['scripts/desktop-wrapper/target'])
-const SOURCE_SKIP_FILE = name => /^[a-z0-9]+_html_\d{8}_[a-z0-9]+\.html$/i.test(name) || /\.log$/i.test(name) || name === '.DS_Store'
+const SOURCE_SKIP_FILE = name => /^[a-z0-9]+_html_\d{8}_[a-z0-9]+\.html$/i.test(name) || /\.log$/i.test(name) || name === '.DS_Store' || /^【[^】]*】.*\.md$/i.test(name)
 
 async function pathExists(path) {
   try {

@@ -1,6 +1,6 @@
 {
   "name": "nianfeng-chat",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -21,20 +21,22 @@
     "test:deps": "node scripts/test-dependencies.mjs",
     "test:smoke": "node scripts/smoke.mjs",
     "test:backend": "node scripts/test-backend.mjs",
+    "test:security": "node scripts/test-security.mjs",
     "test:chat": "node scripts/test-chat.mjs",
     "test:chat-tools": "node scripts/test-chat-tools.mjs",
+    "test:memory": "node scripts/test-memory-same-session.mjs",
     "test:vendors": "node scripts/test-vendors.mjs",
     "test:clawbot": "node scripts/test-clawbot.mjs",
     "test:qqbot": "node scripts/test-qqbot.mjs",
     "test:images": "node scripts/test-images.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",
-    "test": "npm run check:kernels && npm run test:deps && npm run test:backend && npm run test:images && npm run test:clawbot && npm run test:qqbot && npm run test:napcat && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors",
+    "test": "npm run check:kernels && npm run test:deps && npm run test:backend && npm run test:security && npm run test:images && npm run test:clawbot && npm run test:qqbot && npm run test:napcat && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors",
     "test:napcat": "node scripts/test-napcat.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "cordis": "^4.0.0-rc.10"
+    "cordis": "4.0.0-rc.10"
   }
 }

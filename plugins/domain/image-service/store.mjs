@@ -14,6 +14,8 @@ import { randomBytes } from 'node:crypto'
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 export const IMAGE_INDEX_FILE = 'images.json'
+/** 本地图片文件保留数量：超过后按最旧优先删除，避免硬盘无限增长。 */
+export const DEFAULT_IMAGE_KEEP = 30
 
 const INDEX_VERSION = 1
 const queues = new Map()
@@ -112,7 +114,7 @@ export function imagePublicRecord(record) {
 }
 
 /** 保存一张图片，返回 { id, file, mime, size, ... }；同一 id 会覆盖旧文件。 */
-export async function saveImageBuffer(dataDir, buffer, meta = {}) {
+export async function saveImageBuffer(dataDir, buffer, meta = {}, options = {}) {
   if (!buffer?.length) throw Object.assign(new Error('图片内容为空'), { status: 400 })
   if (buffer.length > MAX_IMAGE_BYTES) throw Object.assign(new Error(`图片超过 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB 限制`), { status: 413 })
   const key = trimSlash(dataDir) || '.'
@@ -136,6 +138,20 @@ export async function saveImageBuffer(dataDir, buffer, meta = {}) {
       createdAt: Date.now(),
     }
     records[id] = record
+    // 自动裁剪：默认只保留最近 DEFAULT_IMAGE_KEEP 张，旧文件同步删掉，避免硬盘无限增长。
+    const configuredKeep = Number(options.keep ?? process.env.NIANFENG_IMAGE_KEEP)
+    const keep = Math.max(1, Math.min(5000, Number.isFinite(configuredKeep) && configuredKeep > 0 ? configuredKeep : DEFAULT_IMAGE_KEEP))
+    const all = Object.values(records).sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0))
+    if (all.length > keep) {
+      for (const stale of all.slice(0, all.length - keep)) {
+        delete records[stale.id]
+        try {
+          await unlink(join(imagesDir(dataDir), stale.file))
+        } catch (_) {
+          /* 文件已不存在时以索引为准 */
+        }
+      }
+    }
     await persistIndex(dataDir, records)
     return record
   })

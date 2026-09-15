@@ -5,7 +5,7 @@
  * 图片文件服务测试：POST /api/images 保存 -> GET /api/images/:id 读取 ->
  * 索引中不出现 base64 -> 裁剪接口生效。
  */
-import { readFile, rm, stat } from 'node:fs/promises'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -61,6 +61,19 @@ async function main() {
     check('裁剪接口删除旧图片', pruned.ok === true && pruned.removed >= 2 && pruned.total === 1, JSON.stringify(pruned))
     const missing = await fetch(`${base}/api/images/${imageId}`)
     check('被裁剪的图片 404', missing.status === 404, String(missing.status))
+
+    console.log('\n④ 本地图片自动裁剪')
+    for (let index = 0; index < 35; index++) {
+      await api(base, '/api/images', { method: 'POST', body: { dataUrl: PNG_1PX, name: `auto-${index}.png` } })
+    }
+    const autoIndex = JSON.parse(await readFile(join(dataDir, 'images.json'), 'utf8'))
+    const autoFiles = (await readdir(join(dataDir, 'images'))).filter(name => !name.endsWith('.tmp'))
+    check(
+      '超过 30 张后自动删除最旧图片（索引与磁盘文件一致）',
+      Object.keys(autoIndex.images || {}).length === 30 && autoFiles.length === 30,
+      JSON.stringify({ indexed: Object.keys(autoIndex.images || {}).length, files: autoFiles.length }),
+    )
+
   } finally {
     await backend.close().catch(() => {})
     await new Promise(resolve => setTimeout(resolve, 60))

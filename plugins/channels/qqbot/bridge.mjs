@@ -29,6 +29,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { fetchWithNetworkRetry, networkErrorText } from '../request-utils.mjs'
 import {
   createCipheriv,
   createDecipheriv,
@@ -202,6 +203,7 @@ export function verifyWebhook(secret, timestamp, body, signatureHex) {
 
 export function apply(ctx) {
   const settings = ctx.settings
+  const imageKeep = () => Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined
   const hub = ctx.hub
   const httpApi = ctx.httpApi
 
@@ -259,7 +261,7 @@ export function apply(ctx) {
     if (closed && !force) return
     try {
       await mkdir(settings.dataDir, { recursive: true })
-      const tmp = `${statePath()}.${process.pid}.tmp`
+      const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
       await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8')
       await rename(tmp, statePath())
       try {
@@ -598,7 +600,7 @@ export function apply(ctx) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), Math.max(1500, Number(timeoutMs) || 20000))
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithNetworkRetry(url, {
         method,
         headers,
         body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
@@ -613,7 +615,7 @@ export function apply(ctx) {
       }
       return { ok: response.ok, status: response.status, data: parsed, text }
     } catch (err) {
-      return { ok: false, status: 0, data: null, text: '', error: err?.name === 'AbortError' ? '请求超时' : err?.message || String(err) }
+      return { ok: false, status: 0, data: null, text: '', error: err?.name === 'AbortError' ? '请求超时' : networkErrorText(err) }
     } finally {
       clearTimeout(timer)
     }
@@ -1772,7 +1774,12 @@ export function apply(ctx) {
         const buffer = await downloadBinary(item.url, { maxBytes: Math.min(MAX_MEDIA_BYTES, 3 * 1024 * 1024) })
         if (!buffer || totalBytes + buffer.length > 6 * 1024 * 1024) continue
         totalBytes += buffer.length
-        const record = await saveImageBuffer(settings.dataDir, buffer, { mime: item.mime, width: item.width, height: item.height })
+        const record = await saveImageBuffer(
+          settings.dataDir,
+          buffer,
+          { mime: item.mime, width: item.width, height: item.height },
+          { keep: imageKeep() },
+        )
         records.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
       } catch (_) {
         /* 单张失败不影响文本消息 */
@@ -1876,7 +1883,7 @@ export function apply(ctx) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), Math.max(2000, Number(timeoutMs) || 30000))
     try {
-      const response = await fetch(url, { signal: controller.signal })
+      const response = await fetchWithNetworkRetry(url, { signal: controller.signal })
       if (!response.ok) return null
       const buffer = Buffer.from(await response.arrayBuffer())
       if (buffer.length > maxBytes) return null

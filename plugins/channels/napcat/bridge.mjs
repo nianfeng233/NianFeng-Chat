@@ -19,11 +19,12 @@
  *
  * 该文件只被 Node 后端加载（server/index.mjs 自动扫描 plugins/channels/**／bridge.mjs）。
  */
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { fetchWithNetworkRetry } from '../request-utils.mjs'
 
 export const name = 'napcat-bridge'
 export const version = '1.0.0'
@@ -43,8 +44,32 @@ const MAX_IMAGES = 4
 const MAX_MEDIA_BYTES = 4 * 1024 * 1024
 const ACTION_TIMEOUT = 20000
 const TEXT_CHUNK = 3600
+// 合并转发（聊天记录）：节点数与单节点字数都留余量，避免超长资料把 QQ 接口打爆。
+const MAX_FORWARD_NODES = 60
+const MAX_FORWARD_NODE_CHARS = 5000
+// 应用层心跳：同机内网 WebSocket 也可能半开，readyState 无法发现“假在线”。
+const HEARTBEAT_PROBE_AFTER = 30000
+const HEARTBEAT_DEAD_AFTER = 90000
+const HEARTBEAT_CHECK_INTERVAL = 10000
+const HEARTBEAT_PROBE_TIMEOUT = 8000
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
+
+/** 等待一个 promise，超时返回 fallback；用于不能阻塞消息投递太久的辅助查询。 */
+const withTimeout = (promise, ms, fallback = null) =>
+  new Promise(resolve => {
+    const timer = setTimeout(() => resolve(fallback), Math.max(0, Number(ms) || 0))
+    Promise.resolve(promise).then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(fallback)
+      },
+    )
+  })
 
 function safeString(value, max = 500) {
   return String(value ?? '').slice(0, Math.max(0, Number(max) || 500))
@@ -214,6 +239,362 @@ function segmentQuote(segments) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 入站富媒体：引用 / 合并转发 / QQ 卡片                                */
+/* ------------------------------------------------------------------ */
+
+const QUOTE_TIMEOUT = 6000
+const FORWARD_TIMEOUT = 10000
+const MAX_FORWARD_SOURCES = 3
+const FORWARD_STORE_DIR = 'forwards'
+const MAX_FORWARD_STORE_FILES = 200
+const MAX_FORWARD_STORED_ITEMS = 1000
+const FORWARD_PREVIEW_ITEMS = 5
+const FORWARD_PREVIEW_IMAGES = 2
+const FORWARD_IMAGE_TIMEOUT = 4000
+const MAX_FORWARD_ITEM_CHARS = 50000
+const FORWARD_PREVIEW_ITEM_CHARS = 1000
+const MAX_FORWARD_TOOL_ITEM_CHARS = 20000
+const MAX_CARD_RAW_CHARS = 4000
+
+function decodeXmlEntities(value) {
+  return String(value ?? '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+function xmlTag(xml, name) {
+  const match = String(xml || '').match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, 'i'))
+  return match ? decodeXmlEntities(match[1]).trim() : ''
+}
+
+const firstNonEmpty = (...values) => {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return ''
+}
+
+/** JSON / XML 卡片 -> 模型可读结构；群邀请卡片会额外标记 kind=group_invite。 */
+function parseCardSegment(type, data = {}) {
+  const rawSource = data.data ?? data.value ?? data.raw ?? ''
+  const raw =
+    typeof rawSource === 'string' ? rawSource.trim() : rawSource && typeof rawSource === 'object' ? JSON.stringify(rawSource) : String(rawSource || '').trim()
+  let parsed = null
+  if (type === 'json') {
+    try {
+      parsed = raw ? JSON.parse(raw) : null
+    } catch (_) {
+      parsed = null
+    }
+    if (parsed && typeof parsed === 'object' && !parsed.app && typeof parsed.data === 'string') {
+      try {
+        const inner = JSON.parse(parsed.data)
+        if (inner && typeof inner === 'object') parsed = inner
+      } catch (_) {
+        /* 保持外层结构 */
+      }
+    }
+  }
+  const source = parsed && typeof parsed === 'object' ? parsed : {}
+  const meta = source.meta && typeof source.meta === 'object' ? source.meta : {}
+  const detail = meta.detail_1 && typeof meta.detail_1 === 'object' ? meta.detail_1 : meta.detail && typeof meta.detail === 'object' ? meta.detail : {}
+  const news = meta.news && typeof meta.news === 'object' ? meta.news : {}
+  const title = firstNonEmpty(source.title, detail.title, news.title, source.prompt, source.name)
+  const summary = firstNonEmpty(
+    detail.desc,
+    detail.summary,
+    news.desc,
+    news.summary,
+    source.desc,
+    source.summary,
+    source.prompt === title ? '' : source.prompt,
+  )
+  const url = firstNonEmpty(source.jumpUrl, source.jump_url, source.url, detail.jumpUrl, news.jumpUrl, source.qqdocurl, meta.qqdocurl)
+  const app = firstNonEmpty(source.app, source.appid, source.appId, source.service_id, source.serviceId)
+  const xmlTitle = xmlTag(raw, 'title')
+  const xmlSummary = firstNonEmpty(xmlTag(raw, 'summary'), xmlTag(raw, 'descr'), xmlTag(raw, 'description'))
+  const xmlUrl = firstNonEmpty(xmlTag(raw, 'url'), (String(raw).match(/\burl=["']([^"']+)["']/i) || [])[1])
+  const xmlApp = firstNonEmpty((String(raw).match(/\bapp=["']([^"']+)["']/i) || [])[1], (String(raw).match(/\bserviceID=["']([^"']+)["']/i) || [])[1])
+  const finalTitle = firstNonEmpty(title, xmlTitle)
+  const finalSummary = firstNonEmpty(summary, xmlSummary)
+  const finalUrl = firstNonEmpty(url, xmlUrl)
+  const finalApp = firstNonEmpty(app, xmlApp)
+  const haystack = `${finalApp} ${finalTitle} ${finalSummary} ${finalUrl} ${raw}`.toLowerCase()
+  const groupInvite =
+    /(join.?group|group.?join|group.?invite|add.?group|group.?add|群邀请|邀请你加入|加入群聊|群聊邀请|邀请函)/i.test(haystack) ||
+    (/(group|群)/i.test(finalApp) && /(邀请|加入|invite|join)/i.test(haystack))
+    const recommendCard = /(推荐|名片|联系人|friend|contact|recommend)/i.test(haystack)
+    const bindingCard = /(绑定|关系|bind|relation)/i.test(haystack)
+    const cardKind = groupInvite ? 'group_invite' : recommendCard ? 'contact_card' : bindingCard ? 'binding_card' : 'qq_card'
+
+  return {
+    type: type === 'xml' ? 'xml' : 'json',
+    kind: cardKind,
+    app: finalApp.slice(0, 120),
+    title: finalTitle.slice(0, 200),
+    summary: finalSummary.slice(0, 600),
+    url: finalUrl.slice(0, 800),
+    prompt: firstNonEmpty(source.prompt, xmlTag(raw, 'prompt')).slice(0, 300),
+    raw: raw.slice(0, MAX_CARD_RAW_CHARS),
+  }
+}
+
+function segmentCards(segments) {
+  const out = []
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const type = String(segment?.type || '').toLowerCase()
+    if (type !== 'json' && type !== 'xml') continue
+    const card = parseCardSegment(type, segment?.data || {})
+    if (card) out.push(card)
+    if (out.length >= 2) break
+  }
+  return out
+}
+
+function segmentForwardSources(segments) {
+  const out = []
+  const pushSource = source => {
+    if (!source) return
+    if (!source.id && !(Array.isArray(source.inline) && source.inline.length)) return
+    out.push(source)
+  }
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const type = String(segment?.type || '').toLowerCase()
+    if (type !== 'forward' && type !== 'node' && type !== 'nodes') continue
+    const data = segment?.data && typeof segment.data === 'object' ? segment.data : {}
+    const id = firstNonEmpty(data.id, data.message_id, data.messageId, data.res_id, data.resId, data.forward_id, data.forwardId)
+    const title = firstNonEmpty(data.title, data.name, data.prompt, data.summary).slice(0, 160)
+    let inline = null
+    if (Array.isArray(data.content)) inline = data.content
+    else if (Array.isArray(data.message)) inline = data.message
+    else if (Array.isArray(data.messages)) inline = data.messages
+    // 单条 node 内联：{ user_id, nickname, content: [segments] }
+    if (!inline && (data.user_id || data.userId || data.nickname)) {
+      const nested = Array.isArray(data.content) ? data.content : Array.isArray(data.message) ? data.message : null
+      if (nested) inline = [{ user_id: data.user_id ?? data.userId, nickname: data.nickname, message: nested }]
+    }
+    pushSource({ id, title, inline })
+    if (out.length >= MAX_FORWARD_SOURCES) break
+  }
+  return out
+}
+
+/** 消息段数组 -> 简短可读文本（引用原文 / 转发条目共用）。 */
+function segmentsToReadable(segments, { maxChars = MAX_FORWARD_ITEM_CHARS } = {}) {
+  const parts = []
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const type = String(segment?.type || '').toLowerCase()
+    const data = segment?.data && typeof segment.data === 'object' ? segment.data : {}
+    if (type === 'text') parts.push(String(data.text ?? ''))
+    else if (type === 'at') parts.push(String(data.qq) === 'all' ? '@全体成员' : `@${data.qq ?? '某人'}`)
+    else if (type === 'image') parts.push('[图片]')
+    else if (type === 'face' || type === 'marketface') parts.push('[表情]')
+    else if (type === 'record' || type === 'voice') parts.push('[语音]')
+    else if (type === 'video') parts.push('[视频]')
+    else if (type === 'file') parts.push(`[文件${data.name ? `：${data.name}` : ''}]`)
+    else if (type === 'json' || type === 'xml') {
+      const card = parseCardSegment(type, data)
+      parts.push(card?.title ? `[卡片：${card.title}]` : '[卡片消息]')
+    } else if (type === 'forward' || type === 'node' || type === 'nodes') parts.push('[合并转发]')
+    else if (type === 'reply') continue
+    else if (type) parts.push(`[${type}]`)
+  }
+  const text = parts.join('').replace(/\s+/g, ' ').trim()
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text
+}
+
+function forwardItemFromRaw(raw, index = 0) {
+  if (!raw || typeof raw !== 'object') return null
+  const segments = normalizeSegments(raw.message ?? raw.content ?? raw.message_segments ?? [])
+  const imageSources = []
+  for (const segment of segments) {
+    if (String(segment?.type || '').toLowerCase() !== 'image') continue
+    const data = segment.data && typeof segment.data === 'object' ? segment.data : {}
+    const url = String(data.url || data.file_url || '').trim()
+    const file = String(data.file || data.file_id || '').trim()
+    if (!url && !file) continue
+    imageSources.push({ url, file, mime: String(data.mime || data.content_type || '').trim(), width: Number(data.width) || 0, height: Number(data.height) || 0 })
+    if (imageSources.length >= 20) break
+  }
+  const nestedSegment = segments.find(segment => ['forward', 'node', 'nodes'].includes(String(segment?.type || '').toLowerCase()))
+  const nestedData = nestedSegment?.data && typeof nestedSegment.data === 'object' ? nestedSegment.data : {}
+  const nestedId = firstNonEmpty(nestedData.id, nestedData.message_id, nestedData.messageId, nestedData.res_id, nestedData.resId, nestedData.forward_id, nestedData.forwardId)
+  const nestedForward = nestedId
+    ? { id: nestedId, title: firstNonEmpty(nestedData.title, nestedData.name, nestedData.prompt, nestedData.summary).slice(0, 160), count: Number(nestedData.count || nestedData.msg_count || 0) || 0 }
+    : null
+  const text = segmentsToReadable(segments)
+  const sender = raw.sender && typeof raw.sender === 'object' ? raw.sender : {}
+  const senderName = firstNonEmpty(sender.card, sender.nickname, raw.nickname, raw.sender_name, raw.user_name, raw.user_id ? `QQ${raw.user_id}` : '')
+  const imageCount = imageSources.length
+  const compactText = imageCount && /^(?:\[图片\])+$/.test(text.replace(/\s+/g, '')) ? `[图片×${imageCount}]` : text
+  return {
+    index: index + 1,
+    sender_name: safeString(senderName || '未知成员', 80),
+    user_id: String(firstNonEmpty(sender.user_id, raw.user_id, raw.sender_id, raw.from_user_id)).slice(0, 40),
+    time: raw.time ? new Date(Number(raw.time) * 1000).toISOString() : '',
+    text: compactText || (imageCount ? `[图片×${imageCount}]` : '[空消息]'),
+    image_count: imageCount || undefined,
+    image_sources: imageSources.length ? imageSources : undefined,
+    nested_forward: nestedForward || undefined,
+    message_id: String(firstNonEmpty(raw.message_id, raw.id)).slice(0, 80),
+  }
+}
+
+
+/**
+ * 出站 CQ 码支持（AI 直接输出 CQ 码 / `[at:qq]` 简写时转换为真实消息段）。
+ *
+ *  - `[at:123]`、`[at:all]` 是比 CQ 更短的写法，先统一展开成 `[CQ:at,qq=...]`；
+ *  - 白名单之外的 CQ 类型（file / record / video / node 等）会被丢弃，
+ *    避免模型通过直出 CQ 码让 NapCat 读取本机文件或转发任意内容；
+ *  - image 只允许 http(s) / base64 / data 图片源，本地路径一律拒绝。
+ */
+const OUTBOUND_CQ_TYPES = new Set(['text', 'at', 'image', 'face', 'music', 'json', 'xml', 'reply'])
+
+function expandAtShorthand(value) {
+  return String(value ?? '').replace(/\[at:(all|\d{3,20})\]/gi, (_, qq) => `[CQ:at,qq=${String(qq).toLowerCase() === 'all' ? 'all' : qq}]`)
+}
+
+function hasCqMarkup(value) {
+  return /\[CQ:[a-zA-Z0-9_]+(?=[,\]])/.test(expandAtShorthand(value))
+}
+
+function sanitizeOutboundSegments(segments) {
+  const out = []
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const type = String(segment?.type || '').toLowerCase()
+    if (!OUTBOUND_CQ_TYPES.has(type)) continue
+    const data = segment?.data && typeof segment.data === 'object' ? segment.data : {}
+    if (type === 'text') {
+      const text = String(data.text ?? '')
+      if (!text) continue
+      out.push({ type: 'text', data: { text } })
+      continue
+    }
+    if (type === 'at') {
+      const qq = normalizeQqId(data.qq)
+      if (!qq || (qq !== 'all' && !/^\d{3,20}$/.test(qq))) continue
+      out.push({ type: 'at', data: { qq } })
+      continue
+    }
+    if (type === 'image') {
+      const file = String(data.file || data.url || '').trim()
+      if (!/^(https?:\/\/|base64:\/\/|data:image\/)/i.test(file)) continue
+      out.push({ type: 'image', data: { file, ...(data.summary ? { summary: String(data.summary).slice(0, 200) } : {}) } })
+      continue
+    }
+    if (type === 'face') {
+      const id = String(data.id ?? '').trim()
+      if (!id) continue
+      out.push({ type: 'face', data: { id } })
+      continue
+    }
+    if (type === 'reply') {
+      const id = String(data.id ?? data.message_id ?? '').trim()
+      if (!id) continue
+      out.push({ type: 'reply', data: { id } })
+      continue
+    }
+    if (type === 'json' || type === 'xml') {
+      const value = String(data.data ?? data.value ?? '').trim()
+      if (!value) continue
+      out.push({ type, data: { data: value.slice(0, 20000) } })
+      continue
+    }
+    if (type === 'music') {
+      out.push({ type: 'music', data: { ...data } })
+    }
+  }
+  return out
+}
+
+/** 聊天正文 -> 出站 segment；不含 CQ 码时返回 null，走原来的纯文本分块逻辑。 */
+function parseOutboundSegments(text) {
+  const value = String(text ?? '')
+  if (!hasCqMarkup(value)) return null
+  return sanitizeOutboundSegments(normalizeSegments(expandAtShorthand(value)))
+}
+
+/** 与 splitText 相同，但保留首尾空格 / 换行（CQ 解析后的文本段需要保留 @ 后面的空格）。 */
+function splitTextPreserve(text, max = TEXT_CHUNK) {
+  const value = String(text ?? '')
+  if (!value.trim()) return value ? [value] : []
+  const parts = []
+  let current = ''
+  for (const line of value.split('\n')) {
+    const next = current ? `${current}\n${line}` : line
+    if (next.length <= max) {
+      current = next
+      continue
+    }
+    if (current) parts.push(current)
+    let rest = line
+    while (rest.length > max) {
+      parts.push(rest.slice(0, max))
+      rest = rest.slice(max)
+    }
+    current = rest
+  }
+  if (current) parts.push(current)
+  return parts
+}
+
+/** 把出站 segment 列表打包成若干批次，每个批次文本总长不超过 TEXT_CHUNK。 */
+function batchOutboundSegments(segments) {
+  const batches = []
+  let current = []
+  let currentText = 0
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    if (segment?.type === 'text') {
+      for (const chunk of splitTextPreserve(segment.data?.text ?? '')) {
+        if (current.length && currentText + chunk.length > TEXT_CHUNK) {
+          batches.push(current)
+          current = []
+          currentText = 0
+        }
+        current.push({ type: 'text', data: { text: chunk } })
+        currentText += chunk.length
+      }
+      continue
+    }
+    current.push(segment)
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
+/**
+ * 合并转发（聊天记录）节点清洗。
+ *
+ * 只接受纯文本节点，避免模型通过 node 段塞 CQ 码 / 文件段读取本机文件；
+ * 空节点丢弃，节点数与单节点字数都有上限，防止超长资料把 QQ 接口打爆。
+ */
+function normalizeForwardNodes(input) {
+  const nodes = Array.isArray(input?.nodes) ? input.nodes : Array.isArray(input) ? input : []
+  const out = []
+  for (const raw of nodes) {
+    if (out.length >= MAX_FORWARD_NODES) break
+    const source = typeof raw === 'string' ? { text: raw } : raw || {}
+    const text = String(source.text ?? source.content ?? '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .trim()
+    if (!text) continue
+    const name = String(source.name || source.nickname || '')
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 40)
+    out.push({ name, text: text.slice(0, MAX_FORWARD_NODE_CHARS) })
+  }
+  return out
+}
+
+
+/* ------------------------------------------------------------------ */
 /* 极简 RFC6455 服务端（NapCat reverse WebSocket）                       */
 /* ------------------------------------------------------------------ */
 
@@ -267,6 +648,7 @@ function rejectUpgrade(socket, status = 400, message = 'Bad Request') {
 
 export function apply(ctx) {
   const settings = ctx.settings
+  const imageKeep = () => Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined
   const hub = ctx.hub
   const httpApi = ctx.httpApi
   const http = ctx.http
@@ -334,7 +716,7 @@ export function apply(ctx) {
       for (const instance of Object.values(copy.instances || {})) {
         if (instance.accessToken) instance.accessToken = encrypt(instance.accessToken)
       }
-      const tmp = `${statePath()}.${process.pid}.tmp`
+      const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
       await writeFile(tmp, JSON.stringify(copy, null, 2), 'utf8')
       await rename(tmp, statePath())
       try {
@@ -464,6 +846,12 @@ export function apply(ctx) {
         pending: new Map(),
         seen: new Map(),
         lastEventAt: 0,
+        // 当前连接真正进入 online 的时间。前端用它区分“连接前的历史积压”和
+        // “连接后、前端重启期间漏收的实时消息”，避免把后者也静默掉。
+        connectedAt: 0,
+        heartbeatTimer: null,
+        heartbeatOwner: null,
+        heartbeatProbing: false,
         listsLoaded: false,
         versionInfo: '',
       }
@@ -501,6 +889,7 @@ export function apply(ctx) {
       versionInfo: String(run?.versionInfo || ''),
       channelIds: channelIdsOf(record.id),
       lastEventAt: run?.lastEventAt || 0,
+      connectedAt: Number(run?.connectedAt) || 0,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       endpoint: record.mode === 'reverse' ? `/api/napcat/ws?instance=${encodeURIComponent(record.id)}` : '',
@@ -523,8 +912,12 @@ export function apply(ctx) {
     if (rt.status === status && rt.error === nextError) {
       return
     }
+    const wasOnline = rt.status === 'online'
     rt.status = status
     rt.error = nextError
+    // 记录本次连接进入 online 的时间；断开时清空，重连时重新开始计时。
+    if (status === 'online' && !wasOnline) rt.connectedAt = Date.now()
+    else if (status !== 'online' && wasOnline) rt.connectedAt = 0
     const record = data.instances[rt.id]
     hub.broadcast('napcat:status', {
       instanceId: rt.id,
@@ -536,6 +929,57 @@ export function apply(ctx) {
     })
     broadcastInstances()
   }
+
+  function stopHeartbeatWatchdog(rt, owner = null) {
+    if (!rt) return
+    if (owner && rt.heartbeatOwner && rt.heartbeatOwner !== owner) return
+    if (rt.heartbeatTimer) {
+      clearInterval(rt.heartbeatTimer)
+      rt.heartbeatTimer = null
+    }
+    rt.heartbeatOwner = null
+    rt.heartbeatProbing = false
+  }
+
+  /**
+   * 内网连接也可能出现“假在线”：TCP/WS 的 readyState 仍是 OPEN，但 NapCat 已不再
+   * 推任何事件，上层会一直以为连接正常。这个看门狗在长时间没有 payload 时主动发
+   * get_status 探测；探测失败或沉默超时就关闭当前连接，交给原本的重连循环处理。
+   */
+  function startHeartbeatWatchdog(rt, close, owner) {
+    stopHeartbeatWatchdog(rt)
+    if (!rt || typeof close !== 'function') return
+    rt.heartbeatOwner = owner
+    rt.heartbeatTimer = setInterval(async () => {
+      if (rt.heartbeatOwner !== owner || !connectionAlive(rt)) return
+      if (rt.status !== 'online' || rt.heartbeatProbing) return
+      const last = Number(rt.lastEventAt) || Date.now()
+      const silent = Date.now() - last
+      if (silent < HEARTBEAT_PROBE_AFTER) return
+      if (silent >= HEARTBEAT_DEAD_AFTER) {
+        ctx.logger.warn(`[napcat] ${rt.id} 已 ${Math.round(silent / 1000)} 秒没有任何事件，主动重连`)
+        stopHeartbeatWatchdog(rt, owner)
+        try { close() } catch (_) { /* ignore */ }
+        return
+      }
+      rt.heartbeatProbing = true
+      let result = null
+      try {
+        result = await sendAction(rt, 'get_status', {}, HEARTBEAT_PROBE_TIMEOUT)
+      } catch (_) {
+        result = null
+      } finally {
+        rt.heartbeatProbing = false
+      }
+      if (!result?.ok && rt.heartbeatOwner === owner) {
+        ctx.logger.warn(`[napcat] ${rt.id} 心跳探测失败（${result?.error || '无响应'}），主动重连`)
+        stopHeartbeatWatchdog(rt, owner)
+        try { close() } catch (_) { /* ignore */ }
+      }
+    }, HEARTBEAT_CHECK_INTERVAL)
+    rt.heartbeatTimer?.unref?.()
+  }
+
 
   /* ---------------- OneBot action / 事件 ---------------- */
 
@@ -645,7 +1089,13 @@ export function apply(ctx) {
 
   async function handlePayload(rt, payload) {
     if (!payload || typeof payload !== 'object') return
+    // 任何 payload（包括 get_status 探测响应 / 心跳 / 消息）都算连接活跃。
+    rt.lastEventAt = Date.now()
     if (payload.echo !== undefined && resolvePending(rt, payload.echo, payload)) return
+
+    // 某些 NapCat 版本第一条业务事件早于 get_login_info / heartbeat，先记下连接时间，
+    // 保证随后投递的消息带有 connectedAt，前端才能区分积压与实时消息。
+    if (!rt.connectedAt) rt.connectedAt = Date.now()
 
     const selfId = String(payload.self_id ?? '').trim()
     if (selfId && !rt.login.userId) {
@@ -653,8 +1103,6 @@ export function apply(ctx) {
       setStatus(rt, 'online')
       ensureLoginInfo(rt).catch(() => {})
     }
-    rt.lastEventAt = Date.now()
-
     if (payload.post_type === 'meta_event') {
       if (payload.meta_event_type === 'lifecycle') {
         const sub = String(payload.sub_type || '')
@@ -683,7 +1131,7 @@ export function apply(ctx) {
           if (rt.seen.size <= MAX_SEEN) break
         }
       }
-      hydrateImages(message)
+      hydrateInbound(rt, message)
         .then(() => deliverIncoming(rt, message))
         .catch(err => ctx.logger.warn(`[napcat] 处理消息失败：${err?.message || err}`))
       return
@@ -729,6 +1177,8 @@ export function apply(ctx) {
     const text = segmentText(segments)
     const images = segmentImages(segments)
     const quoted = segmentQuote(segments)
+    const cards = segmentCards(segments)
+    const forwardSources = segmentForwardSources(segments)
     const messageId = String(payload.message_id ?? payload.message_seq ?? `${payload.time || Date.now()}-${senderId}`)
     return {
       key: `${messageType}:${peerId}:${messageId}`,
@@ -752,6 +1202,9 @@ export function apply(ctx) {
       images: [],
       rawImages: images,
       quote: quoted,
+      cards,
+      card: cards[0] || null,
+      forwardSources,
       time: payload.time ? new Date(Number(payload.time) * 1000).toISOString() : nowIso(),
       receivedAt: Date.now(),
       subType: String(payload.sub_type || ''),
@@ -789,7 +1242,7 @@ export function apply(ctx) {
           mime: item.mime || '',
           width: item.width || undefined,
           height: item.height || undefined,
-        })
+        }, { keep: imageKeep() })
         records.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
       } catch (_) {
         /* 单张失败不影响文字消息 */
@@ -798,6 +1251,274 @@ export function apply(ctx) {
     message.images = records
     return message
   }
+
+  /** 引用消息：调用 OneBot get_msg 取回原文，挂到 message.quote 上。 */
+  async function hydrateQuote(rt, message) {
+    const quote = message?.quote
+    if (!quote?.id) return
+    let result = await withTimeout(sendAction(rt, 'get_msg', { message_id: quote.id }, QUOTE_TIMEOUT), QUOTE_TIMEOUT + 800)
+    // 少数实现使用 message_id 作为数字/字符串有差异：第一次失败后按数字再试一次。
+    if ((!result || result.ok !== true) && /^\d+$/.test(quote.id)) {
+      result = await withTimeout(
+        sendAction(rt, 'get_msg', { message_id: Number(quote.id) }, QUOTE_TIMEOUT),
+        QUOTE_TIMEOUT + 800,
+      )
+    }
+    const data = result?.ok === true ? result.data : null
+    if (!data || typeof data !== 'object') {
+      quote.available = false
+      quote.error = result?.error || '引用消息原文读取失败'
+      return
+    }
+    const segments = normalizeSegments(data.message ?? data.message_segments ?? [])
+    const rawImages = segmentImages(segments)
+    const quotedImages = []
+    let quotedBytes = 0
+    for (const item of rawImages) {
+      if (quotedBytes >= 6 * 1024 * 1024) break
+      try {
+        const buffer = await withTimeout(imageBufferOf(item), FORWARD_IMAGE_TIMEOUT, null)
+        if (!buffer || quotedBytes + buffer.length > 6 * 1024 * 1024) continue
+        quotedBytes += buffer.length
+        const record = await saveImageBuffer(settings.dataDir, buffer, {
+          mime: item.mime || '',
+          width: item.width || undefined,
+          height: item.height || undefined,
+        }, { keep: imageKeep() })
+        quotedImages.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
+      } catch (_) {
+        /* 单张引用图片失败不影响引用文本 */
+      }
+    }
+    const text = segmentsToReadable(segments, { maxChars: 1200 })
+    const imageCount = quotedImages.length || rawImages.length
+    const sender = data.sender && typeof data.sender === 'object' ? data.sender : {}
+    quote.available = true
+    quote.text = text || (imageCount ? `[图片×${imageCount}]` : '[空消息]')
+    quote.image_count = imageCount || undefined
+    quote.images = quotedImages.length ? quotedImages : undefined
+    quote.senderId = String(firstNonEmpty(sender.user_id, data.user_id, quote.userId)).slice(0, 40)
+    quote.senderName = safeString(
+      firstNonEmpty(sender.card, sender.nickname, data.nickname, data.sender_name, quote.senderId ? `QQ${quote.senderId}` : '对方'),
+      80,
+    )
+    quote.time = data.time ? new Date(Number(data.time) * 1000).toISOString() : ''
+    quote.message_id = String(firstNonEmpty(data.message_id, quote.id)).slice(0, 80)
+  }
+
+  const forwardStoreDir = () => join(settings.dataDir || process.cwd(), FORWARD_STORE_DIR)
+  const forwardStoreFile = id =>
+    join(forwardStoreDir(), `fwd_${createHash('sha1').update(String(id)).digest('hex').slice(0, 16)}.json`)
+
+  async function pruneForwardStore() {
+    try {
+      const dir = forwardStoreDir()
+      const names = (await readdir(dir)).filter(name => name.endsWith('.json'))
+      if (names.length <= MAX_FORWARD_STORE_FILES) return
+      const infos = await Promise.all(
+        names.map(async name => ({ name, at: Number((await stat(join(dir, name))).mtimeMs) || 0 })),
+      )
+      infos.sort((a, b) => a.at - b.at)
+      for (const item of infos.slice(0, Math.max(0, infos.length - MAX_FORWARD_STORE_FILES))) {
+        await unlink(join(dir, item.name)).catch(() => {})
+      }
+    } catch (_) {
+      /* 清理失败不影响写入 */
+    }
+  }
+
+  async function saveForwardRecord(record) {
+    try {
+      const dir = forwardStoreDir()
+      await mkdir(dir, { recursive: true })
+      const file = forwardStoreFile(record.id)
+      const tmp = `${file}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
+      await writeFile(tmp, JSON.stringify(record), 'utf8')
+      await rename(tmp, file)
+      pruneForwardStore().catch(() => {})
+      return true
+    } catch (err) {
+      ctx.logger?.warn?.(`[napcat] 转发记录落盘失败（${record?.id}）：${err?.message || err}`)
+      return false
+    }
+  }
+
+  async function loadForwardRecord(id) {
+    try {
+      const raw = await readFile(forwardStoreFile(id), 'utf8')
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (_) {
+      return null
+    }
+  }
+
+  function normalizeForwardMessages(messages) {
+    const items = []
+    for (const raw of Array.isArray(messages) ? messages : []) {
+      const item = forwardItemFromRaw(raw, items.length)
+      if (!item) continue
+      items.push(item)
+      if (items.length >= MAX_FORWARD_STORED_ITEMS) break
+    }
+    return items
+  }
+
+  async function fetchForwardItems(rt, source) {
+    let raws = Array.isArray(source?.inline) ? source.inline : []
+    let error = ''
+    if (!raws.length && source?.id) {
+      let result = await withTimeout(
+        sendAction(rt, 'get_forward_msg', { id: source.id }, FORWARD_TIMEOUT),
+        FORWARD_TIMEOUT + 800,
+      )
+      if ((!result || result.ok !== true) && /^\d+$/.test(String(source.id))) {
+        result = await withTimeout(
+          sendAction(rt, 'get_forward_msg', { id: Number(source.id) }, FORWARD_TIMEOUT),
+          FORWARD_TIMEOUT + 800,
+        )
+      }
+      const data = result?.ok === true ? result.data : null
+      raws = Array.isArray(data?.messages)
+        ? data.messages
+        : Array.isArray(data?.message)
+          ? data.message
+          : Array.isArray(data)
+            ? data
+            : []
+      if (!raws.length) error = result?.error || '合并转发内容读取失败'
+    }
+    return { items: normalizeForwardMessages(raws), error, total: Array.isArray(raws) ? raws.length : 0 }
+  }
+
+  async function attachForwardImages(items, limit = FORWARD_PREVIEW_IMAGES) {
+    const max = Math.max(0, Number(limit) || 0)
+    if (!max) return 0
+    const slots = []
+    for (const item of items) {
+      if (!Array.isArray(item.image_sources) || !item.image_sources.length) continue
+      for (const source of item.image_sources) {
+        slots.push({ item, source })
+        if (slots.length >= max) break
+      }
+      if (slots.length >= max) break
+    }
+    if (!slots.length) return 0
+    // 并行下载，单张超时就走文字占位；不能因为转发里的图片下载把整条消息卡住。
+    const records = await Promise.all(
+      slots.map(async slot => {
+        try {
+          const buffer = await withTimeout(imageBufferOf(slot.source), FORWARD_IMAGE_TIMEOUT, null)
+          if (!buffer) return null
+          const record = await saveImageBuffer(settings.dataDir, buffer, {
+            mime: slot.source.mime || '',
+            width: slot.source.width || undefined,
+            height: slot.source.height || undefined,
+          }, { keep: imageKeep() })
+          return { item: slot.item, record: { id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size } }
+        } catch (_) {
+          return null
+        }
+      }),
+    )
+    let shown = 0
+    for (const entry of records) {
+      if (!entry?.record) continue
+      if (!Array.isArray(entry.item.preview_images)) entry.item.preview_images = []
+      entry.item.preview_images.push(entry.record)
+      shown += 1
+    }
+    return shown
+  }
+
+  function forwardItemBaseForTool(item) {
+    return {
+      index: item.index,
+      sender_name: item.sender_name,
+      user_id: item.user_id || undefined,
+      time: item.time || undefined,
+      image_count: item.image_count || undefined,
+      preview_images: Array.isArray(item.preview_images) ? item.preview_images : undefined,
+      nested_forward: item.nested_forward || undefined,
+      message_id: item.message_id || undefined,
+    }
+  }
+
+  function stripForwardItemForMeta(item) {
+    const fullText = String(item.text || '')
+    const previewText = fullText.length > FORWARD_PREVIEW_ITEM_CHARS ? `${fullText.slice(0, FORWARD_PREVIEW_ITEM_CHARS)}…` : fullText
+    return {
+      ...forwardItemBaseForTool(item),
+      text: previewText,
+      text_length: fullText.length || undefined,
+      text_truncated: fullText.length > FORWARD_PREVIEW_ITEM_CHARS || undefined,
+    }
+  }
+  /**
+   * 合并转发：完整记录落盘到数据目录，消息 meta 只保留少量预览。
+   * 模型默认只看前 FORWARD_PREVIEW_ITEMS 条 + 前 FORWARD_PREVIEW_IMAGES 张图；
+   * 更多内容由 read_forward 工具按 offset / limit 分页读取，避免一次转发把上下文撑爆。
+   */
+  async function hydrateForward(rt, message) {
+    const sources = Array.isArray(message?.forwardSources) ? message.forwardSources : []
+    delete message.forwardSources
+    if (!sources.length) return
+    const allItems = []
+    let rawTotal = 0
+    const sourceErrors = []
+    for (const source of sources) {
+      const { items, error, total: sourceTotal } = await fetchForwardItems(rt, source)
+      rawTotal += Number(sourceTotal) || items.length
+      if (error) sourceErrors.push(error)
+      for (const item of items) {
+        item.index = allItems.length + 1
+        allItems.push(item)
+        if (allItems.length >= MAX_FORWARD_STORED_ITEMS) break
+      }
+      if (allItems.length >= MAX_FORWARD_STORED_ITEMS) break
+    }
+    const firstSource = sources[0] || {}
+    const rootId = firstSource.id || `fwd_local_${String(message.messageId || message.id || Date.now())}`
+    const title = firstNonEmpty(...sources.map(source => source.title), '聊天记录')
+    const imageTotal = allItems.reduce((sum, item) => sum + (Number(item.image_count) || 0), 0)
+    if (allItems.length) {
+      await saveForwardRecord({
+        version: 1,
+        id: rootId,
+        title,
+        instanceId: rt.id,
+        createdAt: Date.now(),
+        total: Math.max(rawTotal, allItems.length),
+        truncated: allItems.length < rawTotal || undefined,
+        imageTotal,
+        sourceIds: sources.map(source => source.id || '').filter(Boolean),
+        items: allItems,
+      })
+    }
+    const previewItems = allItems.slice(0, FORWARD_PREVIEW_ITEMS)
+    const imagesShown = await attachForwardImages(previewItems, FORWARD_PREVIEW_IMAGES)
+    message.forward = {
+      id: rootId,
+      title,
+      total: Math.max(rawTotal, allItems.length),
+      preview: previewItems.map(stripForwardItemForMeta),
+      preview_count: previewItems.length,
+      has_more: rawTotal > previewItems.length || allItems.length > previewItems.length,
+        truncated: allItems.length < rawTotal || undefined,
+
+      image_total: imageTotal,
+      images_shown: imagesShown,
+      error: allItems.length ? undefined : sourceErrors[0] || '转发内容为空',
+      read_tool: 'read_forward',
+    }
+  }
+
+  /** 入站消息统一处理：图片入库、引用原文、合并转发、卡片解析。 */
+  async function hydrateInbound(rt, message) {
+    await Promise.allSettled([hydrateImages(message), hydrateQuote(rt, message), hydrateForward(rt, message)])
+    return message
+  }
+
 
   async function imageBufferOf(item) {
     const source = String(item?.url || item?.file || '').trim()
@@ -817,7 +1538,7 @@ export function apply(ctx) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(new Error('图片下载超时')), 15000)
       try {
-        const response = await fetch(source, { signal: controller.signal })
+        const response = await fetchWithNetworkRetry(source, { signal: controller.signal })
         if (!response.ok) return null
         const buffer = Buffer.from(await response.arrayBuffer())
         return buffer.length <= MAX_MEDIA_BYTES ? buffer : null
@@ -865,6 +1586,8 @@ export function apply(ctx) {
         channelId: channel.channelId,
         channelTargetType: channel.targetType,
         channelTargetId: channel.targetId,
+        // 连接建立时间由后端桥提供，前端据此判断是否属于“连接前积压”。
+        connectedAt: Number(rt.connectedAt) || 0,
       }
       const record = {
         id: `${message.id}-${channel.channelId}`,
@@ -943,6 +1666,7 @@ export function apply(ctx) {
 
   function stopRuntime(rt, { status = 'offline' } = {}) {
     if (!rt) return
+    stopHeartbeatWatchdog(rt)
     // epoch 让旧的重连循环在下一轮检查时主动退出，避免“断开后又被旧循环接回来”。
     rt.epoch = Number(rt.epoch || 0) + 1
     rt.stopping = true
@@ -1082,6 +1806,10 @@ export function apply(ctx) {
           if (!connectionAlive(rt)) throw new Error('NapCat WebSocket 已断开')
           setStatus(rt, 'online')
           rt.reconnectDelay = 1000
+          startHeartbeatWatchdog(rt, () => {
+            stopHeartbeatWatchdog(rt, ws)
+            try { ws.close(4000, 'heartbeat timeout') } catch (_) { /* ignore */ }
+          }, ws)
           await new Promise(resolve => {
             const timer = setInterval(() => {
               if (!connectionAlive(rt)) {
@@ -1094,10 +1822,12 @@ export function apply(ctx) {
               resolve()
             }, { once: true })
           })
+          stopHeartbeatWatchdog(rt, ws)
           ws.removeEventListener?.('message', onMessage)
           ws.removeEventListener?.('close', onClose)
           ws.removeEventListener?.('error', onError)
         } catch (err) {
+          stopHeartbeatWatchdog(rt, ws)
           try {
             ws?.close()
           } catch (_) {
@@ -1139,6 +1869,7 @@ export function apply(ctx) {
       },
       close() {
         if (closedSocket) return
+        stopHeartbeatWatchdog(rt, conn)
         closedSocket = true
         try {
           socket.write(encodeWsFrame(Buffer.alloc(0), 0x8))
@@ -1245,6 +1976,10 @@ export function apply(ctx) {
     socket.on('close', onClose)
 
     // 主动询问登录信息并刷新好友 / 群列表，让渠道面板能立刻选择目标。
+      startHeartbeatWatchdog(rt, () => {
+        stopHeartbeatWatchdog(rt, conn)
+        close()
+      }, conn)
     ensureLoginInfo(rt).catch(() => {})
   }
 
@@ -1445,6 +2180,41 @@ export function apply(ctx) {
     return parts
   }
 
+  /**
+   * 合并转发（聊天记录）发送：
+   *   - 群聊走 send_group_forward_msg，私聊走 send_private_forward_msg；
+   *   - 节点都由机器人账号发出，昵称优先用节点自带值，否则用当前登录 QQ 的昵称；
+   *   - 引用 / 艾特无法与转发混发（对齐 AstrBot：转发链里不再插入 reply / at）。
+   */
+  async function sendForwardMessage(rt, { targetType, targetId, nodes, images = [], nickname = '' }) {
+    const selfName = String(nickname || rt.login?.nickname || data.instances[rt.id]?.remark || '念风').slice(0, 40)
+    const messages = nodes.map(node => ({
+      type: 'node',
+      data: {
+        user_id: String(rt.login?.userId || ''),
+        nickname: node.name || selfName,
+        content: [{ type: 'text', data: { text: node.text } }],
+      },
+    }))
+    if (images.length && messages.length) {
+      // 图片只能挂在最后一个节点上（NapCat 每个节点是一段独立消息链）。
+      const content = messages[messages.length - 1].data.content
+      for (const image of images) {
+        const media = await resolveImageBase64(image)
+        if (media) content.push({ type: 'image', data: { file: `base64://${media.base64}` } })
+      }
+    }
+    if (!messages.length) return { ok: false, code: 'EMPTY', error: '转发内容为空' }
+    const action = targetType === 'group' ? 'send_group_forward_msg' : 'send_private_forward_msg'
+    const params = targetType === 'group' ? { group_id: Number(targetId), messages } : { user_id: Number(targetId), messages }
+    const result = await sendAction(rt, action, params)
+    if (actionFail(result)) {
+      return { ok: false, code: result?.code || 'SEND_FAILED', error: result?.error || result?.message || 'NapCat 转发失败', data: result?.data || null }
+    }
+    const messageId = result.data?.message_id ?? result.data?.messageId ?? null
+    return { ok: true, messageIds: [messageId], messageId, count: 1, forward: true, nodes: messages.length }
+  }
+
   async function sendChannelMessage(body = {}) {
     const channelId = String(body.channelId || '').trim()
     const channel = channelId ? data.channels[channelId] : null
@@ -1462,22 +2232,55 @@ export function apply(ctx) {
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES) : []
     const quoteMsgId = String(body.quoteMsgId || '').trim()
     const mentionUserId = toNumericId(body.mentionUserId)
-    const chunks = splitText(text)
-    if (!chunks.length && !images.length) return { ok: false, code: 'EMPTY', error: '消息内容为空' }
+    // 合并转发（聊天记录）优先：带 forward.nodes 时不再走普通文本 / CQ 分块路径。
+    const forwardNodes = normalizeForwardNodes(body.forward)
+    if (forwardNodes.length) {
+      return sendForwardMessage(rt, {
+        targetType,
+        targetId,
+        nodes: forwardNodes,
+        images,
+        nickname: String(body.forward?.name || body.forward?.nickname || '').trim().slice(0, 40),
+      })
+    }
+    // 含 CQ 码 / [at:qq] 时按消息段发送；纯文本保持原来的分块逻辑不变。
+    const richSegments = parseOutboundSegments(text)
+    if (richSegments === null && !splitText(text).length && !images.length) {
+      return { ok: false, code: 'EMPTY', error: '消息内容为空' }
+    }
+    if (richSegments !== null && !richSegments.length && !images.length) {
+      return { ok: false, code: 'EMPTY', error: '消息内容为空，或 CQ 类型不被允许' }
+    }
+
+    const batches = richSegments === null
+      ? splitText(text).map(chunk => [{ type: 'text', data: { text: chunk } }])
+      : batchOutboundSegments(richSegments)
+    if (!batches.length) batches.push([])
 
     const sent = []
-    let index = 0
-    for (const chunk of chunks.length ? chunks : ['']) {
-      const segments = []
-      if (index === 0 && quoteMsgId && targetType === 'group') segments.push({ type: 'reply', data: { id: quoteMsgId } })
-      if (index === 0 && mentionUserId && targetType === 'group') segments.push({ type: 'at', data: { qq: mentionUserId } })
-      if (chunk) segments.push({ type: 'text', data: { text: chunk } })
-      if (index === chunks.length - 1 || !chunks.length) {
+    for (let index = 0; index < batches.length; index += 1) {
+      const segments = [...batches[index]]
+      if (index === 0 && quoteMsgId && targetType === 'group' && !segments.some(segment => segment.type === 'reply')) {
+        segments.unshift({ type: 'reply', data: { id: quoteMsgId } })
+      }
+      if (index === 0 && mentionUserId && targetType === 'group') {
+        segments.splice(segments[0]?.type === 'reply' ? 1 : 0, 0, { type: 'at', data: { qq: mentionUserId } })
+      }
+      if (targetType !== 'group') {
+        // 私聊没有 @ 语义：CQ at 降级成可读文本，避免部分 NapCat 版本直接报错。
+        for (let i = 0; i < segments.length; i += 1) {
+          if (segments[i].type !== 'at') continue
+          const qq = String(segments[i].data?.qq || '')
+          segments[i] = { type: 'text', data: { text: `@${qq === 'all' ? '全体成员' : qq} ` } }
+        }
+      }
+      if (index === batches.length - 1) {
         for (const image of images) {
           const media = await resolveImageBase64(image)
           if (media) segments.push({ type: 'image', data: { file: `base64://${media.base64}` } })
         }
       }
+      if (!segments.length) continue
       const action = targetType === 'group' ? 'send_group_msg' : 'send_private_msg'
       const params = targetType === 'group' ? { group_id: Number(targetId), message: segments } : { user_id: Number(targetId), message: segments }
       const result = await sendAction(rt, action, params)
@@ -1485,8 +2288,8 @@ export function apply(ctx) {
         return { ok: false, code: result?.code || 'SEND_FAILED', error: result?.error || result?.message || 'NapCat 发送失败', data: result?.data || null }
       }
       sent.push(result.data?.message_id ?? result.data?.messageId ?? null)
-      index += 1
     }
+    if (!sent.length) return { ok: false, code: 'EMPTY', error: '消息内容为空或全部被过滤' }
     return { ok: true, messageIds: sent, messageId: sent[0] ?? null, count: sent.length }
   }
 
@@ -1693,6 +2496,81 @@ export function apply(ctx) {
     const result = await sendAction(rt, action, body.params || {})
     httpApi.sendJson(res, 200, result)
   })
+
+  /** 转发聊天记录深读：只按 offset / limit 返回一小页，支持嵌套层按 id 继续读取。 */
+  route('POST', '/api/napcat/forward/read', async (req, res) => {
+    await ready
+    const body = await httpApi.readBody(req, 256 * 1024)
+    const forwardId = String(body.id || body.forward_id || body.forwardId || '').trim()
+    if (!forwardId) return httpApi.sendError(res, 400, '缺少转发记录 id')
+    let record = await loadForwardRecord(forwardId)
+    if (!record || !Array.isArray(record.items)) {
+      const requestedInstanceId = String(body.instanceId || '').trim()
+      let instance = requestedInstanceId ? resolveInstance(requestedInstanceId) : null
+      if (!instance) {
+        instance = Object.values(data.instances).find(item => connectionAlive(runtimeFor(item.id))) || null
+      }
+      if (!instance) return httpApi.sendJson(res, 200, { ok: false, code: 'NO_INSTANCE', error: '转发记录不存在，且没有可用的 NapCat 连接回源读取', data: null })
+      const { items, error } = await fetchForwardItems(runtimeFor(instance.id), { id: forwardId })
+      if (!items.length) return httpApi.sendJson(res, 200, { ok: false, code: 'READ_FAILED', error: error || '转发内容为空', data: null })
+      record = {
+        version: 1,
+        id: forwardId,
+        title: '聊天记录',
+        instanceId: instance.id,
+        createdAt: Date.now(),
+        total: items.length,
+        imageTotal: items.reduce((sum, item) => sum + (Number(item.image_count) || 0), 0),
+        items,
+      }
+      await saveForwardRecord(record)
+    }
+    const storedTotal = record.items.length
+    const total = Math.max(storedTotal, Number(record.total) || 0)
+    const offset = Math.max(0, Math.min(total, Number(body.offset) || 0))
+    const limit = Math.max(1, Math.min(20, Number(body.limit) || 5))
+    const textOffset = Math.max(0, Number(body.text_offset) || 0)
+    const page = record.items.slice(offset, offset + limit)
+    const includeImages = body.include_images === true || String(body.include_images) === 'true'
+    const imageLimit = includeImages ? Math.max(0, Math.min(FORWARD_PREVIEW_IMAGES, Number(body.image_limit) || FORWARD_PREVIEW_IMAGES)) : 0
+    const imagesShown = imageLimit > 0 ? await attachForwardImages(page, imageLimit) : 0
+      const items = page.map((item, pageIndex) => {
+        const fullText = String(item.text || "")
+        const start = pageIndex === 0 ? Math.min(textOffset, fullText.length) : 0
+        const text = fullText.slice(start, start + MAX_FORWARD_TOOL_ITEM_CHARS)
+        return {
+          ...forwardItemBaseForTool(item),
+          text,
+          text_offset: start || undefined,
+          text_length: fullText.length || undefined,
+          text_truncated: start + text.length < fullText.length || undefined,
+          image_available: Array.isArray(item.image_sources) ? item.image_sources.length : Number(item.image_count) || 0,
+        }
+      })
+      const firstFullText = String(page[0]?.text || "")
+      const firstStart = page.length ? Math.min(textOffset, firstFullText.length) : 0
+      const firstReturned = page.length ? Math.min(MAX_FORWARD_TOOL_ITEM_CHARS, Math.max(0, firstFullText.length - firstStart)) : 0
+      const nextTextOffset = page.length && firstFullText.length > firstStart + firstReturned ? firstStart + firstReturned : null
+    httpApi.sendJson(res, 200, {
+      ok: true,
+      id: String(record.id || forwardId),
+      instance_id: String(record.instanceId || ''),
+      title: record.title || '聊天记录',
+      total,
+      offset,
+      limit,
+      next_offset: offset + page.length < storedTotal ? offset + page.length : null,
+      next_text_offset: nextTextOffset,
+      has_more: offset + page.length < storedTotal,
+      truncated: record.truncated || undefined,
+      items,
+      images_shown: imagesShown,
+      hint: record.truncated
+        ? '这段转发原始消息过多，服务端只缓存了前面一部分；继续按 next_offset 读取缓存内容，但更深的部分可能无法再取。'
+        : '继续读取请带同一个 id 与 next_offset；如果 items[].text_truncated=true，说明单条文本很长，请带同一个 offset、limit=1、text_offset=next_text_offset 继续读取正文，直到 next_text_offset=null。items[].nested_forward.id 可作为新的 id 继续读取嵌套转发。图片默认不读，确需时 include_images=true 且 image_limit≤2，非必要不要读取。',
+    })
+  })
+
 
   route('GET', '/api/napcat/discover', async (req, res, params, url) => {
     await ready

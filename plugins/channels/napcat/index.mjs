@@ -10,12 +10,15 @@
  *  - 同一个 NapCat 登录 QQ 只需要建立一条连接，多个渠道可以复用；
  *  - QQ 名、QQ 号、群号、群昵称、实际昵称都会写入消息身份与上下文；
  *  - 群聊支持黑名单 / 仅艾特 / 回复概率 / 引用回复 / 艾特触发者 / 静默上下文；
+ *  - 长消息 / 资料消息自动折叠成 QQ 合并转发（聊天记录），转发里第一条是标题、其后是正文；
+ *    阈值见 chat.forwardThreshold / chat.forwardNodeChars / chat.forwardMaxNodes；
  *  - 通过 napcat:* 事件、napcat-channel 服务和 /api/napcat/* 路由给其它插件扩展。
  */
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
 import { NAPCAT_CSS } from './style.mjs'
+import { createOutboundPlanner } from './outbound.mjs'
 
 export const name = 'napcat'
 export const version = '1.0.0'
@@ -119,6 +122,30 @@ const STATUS_COLOR = {
   error: '#c65b5b',
 }
 
+/**
+ * 判断一条入站消息是否属于“连接建立前的历史积压”：
+ *   - connectedAt 是 NapCat 后端桥本次连接进入 online 的时间（毫秒）；
+ *   - receivedAt 是 NapCat 桥收到消息的时间戳（毫秒，本地时钟）；
+ *   - time 是消息本身的发送时间（ISO 字符串，可能来自 QQ 服务器）。
+ *
+ * 优先以 connectedAt 为基准：连接建立后、只是前端 WebUI 重启期间漏收的消息
+ * 仍属于实时消息，应当补写并触发回复；只有连接建立前就已经存在的历史消息才
+ * 静默写入上下文，避免“重开程序/重连后把历史消息全部回一遍”。
+ * 没有 connectedAt 的旧后端数据回退到 sessionStartedAt 判断。
+ * napcat.replyBacklog = true 可恢复旧行为（积压也回复）。
+ */
+export function isBacklogMessage(message, { sessionStartedAt = 0, graceMs = 15000, replyBacklog = false, connectedAt = 0 } = {}) {
+  if (replyBacklog) return false
+  const receivedAt = Number(message?.receivedAt) || 0
+  const sentAt = Date.parse(message?.time || '') || 0
+  const messageConnectedAt = Number(message?.connectedAt) || 0
+  const referenceAt =
+    (Number(connectedAt) > 0 ? Number(connectedAt) : 0) || (messageConnectedAt > 0 ? messageConnectedAt : 0) || Number(sessionStartedAt) || 0
+  if (!referenceAt) return false
+  const cutoff = referenceAt - Math.max(0, Number(graceMs) || 0)
+  return (receivedAt > 0 && receivedAt < cutoff) || (sentAt > 0 && sentAt < cutoff)
+}
+
 export function apply(ctx) {
   const base = ctx.inject('channel-base')
   const channels = ctx.inject('channel-registry')
@@ -145,6 +172,23 @@ export function apply(ctx) {
   const instanceWaiters = new Set()
   const closing = []
   let backendEvents = null
+  /** 启动流程结束后才允许在 SSE 重连时主动补收件箱，避免和会话同步竞争。 */
+  let bootFinished = false
+  let pendingOpenDrain = false
+  /** SSE 静默失效时的兜底轮询：定时补收后端 inbox，避免消息永远躺在收件箱里。 */
+  let inboxPollTimer = null
+  /**
+   * 本次前端启动时间：只作为旧后端（消息里没有 connectedAt）的兜底基准。
+   * 新后端会把 NapCat 连接进入 online 的时间随消息一起传下来，这样“连接后、
+   * 前端 WebUI 重启期间漏收的消息”不会被误判成历史积压。
+   * 如确需回复连接建立前的积压消息，可把 napcat.replyBacklog 设为 true。
+   */
+  const sessionStartedAt = Date.now()
+  // 连接切换 / 心跳抖动通常只有几秒到一两分钟；宽限设大一些，避免把刚收到
+  // 的实时消息误判成积压。真正几小时前的历史消息仍会被静默写入上下文。
+  const BACKLOG_GRACE_MS = 2 * 60 * 1000
+  const replyBacklogEnabled = () => config.get('napcat.replyBacklog', false) === true
+  const backlogOf = message => isBacklogMessage(message, { sessionStartedAt, graceMs: BACKLOG_GRACE_MS, replyBacklog: replyBacklogEnabled() })
 
   /* ---------------- 基础工具 ---------------- */
 
@@ -522,6 +566,15 @@ export function apply(ctx) {
       for (const type of ['napcat:message', 'napcat:status', 'napcat:instances', 'napcat:discover', 'napcat:notice', 'napcat:request', 'napcat:recall']) {
         source.addEventListener(type, forward(type))
       }
+      // EventSource 断开重连后，断线期间的消息只会留在后端 inbox 里，不会自动
+      // 重放。这里在重连成功时主动补收一次，避免用户消息“后台收到了但前端没反应”。
+      source.addEventListener('open', () => {
+        if (!bootFinished) {
+          pendingOpenDrain = true
+          return
+        }
+        drainAllInboxes().catch(err => ctx.logger?.warn?.(`[napcat] 重连补收消息失败：${err?.message || err}`))
+      })
       backendEvents = source
     } catch (_) {
       backendEvents = null
@@ -535,6 +588,18 @@ export function apply(ctx) {
       for (const item of data?.messages || []) await handleInbound({ channelId: channel.id, instanceId: data?.instanceId, message: item.message || item })
     } catch (_) {
       /* ignore */
+    }
+  }
+
+  /** SSE 重连后补收所有 NapCat 渠道的 inbox；chat-flow 未就绪时留给 boot 首轮处理。 */
+  async function drainAllInboxes() {
+    if (!api || !ctx.registry.get('chat-flow')) return
+    for (const tab of channels.tabs()) {
+      for (const channel of channels.channels(tab)) {
+        if (!isNapcatChannel(channel)) continue
+        if (!instanceIdOf(channel)) continue
+        await drainInbox(channel)
+      }
     }
   }
 
@@ -585,15 +650,15 @@ export function apply(ctx) {
 
   const qqUserId = userId => `qq:${String(userId || '').trim()}`
 
-  function buildOutboundText(message) {
-    if (!message) return ''
-    if (message.kind === 'document') {
-      const title = message.meta?.title || message.content || '资料'
-      const summary = message.meta?.summary || ''
-      return [`【资料】${title}`, summary].filter(Boolean).join('\n')
-    }
-    return String(message.content || '').trim()
-  }
+  /* ---------------- 外发内容组装（含合并转发） ---------------- */
+
+  // 资料 / 超长消息 -> 合并转发（聊天记录）：第一条是标题，往下是正文。
+  // 阈值与节点上限见 chat.forwardThreshold / chat.forwardNodeChars / chat.forwardMaxNodes。
+  const outbound = createOutboundPlanner({
+    config,
+    resolveDocument: docId => ctx.registry.get('document-service')?.get?.(docId) || null,
+  })
+  const buildOutboundContent = message => outbound.buildOutboundContent(message)
 
   function triggerDecision(channel, message) {
     const category = categoryOf(channel)
@@ -668,18 +733,24 @@ export function apply(ctx) {
     const active = activeTurns.get(conversationId)
     const inbound = active && String(active.channel?.id || '') === String(channel.id) ? active.message : null
     const rules = groupRulesOf(channel)
-    const text = buildOutboundText(message)
-    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+    const content = buildOutboundContent(message)
+    const forwarding = Array.isArray(content.forward) && content.forward.length > 0
+    // 转发路径下图片会被挂到最后一个节点上（见 bridge 的 sendForwardMessage）。
+    const images = content.images
 
     const body = {
       channelId: channel.id,
       instanceId,
       targetType,
       targetId,
-      text,
+      text: content.text,
       images,
-      quoteMsgId: targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
-      mentionUserId: targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
+      // 合并转发无法与引用 / 艾特混发：转发记录本身就是一条消息。
+      quoteMsgId: !forwarding && targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
+      mentionUserId: !forwarding && targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
+      ...(forwarding
+        ? { forward: { name: String(sessions.get(conversationId)?.meta?.napcatBotName || '').trim(), nodes: content.forward } }
+        : {}),
     }
     const result = await bridgePost('/send', body)
     if (result?.ok === false) return { ok: false, error: result.error || 'NapCat 返回发送失败' }
@@ -696,6 +767,8 @@ export function apply(ctx) {
         quoteMessageId: body.quoteMsgId || '',
         mentionUserId: body.mentionUserId || '',
         imagesSent: images.length > 0,
+        forwarded: forwarding || undefined,
+        forwardNodes: forwarding ? content.forward.length : undefined,
         outboundError: '',
       },
     })
@@ -737,6 +810,8 @@ export function apply(ctx) {
   }
 
   async function handleInbound(payload) {
+    // 服务端常驻代聊已接管时，WebUI 只负责展示，不再重复处理入站消息。
+    if (api?.supports?.('server-agent') && globalThis.__NIANFENG_SERVER_AGENT__ !== true) return
     const channelId = payload?.channelId
     const message = payload?.message
     if (!channelId || !message?.id) return
@@ -764,6 +839,12 @@ export function apply(ctx) {
     const decision = triggerDecision(channel, message)
     const permissions = permissionsOf(channel)
     const sender = senderIdentityFor(channel, message)
+    // 启动前积压的消息：只写上下文，不触发模型回复（避免重启后批量刷屏）。
+    const backlog = backlogOf(message)
+    if (backlog && decision.trigger) {
+      decision.trigger = false
+      decision.reason = 'backlog'
+    }
 
     if (decision.ignore) {
       await ackInbox(channel.id, [message.id])
@@ -806,9 +887,13 @@ export function apply(ctx) {
         mentionedSelf: message.mentionedSelf === true,
         atUserIds: Array.isArray(message.atUserIds) ? message.atUserIds : [],
         quote: message.quote || null,
+          forward: message.forward || null,
+          card: message.card || null,
+          cards: Array.isArray(message.cards) ? message.cards.slice(0, 2) : [],
         images: Array.isArray(message.images) ? message.images : [],
         triggered: decision.trigger === true,
         triggerReason: decision.reason,
+        backlog: backlog || undefined,
         replyRules: { quote: decision.rules.quote !== false, mention: decision.rules.mention !== false },
       }
       if (store?.append) {
@@ -2303,6 +2388,10 @@ export function apply(ctx) {
   })
 
   ctx.effect(() => () => {
+    if (inboxPollTimer) {
+      clearInterval(inboxPollTimer)
+      inboxPollTimer = null
+    }
     if (backendEvents) {
       try {
         backendEvents.close()
@@ -2326,6 +2415,7 @@ export function apply(ctx) {
     ensureBackendEvents()
     await refreshInstances()
     applyInstancesToChannels(instances)
+    const drains = []
     for (const tab of channels.tabs()) {
       for (const channel of channels.channels(tab)) {
         if (!isNapcatChannel(channel)) continue
@@ -2337,10 +2427,29 @@ export function apply(ctx) {
         if (!instanceIdOf(channel)) continue
         await syncChannelToBridge(channel)
         await refreshChannelStatus(channel)
-        drainInbox(channel).catch(() => {})
+        drains.push(drainInbox(channel).catch(() => {}))
       }
     }
+    await Promise.allSettled(drains)
+    bootFinished = true
+    if (pendingOpenDrain) {
+      pendingOpenDrain = false
+      drainAllInboxes().catch(err => ctx.logger?.warn?.(`[napcat] 启动后补收消息失败：${err?.message || err}`))
+    }
     pruneBridgeChannels().catch(() => {})
+    if (!inboxPollTimer) {
+      inboxPollTimer = setInterval(() => {
+        if (!bootFinished) return
+        // EventSource 处于 CLOSED 时浏览器通常会自动重连；这里兜底重建，避免只剩轮询。
+        if (backendEvents && typeof EventSource !== 'undefined' && backendEvents.readyState === EventSource.CLOSED) {
+          try { backendEvents.close() } catch (_) { /* ignore */ }
+          backendEvents = null
+          ensureBackendEvents()
+        }
+        drainAllInboxes().catch(() => {})
+      }, 60000)
+      inboxPollTimer?.unref?.()
+    }
   }
   const bootTimer = setTimeout(() => {
     boot().catch(err => ctx.logger?.warn?.(`[napcat] 启动同步失败：${err?.message || err}`))

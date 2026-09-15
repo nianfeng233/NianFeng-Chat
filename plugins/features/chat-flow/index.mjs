@@ -17,7 +17,8 @@
  * 兼容策略（模型能力差异兜底）：
  *   1. 模型不返回 tool_calls，但正文是 <tool_call> JSON / DSML·DSLM 标记 -> 解析成工具调用继续执行；
  *   2. 识别出工具标记但无法解析 -> 立即撤掉流式内容并拦截，绝不把标记展示给用户；
- *   3. 只有普通正文才回退为“普通流式回复”。
+ *   3. 模型坚持直出普通正文时：严格模式下先强化纠错；仍不调用工具则通过
+ *      chat_send 发送链兜底，避免用户什么都收不到。
  * chat-flow 自己不认识 OpenAI / Ollama / 任何具体工具实现，只编排服务。
  */
 export const name = 'chat-flow'
@@ -82,8 +83,12 @@ export function apply(ctx) {
     chat_send: '发送消息',
     send_document: '发送资料',
     read_document: '读取资料',
+    read_forward: '读取转发记录',
+    napcat_card: '处理 QQ 卡片',
   }
   const TYPING_TOOLS = new Set(['chat_send', 'send_document'])
+  /** 严格纠错时只给模型保留回复工具，避免它继续输出“解释为什么没调工具”的正文。 */
+  const STRICT_REPLY_TOOLS = new Set(['chat_send', 'send_document'])
 
   const emitStatus = (conversationId, status, extra = {}) => {
     events.emit('chat:status', { conversationId, status, at: Date.now(), ...extra })
@@ -242,6 +247,9 @@ export function apply(ctx) {
     if (Number.isFinite(temperature)) options.temperature = temperature
     const reasoningEffort = config.get('chat.reasoningEffort', 'off')
     if (['off', 'low', 'high', 'max'].includes(reasoningEffort)) options.reasoningEffort = reasoningEffort
+    // 输出上限：全局默认值；模型设置里单独填了 max_tokens 时以模型级为准。
+    const maxOutputTokens = Math.max(0, Number(config.get('chat.maxOutputTokens', 8192)) || 0)
+    if (maxOutputTokens > 0) options.maxTokens = maxOutputTokens
     const conversationModel = conv.meta?.model
     if (conversationModel) options.model = conversationModel
     // 全局 temperature 是默认值：用户在模型列表里单独设置过 temperature 时，
@@ -331,22 +339,52 @@ export function apply(ctx) {
     })
   }
 
-  const isToolUnsupported = err =>
-    /tool_choice|tool_calls|function.?call|tools? (?:are )?(?:not|unsupported)|(?:not support|unsupported|invalid).{0,20}(?:tool|function)|不支持.{0,6}工具/i.test(
-      String(err?.message || err),
+  /** 提供商是否明确拒绝 tool_choice 参数（与“完全不支持 tools”要分开处理）。 */
+  const isToolChoiceRejected = err => /tool_choice/i.test(String(err?.message || err))
+
+  const isToolUnsupported = err => {
+    const message = String(err?.message || err)
+    if (isToolChoiceRejected(err)) return false
+    return /tool_calls|function.?call|tools? (?:are )?(?:not|unsupported)|(?:not support|unsupported|invalid|unknown).{0,20}(?:tool|function)|不支持.{0,6}工具/i.test(
+      message,
     )
+  }
+
+  const switchToTextualTools = (entry, conversationId, messagesToSend, options, reason) => {
+    // 部分模型 / 提供商完全不支持原生 function calling：移除 tools，但仍保留
+    // “必须通过文本工具协议回复”的严格约束，而不是回退成裸正文直出。
+    entry.toolUnsupported = true
+    entry.suppressStream = true
+    ctx.logger.warn(`模型不支持原生工具调用，切换为文本工具协议严格模式：${reason || 'unknown'}`)
+    removeDraft(entry, conversationId)
+    return attemptStream(entry, conversationId, messagesToSend, { ...options, tools: undefined, toolChoice: undefined })
+  }
 
   async function streamRound(entry, conversationId, messagesToSend, options) {
     try {
       return await attemptStream(entry, conversationId, messagesToSend, options)
     } catch (err) {
-      if (options.tools?.length && isToolUnsupported(err) && !entry.cancelled) {
-        // 部分模型 / 提供商不支持 function calling：移除工具重试，走普通流式回复
-        entry.toolUnsupported = true
-        entry.suppressStream = false
-        ctx.logger.warn(`模型不支持工具调用，回退为普通回复：${err?.message || err}`)
-        removeDraft(entry, conversationId)
-        return attemptStream(entry, conversationId, messagesToSend, { ...options, tools: undefined, toolChoice: undefined })
+      if (entry.cancelled) throw err
+      const toolsPresent = Array.isArray(options.tools) && options.tools.length > 0
+      // required 不是所有 OpenAI 兼容网关都支持：先降级为 auto 保留 tools；
+      // 如果改用 auto 后仍然报 tool_choice / tools 相关错误，再切换文本工具协议。
+      if (toolsPresent && isToolChoiceRejected(err)) {
+        if (!entry.toolChoiceDowngraded && options.toolChoice !== 'auto') {
+          entry.toolChoiceDowngraded = true
+          ctx.logger.warn(`提供商不接受 tool_choice=${options.toolChoice}，保留工具并改用 auto 重试：${err?.message || err}`)
+          removeDraft(entry, conversationId)
+          try {
+            return await attemptStream(entry, conversationId, messagesToSend, { ...options, toolChoice: 'auto' })
+          } catch (retryErr) {
+            if (entry.cancelled) throw retryErr
+            if (!isToolChoiceRejected(retryErr) && !isToolUnsupported(retryErr)) throw retryErr
+            return switchToTextualTools(entry, conversationId, messagesToSend, options, retryErr?.message || retryErr)
+          }
+        }
+        return switchToTextualTools(entry, conversationId, messagesToSend, options, err?.message || err)
+      }
+      if (toolsPresent && isToolUnsupported(err)) {
+        return switchToTextualTools(entry, conversationId, messagesToSend, options, err?.message || err)
       }
       throw err
     }
@@ -397,6 +435,30 @@ export function apply(ctx) {
         ...(call || {}),
       },
     })
+  }
+
+  /**
+   * 严格模式的正文兜底：模型坚持不调工具时，不让裸 assistant 正文直接走渠道，
+   * 而是复用 chat_send 的标准发送链（零宽字符清理、去重、模拟输入、落库、渠道外发），
+   * 这样用户至少能收到回复，同时仍保留工具链路的发送行为。
+   */
+  async function fallbackViaChatSend(entry, conversationId, content, reasoning, contextBase = {}) {
+    const text = String(content ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+    if (!text) return { ok: false, error: '正文为空，无法兜底。' }
+    if (entry.draftId) removeDraft(entry, conversationId)
+    try {
+      const output = await tools.execute('chat_send', { messages: [text], end: true }, {
+        conversationId,
+        ...contextBase,
+        reasoningContent: reasoning || '',
+      })
+      if (output?.ok && Array.isArray(output.message_ids) && output.message_ids.length) {
+        attachCallInfo(conversationId, output.message_ids, entry.lastRound)
+      }
+      return output || { ok: false, error: 'chat_send 未返回结果。' }
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) }
+    }
   }
 
   function handleTurnError(entry, conversationId, error) {
@@ -454,12 +516,22 @@ export function apply(ctx) {
   /** 工具循环主路径 */
   async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      // 渠道侧的“本轮结束”回调依赖 chat:request-done；会话不存在时也必须发一次，
+      // 否则入站队列会一直等到超时，表现为“消息写进去了但机器人长时间不理人”。
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
     const startedAt = Date.now()
-    const channel = store.channelForConversation(conversationId)
-    const channelId = channel?.channelId || store.novaChannelId(conversationId)
+    let channel = null
+    try {
+      channel = store.channelForConversation(conversationId)
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+    }
+    const channelId = channel?.channelId || store?.novaChannelId?.(conversationId) || `nova:web:${conversationId}`
     entry.channelId = channelId
     entry.protocol = []
     entry.roundProtocol = []
@@ -467,14 +539,38 @@ export function apply(ctx) {
     entry.usage = null
     entry.thinkingMs = 0
     entry.lastRound = null
-    const identity = ctx.registry.get('user-identity')?.get?.() || {}
-    const who = permissions?.contextFor(conversationId) || {
-      userId: identity.userId || config.get('chat.userId', 'web-user'),
-      userName: identity.userName || resolveUserNickname(config),
-      identitySource: identity.source || 'local',
+    let who = null
+    try {
+      const identity = ctx.registry.get('user-identity')?.get?.() || {}
+      who = permissions?.contextFor(conversationId) || {
+        userId: identity.userId || config.get('chat.userId', 'web-user'),
+        userName: identity.userName || resolveUserNickname(config),
+        identitySource: identity.source || 'local',
+      }
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 读取用户身份失败，将使用默认身份：${err?.message || err}`)
+      who = {
+        userId: config.get('chat.userId', 'web-user'),
+        userName: resolveUserNickname(config),
+        identitySource: 'local',
+      }
     }
 
     try {
+      const imageService = ctx.registry.get('image-service')
+      // 只有会话里真的存在“未预加载的 imageId”时才异步取图，避免给普通聊天增加额外 await。
+      // 必须放在构造 user wire 之前：NapCat / QQ / 微信入站图片在插件先写入消息时
+      // 只有 imageId，若等到 build 前才 hydration，协议轨迹里的用户消息会永远缺图。
+      const needsTurnImageHydration = () => !!(imageService?.needsHydration?.(conversationId) && imageService?.hydrateConversation)
+      const hydrateTurnImages = async () => {
+        // 先展示“思考中”占位气泡，再等待图片预加载；否则远程大图 hydration 的几秒内界面无反馈。
+        if (!entry.draftId) entry.draftId = messages.placeholder(conversationId)?.id || null
+        await Promise.race([
+          imageService.hydrateConversation(conversationId),
+          new Promise(resolve => setTimeout(resolve, 8000)),
+        ]).catch(() => {})
+        if (entry.cancelled) throw abortError()
+      }
       let userMessage = null
       if (!skipUserAppend) {
         const normalizedImages = (Array.isArray(images) ? images : [])
@@ -498,12 +594,6 @@ export function apply(ctx) {
           meta: { via: 'composer', ...(normalizedImages.length ? { images: normalizedImages } : {}) },
         })
         scheduleStatus(conversationId, userMessage?.id)
-        const userWire = builder.toModelMessage(userMessage, {
-          roleId,
-          channelId: userMessage?.channel_id || channelId,
-          timezone: builder.timezone?.(),
-        })
-        if (userWire) entry.protocol.push(userWire)
       } else {
         // 渠道插件已先写入入站消息（skipUserAppend=true），这里必须补一份 user wire，
         // 否则工具协议轨迹只有 assistant/tool，下一轮构建上下文时会丢掉用户刚说的话。
@@ -514,12 +604,6 @@ export function apply(ctx) {
             : null) ||
           [...sessionMessages].reverse().find(item => item?.role === 'user') ||
           null
-        const userWire = builder.toModelMessage(userMessage, {
-          roleId,
-          channelId: userMessage?.channel_id || channelId,
-          timezone: builder.timezone?.(),
-        })
-        if (userWire) entry.protocol.push(userWire)
       }
       emitStatus(conversationId, 'thinking', { round: 0, label: '正在思考' })
       // 日志页据此展示“谁 / 哪个渠道 / 说了什么”，而不是只有一串 conversationId。
@@ -535,22 +619,22 @@ export function apply(ctx) {
         channelType: requestStartChannelType,
       })
 
+      // 图片 hydration 可能等几秒：先发状态 / 开始生成事件（停止按钮立即出现），
+      // 但必须在构造 user wire 之前完成，协议轨迹里的用户消息才带得上图片。
+      if (needsTurnImageHydration()) await hydrateTurnImages()
+      const userWire = builder.toModelMessage(userMessage, {
+        roleId,
+        channelId: userMessage?.channel_id || channelId,
+        timezone: builder.timezone?.(),
+      })
+      if (userWire) entry.protocol.push(userWire)
+
       // 模型开始思考时先展示占位气泡（三点动画）；工具真正发出消息前会移除它，
       // 普通文本降级时则复用它继续流式输出。
-      const thinking = messages.placeholder(conversationId)
+      const thinking = ensureDraft(entry, conversationId)
       entry.draftId = thinking?.id || null
 
       const persona = String(conv.meta?.persona || '').trim()
-      const imageService = ctx.registry.get('image-service')
-      // 只有会话里真的存在“未预加载的 imageId”时才异步取图，避免给普通聊天增加额外 await
-      // （否则停止生成等交互可能抢在 stream 创建之前，影响原有即时取消语义）。
-      if (imageService?.needsHydration?.(conversationId) && imageService?.hydrateConversation) {
-        await Promise.race([
-          imageService.hydrateConversation(conversationId),
-          new Promise(resolve => setTimeout(resolve, 8000)),
-        ]).catch(() => {})
-        if (entry.cancelled) throw abortError()
-      }
       const base = builder.build({ conversationId, roleId, persona, channelId, currentMessageId: userMessage?.message_id || userMessage?.id || null })
       const options = toolOptions(conv)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
@@ -568,9 +652,23 @@ export function apply(ctx) {
       let textualMode = false
       let toolRetries = 0
       // DeepSeek 官方适配器按 harness 约定不发 tool_choice，模型有时会直接输出正文。
-      // 严格模式最多纠正一次；再纠正下去会让一次普通聊天白等数分钟，所以之后直接
-      // 把正文当作最终回复发送（网页与外部渠道都能正常外发）。
-      const toolRetryLimit = Math.min(1, Math.max(0, Number(config.get('chat.toolRetryLimit', 1)) || 0))
+      // 纠正次数由 chat.toolRetryLimit 控制；达到上限后走 chat_send 发送链兜底，
+      // 不把模型正文直接当普通 assistant 消息发给渠道。
+      const retryLimitRaw = Number(config.get('chat.toolRetryLimit', 3))
+      const toolRetryLimit = Number.isFinite(retryLimitRaw) ? Math.max(0, Math.floor(retryLimitRaw)) : 3
+      // 严格工具模式：模型没有真正调用工具时，正文永远不能算作回复。
+      // 即使提供商不支持原生 function calling，也只允许走文本工具协议，不允许裸正文降级。
+      const strictToolsRequired =
+        toolsEnabled() &&
+        config.get('chat.requireToolCall', true) !== false &&
+        config.get('chat.toolChoice', 'required') !== 'none'
+      const replyToolDefinitions = () => {
+        try {
+          return (tools.definitions?.() || []).filter(tool => STRICT_REPLY_TOOLS.has(tool?.function?.name || tool?.name))
+        } catch (_) {
+          return []
+        }
+      }
       let emptyRetries = 0
       const emptyRetryLimit = Math.max(0, Number(config.get('chat.emptyRetryLimit', 2)) || 0)
       while (round < maxRounds && !entry.cancelled) {
@@ -579,16 +677,25 @@ export function apply(ctx) {
         ensureDraft(entry, conversationId)
         emitStatus(conversationId, 'thinking', { round, label: '正在思考' })
         const roundStartedAt = Date.now()
-        const roundOptions = textualMode ? { ...options, tools: undefined, toolChoice: undefined } : options
-        // 原生工具调用模式下，模型有时会先流出一小段正文再给出 tool_call；
-        // 这段正文只暂存、不上屏，最终由 chat_send 工具消息呈现，避免闪现后消失。
+        const useTextualTools = textualMode || entry.toolUnsupported === true
+        const roundOptions = useTextualTools
+          ? { ...options, tools: undefined, toolChoice: undefined }
+          : { ...options }
+        // 已经纠正过至少一次时，只给回复工具并强制 required：模型没有别的工具可用，
+        // 只能把最终回复放进 chat_send / send_document 参数里。
+        if (strictToolsRequired && toolRetries > 0 && !useTextualTools) {
+          const replyTools = replyToolDefinitions()
+          if (replyTools.length) roundOptions.tools = replyTools
+          roundOptions.toolChoice = 'required'
+        }
+        // 如果第一轮已经确认网关不接受 required，就保持 auto + tools，不要每轮重复撞墙。
+        if (entry.toolChoiceDowngraded && !useTextualTools && roundOptions.toolChoice !== 'auto') roundOptions.toolChoice = 'auto'
+        // 严格模式下正文只暂存、不上屏，等解析成工具调用后才呈现；文本协议同样先拦截，
+        // 避免模型在纠错后仍把正文直接显示给用户。
         entry.suppressStream =
-          !textualMode &&
-          Array.isArray(roundOptions.tools) &&
-          roundOptions.tools.length > 0 &&
-          roundOptions.toolChoice !== 'none' &&
-          config.get('chat.requireToolCall', true) !== false &&
-          !entry.toolUnsupported
+          strictToolsRequired &&
+          (useTextualTools ||
+            (Array.isArray(roundOptions.tools) && roundOptions.tools.length > 0 && roundOptions.toolChoice !== 'none'))
         const result = await streamRound(entry, conversationId, [...base.messages, ...roundMessages], roundOptions)
         if (entry.cancelled) throw abortError()
         const roundThinkingMs = Date.now() - roundStartedAt
@@ -647,8 +754,11 @@ export function apply(ctx) {
               roundMessages.push({
                 role: 'user',
                 content:
-                  `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。` +
-                  '请立刻调用 chat_send 工具发送你想说的内容；需要结束本轮时 end=true。不要只输出思考过程。',
+                  `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。\n` +
+                  '当前是严格工具聊天模式，用户不会看到你的普通 assistant 正文，只有工具调用会被执行。\n' +
+                  '必须调用回复工具：日常回复用 chat_send（messages 数组，结束本轮 end=true）；长文本 / 资料 / 大段代码用 send_document。\n' +
+                  '不要只输出思考 / 解释 / 计划，也不要直接输出 assistant 正文。\n' +
+                  '如果接口不支持原生 function calling，chat_send 请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
               })
               ctx.logger.warn(`[chat-flow] 第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
               continue
@@ -669,46 +779,79 @@ export function apply(ctx) {
             ended = true
             break
           }
-          const strict = toolsEnabled() && config.get('chat.requireToolCall', true) !== false && !entry.toolUnsupported && options.toolChoice !== 'none'
+          const strict = strictToolsRequired
           if (strict && toolRetries < toolRetryLimit) {
-            // 严格模式：模型直接输出正文时不展示，但也不要用“普通状态”再问一遍。
-            // 必须把“上一轮正文已被驳回、原因是没调工具”这条信息回传给模型，
-            // 让它在明确的驳回上下文里重试；否则模型容易把纠正当成新用户话题，
-            // 连续两次都继续直出正文。
+            // 严格模式：模型直接输出正文时不展示。纠正提示必须把“上一轮正文已被驳回、
+            // 原因是没调工具”讲清楚，并告诉它本轮只剩回复工具，只能给出 tool_calls。
             toolRetries += 1
             if (entry.draftId) removeDraft(entry, conversationId)
             const rejectedText = String(result.text || '').trim().slice(0, 1200)
             const rejectedAt = new Date().toLocaleTimeString()
+            const textualOnly = entry.toolUnsupported === true || useTextualTools
+            const replyInstruction = textualOnly
+              ? '原生工具协议不可用；本轮只允许使用文本工具调用格式，不要输出任何面向用户的 assistant 正文。\n' +
+                '只输出这一种格式（可调用多次）：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>\n' +
+                '长文本 / 资料 / 大段代码请改用：<tool_call>{"name":"send_document","arguments":{"title":"标题","content":"完整正文"}}</tool_call>'
+              : '你只能调用 chat_send / send_document，不要输出任何解释、计划、心理活动或面向用户的 assistant 正文。\n' +
+                '日常回复必须调用 chat_send（参数 {"messages":["要发送的内容"],"end":true}）；\n' +
+                '长文本 / 资料 / 大段代码 / 文章必须调用 send_document（title + content，或 summary）。'
             roundMessages.push({
               role: 'user',
               content:
                 `[系统纠正 ${toolRetries}/${toolRetryLimit}] 系统消息：你上一轮的回复已被驳回，尚未发送给用户。\n` +
                 `驳回时间：${rejectedAt}\n` +
-                '驳回原因：当前是严格工具模式，只有工具调用（tool_calls）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
+                '驳回原因：当前是严格工具模式，只有真正的工具调用（tool_calls / 文本工具协议）才会被投递给用户；你上一轮没有调用任何工具，只输出了普通 assistant 正文，因此无效。\n' +
+                '请注意：无论是一句话还是长文本，你都必须调用回复工具；直接输出 assistant 正文永远会被驳回，也不会出现在聊天记录里。\n' +
                 '被驳回的正文（仅用于让你知道上一轮生成了什么；不要把它当成本轮最终回复，也不要原样直接返回）：\n' +
                 `--- 被驳回正文开始 ---\n${rejectedText || '（空）'}\n--- 被驳回正文结束 ---\n` +
-                '请重新处理本轮用户请求：必须调用工具，优先调用 chat_send，把要发送给用户的内容放进 messages 数组，并在结束本轮时设置 end=true。\n' +
-                '不要输出解释、计划、心理活动或任何面向用户的 assistant 正文；工具调用的参数请一次给全。',
+                '这是强制工具回合：本轮工具列表只保留回复工具（或只接受文本工具协议），不要再尝试解释原因。\n' +
+                replyInstruction,
             })
             ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
             continue
           }
           if (strict && toolRetries >= toolRetryLimit) {
-            // 纠错达到上限：不再终止本轮，也不让用户继续空等。直接把模型正文
-            // 作为最终回复发出；渠道基座会把它正常外发到 QQ / 微信等渠道。
+            // 纠错达到上限：模型仍未调用工具。正文兜底仍然保留，但不直接展示裸
+            // assistant 正文，而是复用 chat_send 的标准发送链（清理 / 去重 / 模拟输入 /
+            // 落库 / 渠道外发），确保用户不会因为模型不守协议而什么都收不到。
+            const fallbackText = String(result.text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
             if (entry.draftId) removeDraft(entry, conversationId)
-            ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已按普通正文继续（已纠正 ${toolRetries} 次）`)
-            ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文发送。')
-            entry.finalWire = {
-              role: 'assistant',
-              content: result.text,
-              ...(reasoning ? { reasoning_content: reasoning } : {}),
+            const fallbackOutput = await fallbackViaChatSend(entry, conversationId, fallbackText, reasoning, {
+              channelId,
+              roleId,
+              userId: who.userId,
+              userName: who.userName,
+              round,
+              sentContents,
+              delivery,
+              entry,
+            })
+            if (fallbackOutput?.ok) {
+              ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已通过 chat_send 发送链兜底（已纠正 ${toolRetries} 次）`)
+              ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文兜底发送。')
+              entry.finalWire = {
+                role: 'assistant',
+                content: fallbackText,
+                ...(reasoning ? { reasoning_content: reasoning } : {}),
+              }
+              ended = true
+              break
             }
-            await finalizeFallback(entry, conversationId, result.text, reasoning)
+            // chat_send 服务 / 权限异常时，退回 finalizeFallback，至少保证普通正文能发出。
+            ctx.logger.warn(`[chat-flow] 严格工具模式：chat_send 兜底失败，退回普通正文（${fallbackOutput?.error || '未知错误'}）`)
+            ctx.inject('toast')?.warn?.(`模型未按工具协议返回，兜底发送失败：${fallbackOutput?.error || '未知错误'}`)
+            if (fallbackText) {
+              entry.finalWire = {
+                role: 'assistant',
+                content: fallbackText,
+                ...(reasoning ? { reasoning_content: reasoning } : {}),
+              }
+              await finalizeFallback(entry, conversationId, fallbackText, reasoning)
+            }
             ended = true
             break
           }
-          // 普通正文：兼容为普通流式回复（文档路径之外的降级）
+          // 普通正文：兼容为普通流式回复（仅在用户关闭严格工具模式时才会走到这里）
           if (result.text) {
             entry.finalWire = {
               role: 'assistant',
@@ -832,10 +975,18 @@ export function apply(ctx) {
   /** 兼容路径：工具链路被禁用或服务缺失时，保持旧版“直接流式回复”行为 */
   async function runLegacy(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
-    entry.channelId = store?.channelForConversation?.(conversationId)?.channelId || null
+    try {
+      entry.channelId = store?.channelForConversation?.(conversationId)?.channelId || null
+    } catch (err) {
+      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+      entry.channelId = null
+    }
     entry.protocol = []
     entry.roundProtocol = []
     entry.finalWire = null
@@ -939,7 +1090,12 @@ export function apply(ctx) {
     if (!conversationId || (!text && !images.length)) return
     if (payload.confirmHandled) return // 敏感确认已消费这次输入，不进入正常聊天
     const conv = sessions.get(conversationId)
-    if (!conv) return
+    if (!conv) {
+      // 渠道侧依赖 chat:request-done 结束本轮等待；即使会话已不存在也要通知，
+      // 避免入站队列一直挂起到超时。
+      events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
+      return
+    }
 
     const roleId = roleOf(conv)
     const agent = toolsEnabled()

@@ -71,6 +71,14 @@ const CSS = `
   .record-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
   .record-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .record-path{flex:1;min-width:160px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .record-query{
+    width:220px;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--border);
+    background:rgba(255,255,255,.55);color:var(--text);font-size:12px;outline:none;box-sizing:border-box;
+  }
+  .record-query:focus{border-color:var(--accent)}
+  .record-query-clear{height:30px;padding:0 9px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text-3);font-size:11.5px;cursor:pointer}
+  .record-query-clear:hover{background:rgba(255,255,255,.7);color:var(--text)}
+  .record-page-info{font-size:11.5px;color:var(--text-4);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .record-dirty{font-size:11.5px;color:#c98a2b;background:rgba(201,138,43,.12);border:1px solid rgba(201,138,43,.32);border-radius:999px;padding:2px 9px}
   .record-btn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.55);color:var(--text);font-size:12px;cursor:pointer}
   .record-btn:hover{background:rgba(255,255,255,.85)}
@@ -90,10 +98,17 @@ const CSS = `
   .record-role.user{color:#3f8c6a}
   .record-role.assistant{color:var(--accent)}
   .record-card-content{margin-top:6px;font-size:12.5px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .record-card-hit{color:var(--accent);font-weight:600}
   .record-card-doc{padding:6px 8px;border-radius:8px;background:rgba(90,120,180,.08);border:1px dashed rgba(90,120,180,.3);font-size:12px}
   .record-card-tag{margin-left:auto;color:var(--text-4);font-size:10.5px}
   .record-card-del{flex:0 0 auto;width:24px;height:24px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
   .record-card-del:hover{background:rgba(198,91,91,.12);color:#c65b5b}
+  .record-load-more{
+    width:100%;height:34px;border-radius:10px;border:1px dashed var(--border);background:rgba(255,255,255,.45);
+    color:var(--text-3);font-size:12px;cursor:pointer;
+  }
+  .record-load-more:hover{border-color:var(--accent);color:var(--accent);background:rgba(255,255,255,.75)}
+  .record-list-end{padding:10px 0 4px;text-align:center;color:var(--text-4);font-size:11.5px}
   .record-source{flex:1;min-height:440px;resize:vertical;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:rgba(255,255,255,.62);color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.65;outline:none;white-space:pre;tab-size:2}
   .record-source:focus{border-color:var(--accent)}
   .record-source[hidden]{display:none}
@@ -131,7 +146,7 @@ export function apply(ctx) {
     render(container) {
       container.innerHTML = page(
         '聊天记录',
-        '图形化查看 / 编辑每个角色、每个渠道的聊天记录。所有修改先进入草稿，点「保存」才会应用；单条编辑支持「确认修改 / 取消」。',
+        '图形化查看 / 编辑每个角色、每个渠道的聊天记录；默认最新在前、每页 20 条，可点击「加载更多」查看更早记录，并支持按当前会话关键词搜索。所有修改先进入草稿，点「保存」才会应用。',
         `
         <div class="record-page">
           <aside class="record-list">
@@ -144,6 +159,8 @@ export function apply(ctx) {
           <section class="record-main">
             <div class="record-toolbar">
               <span class="record-path" data-record-path>未选择渠道</span>
+                <input class="record-query" data-record-query placeholder="搜索当前会话：内容 / 发送者 / message_id" autocomplete="off" spellcheck="false" />
+                <button class="record-btn record-query-clear" data-record-query-clear hidden>清除搜索</button>
               <span class="record-dirty" data-record-dirty hidden>有未保存修改</span>
               <button class="record-btn active" data-record-mode="cards">图形视图</button>
               <button class="record-btn" data-record-mode="json">JSON 源码</button>
@@ -153,6 +170,7 @@ export function apply(ctx) {
               <button class="record-btn primary" data-record-save>保存</button>
             </div>
             <div class="record-error" data-record-error></div>
+            <div class="record-page-info" data-record-page-info></div>
             <div class="record-cards" data-record-cards></div>
             <textarea class="record-source" data-record-source spellcheck="false" hidden placeholder="[]"></textarea>
           </section>
@@ -190,6 +208,9 @@ export function apply(ctx) {
       const dirtyEl = container.querySelector('[data-record-dirty]')
       const errorEl = container.querySelector('[data-record-error]')
       const cardsEl = container.querySelector('[data-record-cards]')
+      const queryEl = container.querySelector('[data-record-query]')
+      const queryClearBtn = container.querySelector('[data-record-query-clear]')
+      const pageInfoEl = container.querySelector('[data-record-page-info]')
       const sourceEl = container.querySelector('[data-record-source]')
       const maskEl = container.querySelector('[data-record-editor-mask]')
       const editorEl = container.querySelector('[data-record-editor]')
@@ -209,6 +230,9 @@ export function apply(ctx) {
       let editingIndex = -1
       let listKeyword = ''
       let listInitialized = false
+      const PAGE_SIZE = 20
+      let queryKeyword = ''
+      let visibleCount = PAGE_SIZE
       const expandedRoles = new Set()
 
       const setError = message => {
@@ -268,13 +292,66 @@ export function apply(ctx) {
         undoLastSaveBtn.hidden = !activeChannel || !lastSavedSnapshots.has(activeChannel)
       }
 
+      const displayEntries = () =>
+        draft
+          .map((message, index) => ({ message, index }))
+          .sort((a, b) => {
+            const sa = Number(a.message?.seq)
+            const sb = Number(b.message?.seq)
+            if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) return sb - sa
+            const ta = Date.parse(a.message?.timestamp || '') || Number(a.message?.createdAt) || 0
+            const tb = Date.parse(b.message?.timestamp || '') || Number(b.message?.createdAt) || 0
+            if (ta !== tb) return tb - ta
+            return a.index - b.index
+          })
+
+      const matchesQuery = message => {
+        const terms = String(queryKeyword || '')
+          .trim()
+          .toLowerCase()
+          .split(/\s+/)
+          .filter(Boolean)
+        if (!terms.length) return true
+        const haystack = [
+          message?.content,
+          message?.sender_name,
+          message?.sender_id,
+          message?.message_id,
+          message?.id,
+          message?.role,
+          message?.kind,
+          message?.timestamp,
+          message?.time,
+          message?.meta?.title,
+          message?.meta?.summary,
+        ]
+          .map(value => String(value ?? '').toLowerCase())
+          .join('\n')
+        return terms.every(term => haystack.includes(term))
+      }
+
       const renderCards = () => {
         if (!draft.length) {
+          pageInfoEl.textContent = ''
+          queryClearBtn.hidden = true
           cardsEl.innerHTML = '<div class="record-empty">这个渠道还没有消息，点「新增消息」开始</div>'
           return
         }
-        cardsEl.innerHTML = draft
-          .map((message, index) => {
+        const matchedEntries = displayEntries().filter(entry => matchesQuery(entry.message))
+        const total = draft.length
+        const matched = matchedEntries.length
+        const visibleEntries = matchedEntries.slice(0, Math.max(1, visibleCount))
+        const more = matched - visibleEntries.length
+        queryClearBtn.hidden = !queryKeyword.trim()
+        pageInfoEl.textContent = queryKeyword.trim()
+          ? `共 ${total} 条记录 · 搜索命中 ${matched} 条 · 当前显示最新 ${visibleEntries.length} 条`
+          : `共 ${total} 条记录 · 已按最新在前显示 ${visibleEntries.length} 条`
+        if (!matched) {
+          cardsEl.innerHTML = '<div class="record-empty">当前会话没有匹配的聊天记录，试试其它关键词。</div>'
+          return
+        }
+        cardsEl.innerHTML = visibleEntries
+          .map(({ message, index }, order) => {
             const content = message.kind === 'document'
               ? `<div class="record-card-doc">📄 ${escapeHtml(message.meta?.title || message.content || '资料')}${message.meta?.summary ? `<div>${escapeHtml(message.meta.summary)}</div>` : ''}</div>`
               : escapeHtml(String(message.content || ''))
@@ -282,6 +359,7 @@ export function apply(ctx) {
               <div class="record-card-top">
                 <span class="record-role ${escapeHtml(message.role || 'user')}">${escapeHtml(message.role || 'user')}</span>
                 <span>#${escapeHtml(String(message.seq ?? index + 1))}</span>
+                ${queryKeyword.trim() ? `<span class="record-card-hit">命中 ${order + 1}</span>` : ''}
                 <span>${escapeHtml(message.time || String(message.timestamp || '').slice(11, 16) || '')}</span>
                 <span>${escapeHtml(message.sender_name || '')}</span>
                 <span class="record-card-tag">${escapeHtml(message.message_id || message.id || '')}</span>
@@ -291,6 +369,16 @@ export function apply(ctx) {
             </div>`
           })
           .join('')
+        if (more > 0) {
+          cardsEl.innerHTML +=
+            `<button class="record-load-more" data-record-load-more type="button">往下滑到底，点击加载更早的 ${Math.min(PAGE_SIZE, more)} 条（还有 ${more} 条）</button>`
+          cardsEl.querySelector('[data-record-load-more]')?.addEventListener('click', () => {
+            visibleCount += PAGE_SIZE
+            renderCards()
+          })
+        } else {
+          cardsEl.innerHTML += `<div class="record-list-end">已显示全部 ${matched} 条记录</div>`
+        }
         for (const card of cardsEl.querySelectorAll('[data-record-card]')) {
           card.addEventListener('click', () => openEditor(Number(card.dataset.recordCard)))
           card.querySelector('[data-record-delete]')?.addEventListener('click', event => {
@@ -388,6 +476,9 @@ export function apply(ctx) {
         activeChannel = channelId
         const record = store.channelRecord(channelId)
         draft = JSON.parse(JSON.stringify(store.messagesOf(channelId)))
+        queryKeyword = ''
+        if (queryEl) queryEl.value = ''
+        visibleCount = PAGE_SIZE
         pathEl.textContent = record ? labelOf(record) : channelId
         setError('')
         setDirty(false)
@@ -484,8 +575,15 @@ export function apply(ctx) {
           if (id && draft.some((item, i) => i !== editingIndex && (item.message_id || item.id) === id)) {
             throw new Error(`message_id 重复：${id}`)
           }
-          if (editingIndex >= 0) draft[editingIndex] = message
-          else draft.push(message)
+          if (editingIndex >= 0) {
+            draft[editingIndex] = message
+            visibleCount = Math.max(PAGE_SIZE, visibleCount)
+          } else {
+            draft.push(message)
+            queryKeyword = ''
+            if (queryEl) queryEl.value = ''
+            visibleCount = PAGE_SIZE
+          }
           setDirty(true)
           setError('')
           updateJsonSource()
@@ -533,6 +631,7 @@ export function apply(ctx) {
           if (!confirmed?.ok) return
         }
         draft = JSON.parse(JSON.stringify(lastSavedSnapshots.get(activeChannel)))
+        visibleCount = PAGE_SIZE
         setDirty(true)
         setError('')
         updateJsonSource()
@@ -544,6 +643,7 @@ export function apply(ctx) {
       const reloadDraft = () => {
         if (!activeChannel) return
         draft = JSON.parse(JSON.stringify(store.messagesOf(activeChannel)))
+        visibleCount = PAGE_SIZE
         setDirty(false)
         setError('')
         updateJsonSource()
@@ -565,6 +665,17 @@ export function apply(ctx) {
       listSearchEl?.addEventListener('input', () => {
         listKeyword = listSearchEl.value || ''
         renderList()
+      })
+      queryEl?.addEventListener('input', () => {
+        queryKeyword = queryEl.value || ''
+        visibleCount = PAGE_SIZE
+        renderCards()
+      })
+      queryClearBtn?.addEventListener('click', () => {
+        queryKeyword = ''
+        if (queryEl) queryEl.value = ''
+        visibleCount = PAGE_SIZE
+        renderCards()
       })
       sourceEl.addEventListener('input', () => {
         try {

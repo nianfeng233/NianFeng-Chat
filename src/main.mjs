@@ -43,6 +43,36 @@ function pluginApiBase() {
 }
 
 /**
+ * 服务端代聊 Worker 运行在 Node 中，默认 ESM loader 不支持 import('http(s)://...')，
+ * 外部插件如果继续用 /user-plugins 的 HTTP 地址会在代聊里加载失败（浏览器 WebUI 不受影响）。
+ * 代聊与后端同机，这里从后端拿到外部插件目录，把外部插件路径改写成本地 file:// URL。
+ */
+async function mapAgentExternalEntries(entries, dirsPath, href) {
+  try {
+    const res = await fetch(new URL(dirsPath, href).href, { cache: 'no-store' })
+    if (!res.ok) return entries
+    const dirs = await res.json()
+    const externalDir = String(dirs?.externalDir || '').trim()
+    if (!externalDir) return entries
+    const [{ join }, { pathToFileURL }] = await Promise.all([import('node:path'), import('node:url')])
+    return entries.map(entry => {
+      if (!entry?.external) return entry
+      const folder = String(entry.dir || entry.id || '').trim()
+      if (!folder) return entry
+      try {
+        return { ...entry, path: pathToFileURL(join(externalDir, folder, 'index.mjs')).href }
+      } catch (_) {
+        return entry
+      }
+    })
+  } catch (err) {
+    console.warn(`[agent] 外部插件目录解析失败，外部插件在代聊中不可用：${err?.message || err}`)
+    return entries
+  }
+}
+
+
+/**
  * 插件清单优先从后端取（内置 + 外部插件目录合并）。
  * 如果后端没起来或能力较旧，回退到打包时生成的 registry.mjs，
  * 保证纯静态/离线场景仍能启动。
@@ -57,7 +87,7 @@ async function loadPluginEntries() {
     if (!res.ok) return builtinPluginEntries
     const data = await res.json()
     if (!Array.isArray(data?.plugins) || !data.plugins.length) return builtinPluginEntries
-    return data.plugins
+    const entries = data.plugins
       .filter(entry => entry && entry.path)
       .map(entry => {
         // 外部插件路径是 /user-plugins/...；按「页面同源」转成绝对 URL。
@@ -73,6 +103,11 @@ async function loadPluginEntries() {
         }
         return entry
       })
+      // 服务端代聊是 Node 环境，不认 http(s) 模块；外部插件改成同机 file:// 路径加载。
+      if (globalThis.__NIANFENG_SERVER_AGENT__ === true) {
+        return mapAgentExternalEntries(entries, `${base}/plugins/dirs`, href)
+      }
+      return entries
   } catch (_) {
     return builtinPluginEntries
   }

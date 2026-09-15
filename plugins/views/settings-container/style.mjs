@@ -11,6 +11,13 @@ export const SETTINGS_CONTAINER_CSS = `
   .settings-nav-search input::placeholder{color:var(--text-4);}
   .settings-nav-group[hidden]{display:none;}
   .settings-nav-item[hidden]{display:none;}
+  .settings-nav-result{display:flex;align-items:center;gap:0;}
+  .settings-nav-result .nav-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .settings-result-hint{flex:0 0 auto;max-width:96px;margin-left:6px;font-size:10px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .settings-nav-empty{padding:10px 9px;font-size:11.5px;line-height:1.5;color:var(--text-4);}
+  .setting-row.settings-search-hit{animation:settingsSearchHit 2.4s ease-out;background:rgba(117,185,87,.12);}
+  @keyframes settingsSearchHit{0%{background:rgba(117,185,87,.28)}60%{background:rgba(117,185,87,.14)}100%{background:transparent}}
+
   .settings-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px}
   .settings-title{font-size:20px;line-height:1.3;font-weight:650;letter-spacing:.1px;color:var(--text)}
   .settings-desc{margin-top:6px;font-size:12.5px;line-height:1.55;color:var(--text-3)}

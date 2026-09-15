@@ -16,6 +16,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
+import { fetchWithNetworkRetry, networkErrorText } from '../request-utils.mjs'
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from 'node:crypto'
 
 export const name = 'wechat-clawbot-bridge'
@@ -200,7 +201,7 @@ async function downloadWxImage(imageItem) {
       : '')
   const key = parseWxAesKey(imageItem.aeskey || media.aes_key)
   if (!fullUrl || !key) return null
-  const response = await fetch(fullUrl, { signal: AbortSignal.timeout(25000) })
+  const response = await fetchWithNetworkRetry(fullUrl, { signal: AbortSignal.timeout(25000) })
   if (!response.ok) return null
   const encrypted = Buffer.from(await response.arrayBuffer())
   if (!encrypted.length || encrypted.length > 3 * 1024 * 1024) return null
@@ -212,7 +213,7 @@ async function downloadWxImage(imageItem) {
 }
 
 /** 给一条入站消息补上图片 data URL；单条最多 4 张、总量 3MB，失败的静默跳过。 */
-async function hydrateIncomingImages(message, dataDir) {
+async function hydrateIncomingImages(message, dataDir, keep = undefined) {
   const items = Array.isArray(message?._imageItems) ? message._imageItems.slice(0, 4) : []
   delete message?._imageItems
   if (!items.length) return message
@@ -224,7 +225,7 @@ async function hydrateIncomingImages(message, dataDir) {
       if (!image) continue
       if (totalBytes + (image.size || 0) > 3 * 1024 * 1024) break
       totalBytes += image.size || 0
-      const record = await saveImageBuffer(dataDir, image.buffer, { mime: image.mime })
+      const record = await saveImageBuffer(dataDir, image.buffer, { mime: image.mime }, { keep: keep || undefined })
       images.push({ id: record.id, mime: record.mime, width: record.width, height: record.height, size: record.size })
     } catch (_) {
       /* 单张失败不影响消息本身 */
@@ -237,6 +238,7 @@ async function hydrateIncomingImages(message, dataDir) {
 export function apply(ctx) {
   // 后端是真实 cordis：inject 声明会先把服务放到 ctx 上，这里直接读取。
   const settings = ctx.settings
+  const imageKeep = () => Number(settings.get?.()?.preferences?.chat?.imageStoreLimit) || undefined
   const hub = ctx.hub
   const sessions = new Map()
   let state = { version: 1, accounts: {} }
@@ -288,7 +290,7 @@ export function apply(ctx) {
     if (closed && !force) return
     try {
       await mkdir(settings.dataDir, { recursive: true })
-      const tmp = `${statePath()}.${process.pid}.tmp`
+      const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
       await writeFile(tmp, JSON.stringify(state, null, 2), 'utf8')
       await rename(tmp, statePath())
       try {
@@ -404,7 +406,7 @@ export function apply(ctx) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), Math.max(1000, Number(timeoutMs) || 20000))
     try {
-      const response = await fetch(`${base}${path}`, {
+      const response = await fetchWithNetworkRetry(`${base}${path}`, {
         method,
         headers: token ? authHeaders(token) : jsonHeaders(),
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -420,7 +422,7 @@ export function apply(ctx) {
       if (!response.ok) data._httpStatus = response.status
       return data
     } catch (err) {
-      return { _error: err?.name === 'AbortError' ? '请求超时' : err?.message || String(err) }
+      return { _error: err?.name === 'AbortError' ? '请求超时' : networkErrorText(err) }
     } finally {
       clearTimeout(timer)
     }
@@ -504,7 +506,7 @@ export function apply(ctx) {
         }
         for (const raw of extractMessages(response)) {
           if (isOwnMessage(raw)) continue
-          const message = await hydrateIncomingImages(normalizeIncoming(raw), settings.dataDir)
+          const message = await hydrateIncomingImages(normalizeIncoming(raw), settings.dataDir, imageKeep())
           if (!message) continue
           if (message.contextToken) {
             session.contextTokens[message.fromUserId] = message.contextToken
@@ -861,7 +863,7 @@ export function apply(ctx) {
           const match = /^data:[^;,]+;base64,([\s\S]+)$/.exec(source)
           if (match) bytes = Buffer.from(match[1].replace(/\s+/g, ''), 'base64')
         } else if (/^https?:/i.test(source)) {
-          const response = await fetch(source, { signal: AbortSignal.timeout(30000) })
+          const response = await fetchWithNetworkRetry(source, { signal: AbortSignal.timeout(30000) })
           if (!response.ok) throw Object.assign(new Error(`下载图片失败：HTTP ${response.status}`), { status: 502 })
           bytes = Buffer.from(await response.arrayBuffer())
         } else {
@@ -908,7 +910,7 @@ export function apply(ctx) {
       const cipher = createCipheriv('aes-128-ecb', aeskey, null)
       cipher.setAutoPadding(false)
       const ciphertext = Buffer.concat([cipher.update(padded), cipher.final()])
-      const cdnResponse = await fetch(uploadUrl, {
+      const cdnResponse = await fetchWithNetworkRetry(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: ciphertext,

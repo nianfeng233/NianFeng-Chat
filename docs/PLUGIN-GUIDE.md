@@ -161,6 +161,9 @@ export function dispose(ctx) {}
 ### 4.2 后端桥与件件设置面板
 
 后端渠道桥放在 `plugins/channels/<name>/bridge.mjs`，会被后端启动器自动扫描加载；
+外部插件目录里的 `bridge.mjs` 还会在「安装 / 删除 / 重新扫描 / 切换插件目录」时热加载
+（dispose 旧 fiber 后重新加载，无需重启后端）；服务端代聊 Worker 也会同时重启，
+让 QQ / NapCat 等渠道立即拿到新插件的前端工具。内置渠道桥仍在启动阶段加载一次。
 通过 `httpApi` 注册自己的接口，不需要修改本体：
 
 ```js
