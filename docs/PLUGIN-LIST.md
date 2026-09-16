@@ -45,7 +45,7 @@
 | `backend-client` | L1 | ✅ | WebUI ↔ 本地后端的唯一通道（REST / SSE / 健康检查） |
 | `wechat-clawbot` | L2.5 | ✅ | 微信 Clawbot 渠道：扫码接入、角色/分类/权限、typing 与聊天记录 |
 | `qqbot` | L2.5 | ✅ | QQ 官方机器人渠道：扫码/凭据接入、本地沙箱免白名单、user_openid 自动绑定、WebSocket/Webhook、仅私聊与被动回复 |
-| `napcat` | L2.5 | ✅ | NapCatQQ / OneBot 11 渠道：私聊 / 群聊 / 隐私、多 QQ 连接复用、群聊规则与静默 20 轮上下文 |
+| `napcat` | L2.5 | ✅ | NapCatQQ / OneBot 11 渠道：私聊 / 群聊 / 隐私、多 QQ 连接复用、群聊规则与静默 20 条消息上下文 |
 | `image-service` | L2 | ✅ | 图片文件存储：消息只存 imageId，/api/images 读写、压缩与裁剪 |
 | `model-adapter-backend` | L5 | ✅ | 把后端提供商注册为前端模型（真实流式对话；OpenAI/DeepSeek/Claude/Gemini/Ollama 由后端适配器转换） |
 | `session-service` | L2 | ✅ | 会话 + 后端持久化 + 离线降级 + 迁移 |

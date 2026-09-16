@@ -110,6 +110,11 @@ const DEFAULTS = {
   // 时间戳分隔线：连续聊天时最多每 30 分钟补一条；消息间隔超过 10 分钟则重新插入
   'chat.dividerGapMs': 10 * 60 * 1000,
   'chat.dividerIntervalMs': 30 * 60 * 1000,
+  // 大历史消息区窗口化（只限制 DOM 行数，不裁剪 conv.messages 数据）：
+  // 首屏最近 N 条、向上/向下滚动每次补 N 条、DOM 最多保留 N 行。
+  'chat.messageWindowInitial': 80,
+  'chat.messageWindowStep': 80,
+  'chat.messageWindowMax': 300,
   // 聊天链路（文档：工具调用 / 记忆 / 权限 / 确认）
   'chat.toolsEnabled': true,
   'chat.toolChoice': 'required',
@@ -118,6 +123,9 @@ const DEFAULTS = {
   'chat.maxOutputTokens': 8192,
   'chat.memoryRounds': 5,
   'chat.channelRounds': 5,
+  // NapCat 群聊默认保留的最近消息“条数”；渠道里的 groupRules.contextMessages > 0 时单独覆盖。
+  // 群聊不适合按“轮”推算，统一按逐条消息数量控制。
+  'chat.groupMessages': 20,
   'chat.readTokens': 1500,
   // 图片策略：自动上下文最多带几张、单条消息最多带几张、每张图按固定 token 估算
   'chat.imagesPerRequest': 2,
@@ -180,6 +188,17 @@ export function apply(ctx) {
   let data = storage.get(NS, KEY, null)
   if (!data || typeof data !== 'object') data = {}
   let dirty = false
+  // 旧版群聊上下文按“轮”保存为 chat.groupRounds；新语义改为按消息“条”数。
+  // 迁移一次旧值，避免自定义设置丢失。
+  if (!hasPath(data, 'chat.groupMessages') && hasPath(data, 'chat.groupRounds')) {
+    const legacyRounds = Number(getPath(data, 'chat.groupRounds'))
+    setPath(data, 'chat.groupMessages', Number.isFinite(legacyRounds) ? Math.max(1, Math.min(1000, Math.floor(legacyRounds))) : 20)
+    dirty = true
+  }
+  if (hasPath(data, 'chat.groupRounds')) {
+    removePath(data, 'chat.groupRounds')
+    dirty = true
+  }
   for (const [key, value] of Object.entries(DEFAULTS)) {
     if (!hasPath(data, key)) {
       setPath(data, key, value)
@@ -354,6 +373,14 @@ export function apply(ctx) {
     },
     /** 应用一次远端共享偏好；主要由 SSE settings/updated 与后端重连拉取调用。 */
     applyRemote: (preferences, remoteMeta, source = 'remote') => applyRemotePreferences(preferences, remoteMeta, source),
+    /** 立即把当前偏好写入后端，绕过 schedulePush 的防抖；用于插件启停后同步状态。 */
+    async flush() {
+      if (syncTimer) {
+        ctx.clearTimeout(syncTimer)
+        syncTimer = null
+      }
+      return pushPreferences()
+    },
     meta: () => structuredClone(meta),
     has(key) {
       return hasPath(data, key)

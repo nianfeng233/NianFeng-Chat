@@ -90,10 +90,30 @@ async function loadChannelBridges(roots, ctx, loaded = new Set()) {
 function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
   const handles = new Map()
 
+  const disabledExternalIds = () => {
+    const prefs = ctx.settings?.get?.()?.preferences?.plugins || {}
+    const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : [])
+    return new Set([...list(prefs.disabled), ...list(prefs.removed)])
+  }
+
+  /** 外部插件约定：<插件目录>/<插件 id>/bridge.mjs */
+  const pluginFolderOf = (dir, file) => {
+    const root = String(dir || '').replace(/[\\/]+$/, '')
+    const full = String(file || '')
+    if (!root || !full.startsWith(root)) return ''
+    return full.slice(root.length).replace(/^[\\/]+/, '').split(/[\\/]/)[0] || ''
+  }
+
   const load = async dir => {
     const files = (await collectBridgeFiles(dir)).sort()
+    const disabled = disabledExternalIds()
     for (const file of files) {
       if (exclude.has(file) || handles.has(file)) continue
+      const folder = pluginFolderOf(dir, file)
+      if (folder && disabled.has(folder)) {
+        console.info(`[channel-bridge] 跳过已卸载/已禁用的外部桥：${file}`)
+        continue
+      }
       try {
         const loaded = await loadBridgeFile(ctx, file)
         if (loaded?.fiber) {

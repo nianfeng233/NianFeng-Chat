@@ -80,6 +80,69 @@ export function apply(ctx) {
   const escapeText = value =>
     String(value ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m])
 
+  /**
+   * 共享偏好（plugins.disabled / removed / enabled）变化时，把当前运行时的
+   * 插件实际状态对齐。这样另一台设备 / 手机点卸载后，本页和代聊 Worker
+   * 都能在不需要刷新页面的情况下停掉对应插件。
+   */
+  const reconcilePluginRuntime = async reason => {
+    const disabled = new Set(config.get('plugins.disabled', []) || [])
+    const removed = new Set(config.get('plugins.removed', []) || [])
+    const enabled = new Set(config.get('plugins.enabled', []) || [])
+    const changed = []
+    for (const record of loader.list()) {
+      const id = record?.id
+      if (!id || record.manifest?.core) continue
+      if (record.manifest) record.manifest.removed = removed.has(id)
+      const defaultOff = record.manifest?.enabled === false && !enabled.has(id)
+      const shouldStop = removed.has(id) || disabled.has(id) || defaultOff
+      if (shouldStop) {
+        if (record.status !== 'disabled') {
+          await loader.disable(id)
+          changed.push(`停用 ${id}`)
+          events.emit('plugin:disabled', { id, reason })
+        }
+      } else if (record.status === 'disabled') {
+        const ok = await loader.enable(id)
+        if (ok) {
+          changed.push(`启用 ${id}`)
+          events.emit('plugin:enabled', { id, reason })
+        }
+      }
+    }
+    if (changed.length) ctx.logger.info(`[plugin-manager] 已按共享偏好热更新插件：${changed.join('、')}（${reason}）`)
+    return changed
+  }
+
+  let reconcileTimer = null
+  let reconcileChain = Promise.resolve()
+  const scheduleReconcile = reason => {
+    if (reconcileTimer) ctx.clearTimeout(reconcileTimer)
+    reconcileTimer = ctx.setTimeout(() => {
+      reconcileTimer = null
+      reconcileChain = reconcileChain
+        .then(() => reconcilePluginRuntime(reason))
+        .catch(err => ctx.logger.warn(`[plugin-manager] 同步插件状态失败：${err?.message || err}`))
+    }, 40)
+  }
+
+  let runtimeSyncTimer = null
+  /**
+   * 本页改了启停 / 卸载状态后：先把 preferences 立即写回后端，再触发
+   * 插件目录重扫。重扫会重启服务端代聊 Worker，并让其按最新偏好加载，
+   * 避免“插件已卸载、QQ 代聊还在调用旧工具”的残留。
+   */
+  const scheduleRuntimePluginSync = () => {
+    if (runtimeSyncTimer) ctx.clearTimeout(runtimeSyncTimer)
+    runtimeSyncTimer = ctx.setTimeout(() => {
+      runtimeSyncTimer = null
+      Promise.resolve()
+        .then(() => config.flush?.())
+        .then(() => ctx.registry.get('api')?.rescanPlugins?.())
+        .catch(err => ctx.logger.debug(`[plugin-manager] 通知运行时刷新插件失败：${err?.message || err}`))
+    }, 450)
+  }
+
   const service = {
     name: 'plugin-manager',
 
@@ -222,6 +285,7 @@ export function apply(ctx) {
         config.set('plugins.enabled', [...enabled])
         toast.success(`已启用插件「${record.manifest.displayName}」`)
         events.emit('plugin:enabled', { id })
+        scheduleRuntimePluginSync()
       } else {
         toast.error(`插件「${record.manifest.displayName}」启用失败：${record.reason || '依赖未满足'}`)
       }
@@ -243,6 +307,7 @@ export function apply(ctx) {
       config.set('plugins.enabled', [...enabled])
       toast.info(`已禁用插件「${record.manifest.displayName}」`)
       events.emit('plugin:disabled', { id })
+      scheduleRuntimePluginSync()
       return true
     },
 
@@ -272,6 +337,7 @@ export function apply(ctx) {
       config.set('plugins.disabled', [...disabled])
       toast.warn(`已卸载「${record.manifest.displayName}」`)
       events.emit('plugin:uninstalled', { id })
+      scheduleRuntimePluginSync()
       return true
     },
 
@@ -280,7 +346,9 @@ export function apply(ctx) {
       const removed = new Set(config.get('plugins.removed', []))
       removed.delete(id)
       config.set('plugins.removed', [...removed])
-      return service.enable(id)
+      const ok = await service.enable(id)
+      scheduleRuntimePluginSync()
+      return ok
     },
 
     /** 安装插件：插件市场是 M5，这里预留入口 */
@@ -312,6 +380,15 @@ export function apply(ctx) {
       }
     },
   }
+
+  // 另一台设备 / 手机改动共享偏好后，SSE 会同步到这里；无需刷新页面，
+  // 插件管理器和所有依赖它的注册项会一起热更新。
+  ctx.effect(
+    ctx.on('config:changed', payload => {
+      const key = String(payload?.key || '')
+      if (key === '*' || key.startsWith('plugins.')) scheduleReconcile(`config:${key}`)
+    }),
+  )
 
   ctx.provide('plugin-manager', service, { type: 'singleton' })
   ctx.logger.debug('插件管理器就绪')

@@ -39,7 +39,7 @@ export function apply(ctx) {
   const config = ctx.inject('config')
   useStyle(ctx, BUBBLE_DEFAULT_CSS)
 
-  const renderRow = (message, conversation) => {
+  const renderRow = (message, conversation, view = {}) => {
     const isMe = message.role === 'user'
     // 头像统一走 identity：用户头像默认念风 logo 并可随 ui.avatarImage 更换；
     // 角色头像统一为自定义图片或“名字首字 + 调色板”色块。
@@ -94,11 +94,10 @@ export function apply(ctx) {
     const error = message.error ? `<div class="bubble-error">发送失败：${escapeHtml(message.error)}</div>` : ''
 
     // 调用详情只在“一轮调用的最末尾那条消息”结尾展示，悬停时出现。
-    const conversational = (conversation.messages || []).filter(item => item.kind !== 'divider' && item.role !== 'system')
-    const index = conversational.findIndex(item => item.id === message.id)
-    const nextUserIndex = index >= 0 ? conversational.findIndex((item, i) => i > index && item.role === 'user') : -1
-    const roundEndIndex = (nextUserIndex < 0 ? conversational.length : nextUserIndex) - 1
-    const stats = index >= 0 && index === roundEndIndex ? callStatsHtml(message) : ''
+    // message-list 会预算好 round-end 集合并通过 view 传入，避免大量消息时每条都重扫整段历史。
+    const isRoundEnd =
+      typeof view.isRoundEnd === 'function' ? view.isRoundEnd(message) : isRoundEndByScan(conversation, message)
+    const stats = isRoundEnd ? callStatsHtml(message) : ''
 
     return `
       <div class="msg-row ${isMe ? 'right' : ''}" data-message-id="${message.id}">
@@ -124,6 +123,19 @@ export function apply(ctx) {
   ctx.effect(unregister)
 
   ctx.emit('bubble-style:ready', { id: 'bubble-default' })
+}
+
+/**
+ * 兼容第三方 / 旧调用方：没传 view.isRoundEnd 时按原来的 O(n) 逻辑兜底。
+ * message-list 正常渲染时始终会传入预算好的 round-end 集合。
+ */
+function isRoundEndByScan(conversation, message) {
+  const conversational = (conversation?.messages || []).filter(item => item.kind !== 'divider' && item.role !== 'system')
+  const index = conversational.findIndex(item => item.id === message.id)
+  if (index < 0) return false
+  const nextUserIndex = conversational.findIndex((item, i) => i > index && item.role === 'user')
+  const roundEndIndex = (nextUserIndex < 0 ? conversational.length : nextUserIndex) - 1
+  return index === roundEndIndex
 }
 
 /** 本次模型调用的用量信息，渲染在气泡下方、按钮右侧 */

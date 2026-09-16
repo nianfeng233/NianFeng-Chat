@@ -10,6 +10,8 @@
  *   - chat-flow 每轮把 registry.definitions() 交给模型，收到 tool_calls 后交给 execute()
  *   - 工具实现与聊天主链路完全解耦，新增工具只加一个插件
  */
+import { sanitizeToolSchema } from '../../../src/util/tool-schema.mjs'
+
 export const name = 'tool-registry'
 export const version = '1.0.0'
 export const displayName = '工具注册表'
@@ -40,7 +42,7 @@ export function apply(ctx) {
       function: {
         name: fnName,
         description: raw.description || '',
-        parameters: raw.parameters || { type: 'object', properties: {} },
+        parameters: sanitizeToolSchema(raw.parameters || { type: 'object', properties: {} }, { root: true }),
       },
     }
   }

@@ -219,8 +219,24 @@ export function apply(ctx, config = {}) {
     externalCount: value.externalCount,
   })
 
+  /**
+   * 前端插件启停状态由共享 preferences 保存；随插件清单一起返回，
+   * 浏览器 / 服务端代聊 Worker 在 boot 阶段就能按同一份状态加载，
+   * 不会再出现“页面里卸载了，代聊 Worker 还加载着旧插件”的情况。
+   */
+  const pluginPreferences = () => {
+    const prefs = settings.get()?.preferences?.plugins || {}
+    const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : [])
+    return {
+      disabled: list(prefs.disabled),
+      removed: list(prefs.removed),
+      enabled: list(prefs.enabled),
+    }
+  }
+
   const publicSnapshot = value => ({
     plugins: value.plugins,
+    ...pluginPreferences(),
     ...publicDirs(value),
   })
 

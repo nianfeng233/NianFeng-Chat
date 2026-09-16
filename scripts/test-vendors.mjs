@@ -245,6 +245,36 @@ const TOOLS = [
   },
 ]
 
+/** 模拟旧插件里 Gemini 不支持的联合类型 / additionalProperties schema。 */
+const SCHEMA_TOOLS = [
+  ...TOOLS,
+  {
+    type: 'function',
+    function: {
+      name: 'legacy_schema_test',
+      description: '工具 schema 兼容性测试',
+      parameters: {
+        type: 'object',
+        properties: {
+          config: { type: ['object', 'string'], additionalProperties: true },
+          fields: { type: ['string', 'array'], items: { type: 'string' } },
+          targets: { type: 'array', items: { type: ['string', 'object'], properties: { qq: { type: 'string' } } } },
+        },
+        required: ['config'],
+      },
+    },
+  },
+]
+
+function schemaHasUnsupportedFields(schema) {
+  if (Array.isArray(schema)) return true
+  if (!schema || typeof schema !== 'object') return false
+  if (Array.isArray(schema.type)) return true
+  if (Object.prototype.hasOwnProperty.call(schema, 'additionalProperties')) return true
+  if (schema.type === 'array' && !schema.items) return true
+  return Object.values(schema.properties || {}).some(schemaHasUnsupportedFields)
+}
+
 async function main() {
   console.log('\n① 启动厂商 Mock + 念风后端')
   const vendor = await startVendorServer()
@@ -380,9 +410,17 @@ async function main() {
     { role: 'tool', tool_call_id: 'gemini_prev', name: 'chat_send', content: '{"ok":true,"message_ids":["m_1"]}' },
     { role: 'user', content: '继续' },
   ]
-  const geminiCall = await chat(base, 'gemini', 'gemini-flash', { messages: geminiMessages, tools: TOOLS, toolChoice: 'required', temperature: 0.5 })
+  const geminiCall = await chat(base, 'gemini', 'gemini-flash', { messages: geminiMessages, tools: SCHEMA_TOOLS, toolChoice: 'required', temperature: 0.5 })
   const geminiBody = vendor.captured.gemini.at(-1)
   check('Gemini 请求使用 functionDeclarations', geminiBody?.tools?.[0]?.functionDeclarations?.[0]?.name === 'chat_send', JSON.stringify(geminiBody?.tools))
+  const legacyDeclaration = (geminiBody?.tools?.[0]?.functionDeclarations || []).find(item => item.name === 'legacy_schema_test')
+  check(
+    'Gemini functionDeclarations 会收敛联合类型 / additionalProperties / 缺 items 数组',
+    !!legacyDeclaration &&
+      legacyDeclaration.parameters?.type === 'object' &&
+      !schemaHasUnsupportedFields(legacyDeclaration.parameters),
+    JSON.stringify(legacyDeclaration?.parameters),
+  )
   check('Gemini required -> toolConfig ANY', geminiBody?.toolConfig?.functionCallingConfig?.mode === 'ANY', JSON.stringify(geminiBody?.toolConfig))
   check('Gemini temperature -> generationConfig', geminiBody?.generationConfig?.temperature === 0.5)
   const modelParts = geminiBody?.contents?.find(item => item.role === 'model')?.parts || []

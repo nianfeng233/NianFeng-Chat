@@ -941,7 +941,7 @@ async function main() {
   config.set('chat.imageBytesPerRequest', 8 * 1024 * 1024)
   const convGroupImg = sessions.create({
     name: '群聊图片预算测试',
-    meta: { roleId: 'role-img-group', channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextRounds: 20 },
+    meta: { roleId: 'role-img-group', channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextMessages: 6 },
   })
   sessions.activate(convGroupImg.id)
   const channelGroupImg = store.channelForConversation(convGroupImg.id)
@@ -965,6 +965,59 @@ async function main() {
     JSON.stringify({ images: groupImageCount, placeholders: groupPlaceholderCount }),
   )
 
+
+  console.log('\n⑩h3 群聊上下文按消息条数裁剪')
+  {
+    const previousGroupMessages = config.get('chat.groupMessages', 20)
+    try {
+      const roleId = 'role-group-count'
+      const convGroupCount = sessions.create({
+        name: '群聊条数测试',
+        meta: { roleId, channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextMessages: 4 },
+      })
+      sessions.activate(convGroupCount.id)
+      const channelGroupCount = store.channelForConversation(convGroupCount.id)
+      for (let index = 1; index <= 8; index += 1) {
+        store.append(convGroupCount.id, { role: 'user', content: `群消息${index}`, source: 'napcat', sender_name: '群友' })
+      }
+      const builtGroupCount = builder.build({ conversationId: convGroupCount.id, roleId, persona: '', channelId: channelGroupCount.channelId })
+      const groupNumbers = [
+        ...new Set(
+          String(builtGroupCount.messages.filter(message => message.role === 'user').map(message => String(message.content)).join('\n')).match(/群消息(\d+)/g) || [],
+        ),
+      ]
+        .map(token => Number(String(token).replace(/\D/g, '')))
+        .sort((a, b) => a - b)
+      check(
+        '群聊按 contextMessages 只带最后 N 条消息',
+        JSON.stringify(groupNumbers) === JSON.stringify([5, 6, 7, 8]),
+        JSON.stringify(groupNumbers),
+      )
+
+      // 未配置 contextMessages 时继承通用页的 chat.groupMessages。
+      config.set('chat.groupMessages', 3)
+      const convGroupGlobal = sessions.create({
+        name: '群聊条数继承测试',
+        meta: { roleId, channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only' },
+      })
+      sessions.activate(convGroupGlobal.id)
+      const channelGroupGlobal = store.channelForConversation(convGroupGlobal.id)
+      for (let index = 1; index <= 5; index += 1) {
+        store.append(convGroupGlobal.id, { role: 'assistant', content: `全局消息${index}`, is_bot: true, source: 'napcat' })
+      }
+      const builtGroupGlobal = builder.build({ conversationId: convGroupGlobal.id, roleId, persona: '', channelId: channelGroupGlobal.channelId })
+      const globalContents = builtGroupGlobal.messages.filter(message => message.role === 'assistant').map(message => String(message.content))
+      check(
+        '群聊未单独配置时继承 chat.groupMessages',
+        globalContents.some(content => content.includes('全局消息3')) &&
+          globalContents.some(content => content.includes('全局消息5')) &&
+          !globalContents.some(content => content.includes('全局消息1')),
+        JSON.stringify(globalContents),
+      )
+    } finally {
+      config.set('chat.groupMessages', previousGroupMessages)
+    }
+  }
 
   console.log('\n⑩h2 入站 imageId 在无 FileReader 的代聊环境也要能进入模型上下文')
   const hydrationPng =
@@ -1431,6 +1484,115 @@ async function main() {
       check('重试仍为空后写入明确提示', !!notice, JSON.stringify(sessions.messages(emptyConv.id).map(message => message.content).slice(-3)))
     } finally {
       modelService.stream = originalStream
+    }
+  }
+
+  console.log('\n⑩k2 后端空回复错误会转入前端系统纠正')
+  {
+    const originalStream = modelService.stream
+    let emptyCalls = 0
+    config.set('chat.simulateTyping', false)
+    config.set('chat.emptyRetryLimit', 2)
+    modelService.stream = function () {
+      emptyCalls += 1
+      const callbacks = arguments[2] || {}
+      const error = new Error('模型返回了空回复（既没有正文也没有工具调用）；已自动重试 1 次，请更换模型或稍后重试')
+      error.code = 'EMPTY_RESPONSE'
+      callbacks.onError?.(error)
+      return { abort() {} }
+    }
+    try {
+      const emptyConv = sessions.create({ name: '后端空回复纠正测试', meta: { roleId: 'role-empty-backend' } })
+      sessions.activate(emptyConv.id)
+      messages.requestSend(emptyConv.id, '测试后端空回复')
+      const notice = await waitFor(
+        () => sessions.messages(emptyConv.id).find(message => message.role === 'assistant' && String(message.content || '').includes('连续返回空回复')),
+        { timeout: 6000 },
+      )
+      check('后端 EMPTY_RESPONSE 也会触发前端纠正', emptyCalls === 3, `模型调用 ${emptyCalls} 次`)
+      check('后端空回复纠正后仍为空才写入明确提示', !!notice)
+    } finally {
+      modelService.stream = originalStream
+    }
+  }
+
+  console.log('\n⑩l 工作记忆 + 渠道记忆叠加、去重且渠道优先')
+  {
+    const previousMemory = config.get('chat.memoryRounds', 5)
+    const previousChannel = config.get('chat.channelRounds', 5)
+    const questionNumbers = built =>
+      [...new Set(String(built.messages.filter(message => message.role === 'user').map(message => String(message.content)).join('\n')).match(/轮次问题(\d+)/g) || [])]
+        .map(token => Number(String(token).replace(/\D/g, '')))
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b)
+    try {
+      const roleId = `role-round-${Date.now()}`
+      const convRound = sessions.create({ name: '上下文轮数测试', meta: { roleId } })
+      const channelRound = store.channelForConversation(convRound.id)
+      for (let index = 1; index <= 10; index += 1) {
+        const userMessage = store.append(convRound.id, { role: 'user', content: `轮次问题${index}`, sender_id: 'u-round', sender_name: '用户' })
+        store.append(convRound.id, { role: 'assistant', content: `轮次回答${index}`, sender_name: '角色', is_bot: true })
+        // 当前这轮（第 10 轮）尚未写入协议轨迹，模拟真实 build 发生在模型响应之前。
+        if (index <= 9) {
+          const userWire = builder.toModelMessage(userMessage, { roleId, channelId: channelRound.channelId })
+          store.appendTranscript(channelRound.channelId, [userWire, { role: 'assistant', content: `轮次回答${index}` }])
+        }
+      }
+
+      // 工作记忆 3 轮 [8,9,10] + 渠道记忆 2 轮 [9,10] -> 去重后 [8,9,10]，渠道版本优先。
+      config.set('chat.memoryRounds', 3)
+      config.set('chat.channelRounds', 2)
+      const overlap = builder.build({ conversationId: convRound.id, roleId, persona: '' })
+      check(
+        '工作记忆与渠道记忆叠加后按渠道优先去重（N=3，M=2）',
+        JSON.stringify(questionNumbers(overlap)) === JSON.stringify([8, 9, 10]),
+        JSON.stringify(questionNumbers(overlap)),
+      )
+
+      // 渠道记忆 5 轮 [6..10] 已经覆盖工作记忆 [8,9,10]，去重后只保留 5 轮，不是 8 轮。
+      config.set('chat.channelRounds', 5)
+      const covered = builder.build({ conversationId: convRound.id, roleId, persona: '' })
+      check(
+        '渠道记忆覆盖工作记忆时自动去重，不重复注入（N=3，M=5）',
+        JSON.stringify(questionNumbers(covered)) === JSON.stringify([6, 7, 8, 9, 10]),
+        JSON.stringify(questionNumbers(covered)),
+      )
+
+      // 清掉协议轨迹后走可见消息路径，语义应与上面一致。
+      store.clearTranscript(channelRound.channelId)
+      config.set('chat.channelRounds', 2)
+      const withoutTranscript = builder.build({ conversationId: convRound.id, roleId, persona: '' })
+      check(
+        '无协议轨迹时同样叠加去重（N=3，M=2）',
+        JSON.stringify(questionNumbers(withoutTranscript)) === JSON.stringify([8, 9, 10]),
+        JSON.stringify(questionNumbers(withoutTranscript)),
+      )
+
+      // 跨渠道：另一个私聊渠道 3 轮 [B1,B2,B3] 进入工作记忆；当前渠道只带最近 2 轮 [9,10]。
+      // 期望工作记忆里的其它渠道轮次保留，当前渠道重合轮次被渠道记忆去重。
+      const convOther = sessions.create({ name: '另一个私聊渠道', meta: { roleId } })
+      store.channelForConversation(convOther.id)
+      for (let index = 1; index <= 3; index += 1) {
+        store.append(convOther.id, { role: 'user', content: `轮次问题B${index}`, sender_id: 'u-other', sender_name: '用户' })
+        store.append(convOther.id, { role: 'assistant', content: `轮次回答B${index}`, sender_name: '角色', is_bot: true })
+      }
+      config.set('chat.memoryRounds', 3)
+      config.set('chat.channelRounds', 2)
+      const cross = builder.build({ conversationId: convRound.id, roleId, persona: '' })
+      const crossText = String(cross.messages.filter(message => message.role === 'user').map(message => String(message.content)).join('\n'))
+      check(
+        '跨渠道工作记忆保留，当前渠道与渠道记忆重合部分被去重',
+        crossText.includes('轮次问题B1') &&
+          crossText.includes('轮次问题B2') &&
+          crossText.includes('轮次问题B3') &&
+          crossText.includes('轮次问题9') &&
+          crossText.includes('轮次问题10') &&
+          !crossText.includes('轮次问题8'),
+        JSON.stringify(questionNumbers(cross)),
+      )
+    } finally {
+      config.set('chat.memoryRounds', previousMemory)
+      config.set('chat.channelRounds', previousChannel)
     }
   }
 

@@ -39,14 +39,6 @@ const TIMEOUT_OPTIONS = [
   { value: 300000, label: '300 秒' },
 ]
 
-const EMPTY_RETRY_OPTIONS = [
-  { value: 0, label: '不重试' },
-  { value: 1, label: '1 次（默认）' },
-  { value: 2, label: '2 次' },
-  { value: 3, label: '3 次' },
-  { value: 5, label: '5 次' },
-]
-
 export function apply(ctx) {
   const pages = ctx.inject('settings-container')
   const api = ctx.inject('api')
@@ -97,10 +89,6 @@ export function apply(ctx) {
         const options = TIMEOUT_OPTIONS.map(
           option => `<option value="${option.value}" ${option.value === timeoutMs ? 'selected' : ''}>${escapeHtml(option.label)}</option>`,
         ).join('')
-        const emptyRetries = Number(backendConfig?.network?.emptyResponseRetries ?? 1)
-        const emptyRetryOptions = EMPTY_RETRY_OPTIONS.map(
-          option => `<option value="${option.value}" ${option.value === emptyRetries ? 'selected' : ''}>${escapeHtml(option.label)}</option>`,
-        ).join('')
         const proxy = backendConfig?.network?.proxy || ''
         const webuiHost = backendConfig?.network?.webuiHost || '127.0.0.1'
         const webuiPort = Number(backendConfig?.network?.webuiPort) || 0
@@ -144,11 +132,6 @@ export function apply(ctx) {
               '提供商未单独设置超时时的默认值；可在 模型 → 提供商 → 高级配置 里覆盖',
               `<select class="setting-select" data-field="timeout" ${online ? '' : 'disabled'}>${options}</select>`,
             ) +
-              row(
-                '空回复自动重试',
-                '模型返回既无正文也无工具调用时，自动重试同一个请求；DeepSeek 官方 harness 默认也会重试',
-                `<select class="setting-select" data-field="empty-response-retries" ${online ? '' : 'disabled'}>${emptyRetryOptions}</select>`,
-              ) +
               row(
                 '全局代理',
                 '如 http://127.0.0.1:7890；对所有未单独配置代理的提供商生效。使用代理时由 Node 直接走 CONNECT 隧道，能绕过部分网络的连接超时问题。',
@@ -213,12 +196,9 @@ export function apply(ctx) {
           return
         }
         const proxy = String(container.querySelector('[data-field="proxy"]')?.value || '').trim()
-        const emptyResponseRetries = Number(
-          readSelect(container.querySelector('[data-field="empty-response-retries"]')) ?? backendConfig?.network?.emptyResponseRetries ?? 1,
-        )
         saving = true
         try {
-          await api.setConfig({ network: { timeoutMs: value, proxy, emptyResponseRetries } })
+          await api.setConfig({ network: { timeoutMs: value, proxy } })
           toast.success('网络配置已保存')
           await load()
         } catch (err) {

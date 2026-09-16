@@ -25,3 +25,6 @@ coverage/
 
 # 发布产物由 npm run build:release 生成；exe / node.exe 等大文件走 GitHub Releases，不进源码仓库
 release/
+
+# 独立外部插件工作目录：插件部分后续独立维护，不随主仓库上传（package-release 也已跳过）
+extensions/

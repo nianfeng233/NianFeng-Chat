@@ -14,6 +14,34 @@ import { plugins as builtinPluginEntries } from '../plugins/registry.mjs'
 
 const CONFIG_KEY = 'nianfeng:config'
 
+/**
+ * 后端 /api/plugins 会附带共享 preferences 里的插件启停状态。
+ * 服务端代聊 Worker 的 localStorage 是空的，必须靠它来决定是否加载外部插件；
+ * 普通 WebUI 也会与本地缓存取并集，保证“页面卸载后所有运行时都停用”。
+ */
+let remotePluginState = null
+
+function readRemotePluginState(data) {
+  const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : null)
+  const disabled = list(data?.disabled)
+  const removed = list(data?.removed)
+  const enabled = list(data?.enabled)
+  if (!disabled && !removed && !enabled) return null
+  return { disabled: disabled || [], removed: removed || [], enabled: enabled || [] }
+}
+
+function mergePluginIds(...lists) {
+  const out = new Set()
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    for (const id of list) {
+      const value = String(id || '').trim()
+      if (value) out.add(value)
+    }
+  }
+  return [...out]
+}
+
 function readBootConfig() {
   try {
     const raw = localStorage.getItem(CONFIG_KEY)
@@ -87,6 +115,7 @@ async function loadPluginEntries() {
     if (!res.ok) return builtinPluginEntries
     const data = await res.json()
     if (!Array.isArray(data?.plugins) || !data.plugins.length) return builtinPluginEntries
+    remotePluginState = readRemotePluginState(data)
     const entries = data.plugins
       .filter(entry => entry && entry.path)
       .map(entry => {
@@ -117,7 +146,12 @@ export async function boot() {
   const t0 = performance.now()
   const entries = await loadPluginEntries()
   const app = new App({ baseUrl: new URL('../', import.meta.url) })
-  const { disabled, removed, enabled } = readBootConfig()
+  const localPluginState = readBootConfig()
+  // 并入后端共享状态：本机 localStorage 为空（代聊 Worker）或新设备首次打开时，
+  // 也能立刻得到“卸载 / 禁用”结果，而不是先加载再等偏好同步。
+  const disabled = mergePluginIds(localPluginState.disabled, remotePluginState?.disabled)
+  const removed = mergePluginIds(localPluginState.removed, remotePluginState?.removed)
+  const enabled = mergePluginIds(localPluginState.enabled, remotePluginState?.enabled)
 
   window.__wind = app.rootCompat
   window.__wind_app = app

@@ -64,7 +64,7 @@ const TYPE_ICON = '🐱'
 const TAB_LABELS = { private: '私聊', group: '群聊', privacy: '隐私' }
 const TAB_ORDER = ['private', 'group', 'privacy']
 const SESSION_LABEL = { private: 'QQ私聊', group: 'QQ群聊' }
-const GROUP_CONTEXT_ROUNDS = 20
+const GROUP_CONTEXT_MESSAGES = 20
 const DEFAULT_PERMISSIONS = {
   read: true,
   reply: true,
@@ -93,7 +93,7 @@ const PERMISSION_SCOPES = {
 const permissionMetaFor = category => PERMISSION_META.filter(([key]) => (PERMISSION_SCOPES[key] || ['private', 'group', 'privacy']).includes(category))
 const CATEGORY_HELP = {
   private: '私聊：目标 QQ 的消息进入所选角色的角色级工作记忆，可参与跨渠道协作。',
-  group: '群聊：只使用本群最近 20 轮上下文；使用独立的群聊触发与回复规则。',
+  group: '群聊：只使用本群最近若干条消息作为上下文；使用独立的群聊触发与回复规则。',
   privacy: '隐私：独立单会话，不与其它渠道互读 / 互发；适合不希望消息进入角色工作记忆的用途。',
 }
 const DEFAULT_GROUP_RULES = {
@@ -106,6 +106,10 @@ const DEFAULT_GROUP_RULES = {
   quote: true,
   mention: true,
   silentContext: true,
+  // 0 = 继承 通用 → 群聊上下文条数（chat.groupMessages，默认 20）；>0 = 本群单独覆盖。
+  contextMessages: 0,
+  // 旧字段仅用于兼容：读取时若 contextMessages 未设置，会把旧值迁移为条数。
+  contextRounds: 0,
 }
 const STATUS_LABEL = {
   online: '已连接',
@@ -210,7 +214,25 @@ export function apply(ctx) {
   const targetTypeOf = channel => (channel?.meta?.targetType === 'group' || categoryOf(channel) === 'group' ? 'group' : 'private')
   const targetIdOf = channel => String(channel?.meta?.targetId || '').trim()
   const instanceIdOf = channel => String(channel?.meta?.instanceId || '').trim()
-  const groupRulesOf = channel => ({ ...DEFAULT_GROUP_RULES, ...(channel?.meta?.rules || {}) })
+  const groupRulesOf = channel => {
+    const rules = { ...DEFAULT_GROUP_RULES, ...(channel?.meta?.rules || {}) }
+    // 兼容旧版按“轮”保存的群规则：只有新字段没配时才沿用旧值。
+    if (!(Number(rules.contextMessages) > 0) && Number(rules.contextRounds) > 0) {
+      rules.contextMessages = Number(rules.contextRounds)
+    }
+    return rules
+  }
+  const clampGroupMessages = (value, fallback = GROUP_CONTEXT_MESSAGES) => {
+    const n = Math.floor(Number(value))
+    if (!Number.isFinite(n) || n <= 0) return Math.max(1, Math.min(1000, Math.floor(Number(fallback) || GROUP_CONTEXT_MESSAGES)))
+    return Math.max(1, Math.min(1000, n))
+  }
+  const globalGroupMessages = () => clampGroupMessages(config.get('chat.groupMessages', GROUP_CONTEXT_MESSAGES), GROUP_CONTEXT_MESSAGES)
+  /** 群聊上下文条数：群规则里 contextMessages > 0 时本群覆盖，否则跟随全局设置。 */
+  const groupContextMessagesOf = channel => {
+    const override = Math.floor(Number(groupRulesOf(channel).contextMessages))
+    return Number.isFinite(override) && override > 0 ? clampGroupMessages(override) : globalGroupMessages()
+  }
   const roleOf = channel => sessions.get(channel?.meta?.roleId) || null
   const maskId = value => {
     const text = String(value || '')
@@ -403,9 +425,10 @@ export function apply(ctx) {
       crossReadable: permissions.crossRead === true,
       crossSendable: permissions.crossSend === true,
       sensitiveConfirm: permissions.confirm !== false,
-      // 群聊上下文：只保留本群记录，默认滑动最近 20 轮；私聊分类继续参与角色工作记忆。
+      // 群聊上下文：只保留本群记录，条数可在群规则 / 通用设置里配置；私聊分类继续参与角色工作记忆。
       contextMode: category === 'group' ? 'channel-only' : '',
-      contextRounds: category === 'group' ? GROUP_CONTEXT_ROUNDS : 0,
+      contextRounds: 0,
+      contextMessages: category === 'group' ? groupContextMessagesOf(channel) : 0,
       napcatBotUserId: instance?.login?.userId || '',
       napcatBotName: instance?.login?.nickname || '',
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
@@ -852,7 +875,7 @@ export function apply(ctx) {
       return
     }
 
-    // 群聊黑名单由后端路由进来后在这里静默忽略；其它情况默认保留全部群消息形成最近 20 轮上下文。
+    // 群聊黑名单由后端路由进来后在这里静默忽略；其它情况默认保留全部群消息形成最近 N 条上下文（N 可配置）。
     const shouldWrite = decision.trigger || decision.rules.silentContext !== false
     const text = String(message.text || '').trim() || (Array.isArray(message.images) && message.images.length ? '[图片]' : '')
     const senderIds = Array.isArray(channel.meta?.trustedUserIds) ? channel.meta.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean) : []
@@ -1182,7 +1205,7 @@ export function apply(ctx) {
               ${TAB_ORDER.map(value => `
                 <button type="button" class="nc-mode-tab" data-nc-category-tab="${value}">
                   <b>${TAB_LABELS[value]}</b>
-                  <small>${value === 'private' ? '角色工作记忆' : value === 'group' ? '本群独立 20 轮' : '单会话隔离'}</small>
+                  <small>${value === 'private' ? '角色工作记忆' : value === 'group' ? '本群独立上下文' : '单会话隔离'}</small>
                 </button>`).join('')}
             </div>
             <select data-nc-category style="display:none" aria-hidden="true">
@@ -1302,7 +1325,12 @@ export function apply(ctx) {
               <label><input type="checkbox" data-nc-mention ${rules.mention !== false ? 'checked' : ''} /> 回复时艾特触发者</label>
               <label><input type="checkbox" data-nc-silent ${rules.silentContext !== false ? 'checked' : ''} /> 未触发时也静默写入本群上下文</label>
             </div>
-            <div class="nc-note">群聊上下文始终使用本群最近 <b>20 轮</b>；开启静默写入后，不触发回复的群消息也会进入上下文。</div>
+            <label class="nc-field">
+              <span>本群上下文条数（留空 = 继承通用设置）</span>
+              <input type="number" min="1" max="1000" step="1" data-nc-context-messages value="${Math.floor(Number(rules.contextMessages)) > 0 ? Math.floor(Number(rules.contextMessages)) : ''}" placeholder="继承通用设置（${globalGroupMessages()} 条）" style="width:120px" />
+              <div class="nc-field-help">只使用本群最近 N 条消息；填 0 或留空跟随全局，当前生效 <b data-nc-context-messages-effective>${groupContextMessagesOf(source)}</b> 条。</div>
+            </label>
+            <div class="nc-note">开启静默写入后，未触发回复的群消息也会进入本群上下文。</div>
           </div>
         </div>
 
@@ -1362,6 +1390,8 @@ export function apply(ctx) {
     const quoteInput = overlay.querySelector('[data-nc-quote]')
     const mentionInput = overlay.querySelector('[data-nc-mention]')
     const silentInput = overlay.querySelector('[data-nc-silent]')
+    const contextMessagesInput = overlay.querySelector('[data-nc-context-messages]')
+    const contextMessagesEffective = overlay.querySelector('[data-nc-context-messages-effective]')
     const errorEl = overlay.querySelector('[data-nc-error]')
 
     const setError = value => {
@@ -1479,6 +1509,11 @@ export function apply(ctx) {
     requireAtInput.addEventListener('change', syncProbability)
     probabilityInput.addEventListener('input', syncProbability)
     probabilityNumberInput.addEventListener('input', onProbabilityNumber)
+    contextMessagesInput?.addEventListener('input', () => {
+      if (!contextMessagesEffective) return
+      const n = Math.floor(Number(contextMessagesInput.value))
+      contextMessagesEffective.textContent = String(Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(1000, n)) : globalGroupMessages())
+    })
     modeSelect.addEventListener('change', syncPanes)
     instanceSelect.addEventListener('change', syncPanes)
     roleSelect.addEventListener('change', () => {
@@ -1516,6 +1551,7 @@ export function apply(ctx) {
       const nextTargetId = String(targetInput.value || '').trim()
       if (!/^\d{3,20}$/.test(nextTargetId)) return setError(nextTargetType === 'group' ? '请填写合法的群号（数字）。' : '请填写合法的目标 QQ 号（数字）。')
       const nextIdentityMode = identitySelect.value === 'guest' ? 'guest' : 'owner'
+      const requestedContextMessages = Math.floor(Number(contextMessagesInput?.value))
       const nextRules = {
         blacklist: String(blacklistInput.value || '')
           .split(/[,，\s]+/)
@@ -1532,6 +1568,10 @@ export function apply(ctx) {
         quote: !!quoteInput.checked,
         mention: !!mentionInput.checked,
         silentContext: !!silentInput.checked,
+        // 0 = 继承全局群聊上下文条数；>0 = 本群单独覆盖。
+        contextMessages: Number.isFinite(requestedContextMessages) && requestedContextMessages > 0 ? Math.min(1000, requestedContextMessages) : 0,
+        // 写新字段的同时清空旧轮数字段，避免下次读取时旧值覆盖新配置。
+        contextRounds: 0,
       }
       const nextPermissions = {}
       for (const [key] of PERMISSION_META) nextPermissions[key] = !!overlay.querySelector(`[data-nc-perm="${key}"]`)?.checked
@@ -1843,7 +1883,7 @@ export function apply(ctx) {
                 }</span>
                 <span class="k">引用回复</span><span class="v">${rules.quote ? '开启' : '关闭'}</span>
                 <span class="k">艾特触发者</span><span class="v">${rules.mention ? '开启' : '关闭'}</span>
-                <span class="k">静默上下文</span><span class="v">${rules.silentContext ? '开启（未触发也写入最近 20 轮）' : '关闭（未触发不写入）'}</span>
+                <span class="k">静默上下文</span><span class="v">${rules.silentContext ? `开启（未触发也写入最近 ${groupContextMessagesOf(channel)} 条）` : '关闭（未触发不写入）'}</span>
               </div>
             </div>
           </div>`
@@ -1931,7 +1971,7 @@ export function apply(ctx) {
                   ? ''
                   : `<span class="k">私聊身份</span><span class="v">${channel.meta?.identityMode === 'guest' ? '独立 QQ 用户' : '视为主人'}</span>`
               }
-              ${category === 'group' ? `<span class="k">上下文</span><span class="v">本群最近 20 轮（静默写入 ${rules.silentContext ? '开启' : '关闭'}）</span>` : ''}
+              ${category === 'group' ? `<span class="k">上下文</span><span class="v">本群最近 ${groupContextMessagesOf(channel)} 条消息（静默写入 ${rules.silentContext ? '开启' : '关闭'}）</span>` : ''}
             </div>
           </div>
         </div>
@@ -1960,7 +2000,7 @@ export function apply(ctx) {
 
         <div class="settings-section">
           <div class="settings-note">
-            入站消息会写入本渠道并触发角色；群聊默认只使用本群最近 20 轮上下文，未触发的消息也会静默写入。
+            入站消息会写入本渠道并触发角色；群聊只使用本群最近若干条消息作为上下文（默认 20，可在群聊规则 / 通用设置里调整），未触发的消息也会静默写入。
             Forward 模式请确认 NapCat 已开启 WebSocket 服务；Reverse 模式请把连接地址填进 NapCat 的 WebSocket 客户端配置。
           </div>
         </div>

@@ -202,7 +202,7 @@ export function apply(ctx) { /* ... */ }
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
-| `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` + `outbound.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 轮群上下文、发现会话；资料与超长消息自动折叠成合并转发（聊天记录） | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md`；阈值见 `chat.forward*` 配置 |
+| `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` + `outbound.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 条消息群上下文、发现会话；资料与超长消息自动折叠成合并转发（聊天记录） | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md`；阈值见 `chat.forward*` 配置 |
 | `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
 | `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` 自动绑定、WebSocket / Webhook、**仅私聊**、图片收发、被动回复与聊天记录 | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md` |
 
@@ -219,7 +219,7 @@ QQ 官方机器人按事件类型区分会话：`C2C_MESSAGE_CREATE`（私聊）
 NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通过 `instanceId` 复用；
 桥按 `instanceId + targetType + targetId` 路由到渠道。群聊消息无论是否触发模型，
 默认都会以 `skipUserAppend` 写入本渠道记录，`context-builder` 对
-`contextMode=channel-only` 的渠道只取本群最近 20 轮可见消息，不混入其它私聊工作记忆。
+`contextMode=channel-only` 的渠道只取本群最近 20 条可见消息，不混入其它私聊工作记忆。
 
 ---
 ## 后端插件（`server/plugins/`，8 个 + 渠道桥 4 个）

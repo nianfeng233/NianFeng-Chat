@@ -342,6 +342,17 @@ export function apply(ctx) {
   /** 提供商是否明确拒绝 tool_choice 参数（与“完全不支持 tools”要分开处理）。 */
   const isToolChoiceRejected = err => /tool_choice/i.test(String(err?.message || err))
 
+  /**
+   * 后端对空回复会先按 network.emptyResponseRetries 自动重试同一个请求；
+   * 重试仍为空时会以 EMPTY_RESPONSE / “空回复” 报错。这里把它视为空结果，
+   * 继续进入前端 chat.emptyRetryLimit 的系统纠正，而不是直接结束本轮。
+   */
+  const isEmptyResponseError = err => {
+    const code = String(err?.code || '').toUpperCase()
+    const message = String(err?.message || err || '')
+    return code === 'EMPTY_RESPONSE' || /空回复|EMPTY_RESPONSE/i.test(message)
+  }
+
   const isToolUnsupported = err => {
     const message = String(err?.message || err)
     if (isToolChoiceRejected(err)) return false
@@ -365,6 +376,11 @@ export function apply(ctx) {
       return await attemptStream(entry, conversationId, messagesToSend, options)
     } catch (err) {
       if (entry.cancelled) throw err
+      // 后端空回复重试已耗尽：不要再当致命错误，交给下面的空回复纠正循环。
+      if (isEmptyResponseError(err)) {
+        ctx.logger.warn(`[chat-flow] 后端重试后仍为空回复，转入前端纠正：${err?.message || err}`)
+        return { text: '', toolCalls: [], reasoning: '', finishReason: 'empty_response' }
+      }
       const toolsPresent = Array.isArray(options.tools) && options.tools.length > 0
       // required 不是所有 OpenAI 兼容网关都支持：先降级为 auto 保留 tools；
       // 如果改用 auto 后仍然报 tool_choice / tools 相关错误，再切换文本工具协议。

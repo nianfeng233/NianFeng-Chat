@@ -211,9 +211,12 @@ export function apply(ctx) {
       participatesWorkingMemory: conv.meta?.participatesWorkingMemory !== false,
       crossReadable: conv.meta?.crossReadable === true,
       crossSendable: conv.meta?.crossSendable === true,
-      // 渠道插件可以按渠道指定上下文策略：group-only / 自定义轮数（例如 NapCat 群聊 20 轮）。
+      // 渠道插件可以按渠道指定上下文策略：
+      //   contextRounds   -> 按轮数（私聊 / 隐私 / 普通渠道）；
+      //   contextMessages -> 按消息条数（群聊，避免推算“轮”）。
       contextMode: String(conv.meta?.contextMode || ''),
       contextRounds: Math.max(0, Number(conv.meta?.contextRounds) || 0),
+      contextMessages: Math.max(0, Number(conv.meta?.contextMessages) || 0),
       agentTurns: data.channels[channelId]?.agentTurns || [],
       seq,
       lastAt: data.channels[channelId]?.lastAt || list.at(-1)?.timestamp || null,
@@ -249,10 +252,25 @@ export function apply(ctx) {
       return (sa || 0) - (sb || 0)
     })
 
-  const groupRounds = list => {
+  /**
+   * 跨渠道工作记忆必须按时间合并，不能拿不同渠道的 seq 互相比大小；
+   * 同一时间戳再按渠道 / seq 保持稳定顺序。
+   */
+  const sortMessagesByTime = list =>
+    [...list].sort((a, b) => {
+      const ta = Date.parse(a.timestamp) || 0
+      const tb = Date.parse(b.timestamp) || 0
+      if (ta !== tb) return ta - tb
+      const ca = String(a.channel_id || '')
+      const cb = String(b.channel_id || '')
+      if (ca !== cb) return ca.localeCompare(cb)
+      return (Number(a.seq) || 0) - (Number(b.seq) || 0)
+    })
+
+  const groupRounds = (list, sorter = sortMessages) => {
     const rounds = []
     let current = null
-    for (const message of sortMessages(list)) {
+    for (const message of sorter(list)) {
       if (isDivider(message)) continue
       if (message.role === 'user' || !current) {
         current = { id: message.message_id || message.id, messages: [] }
@@ -576,7 +594,7 @@ export function apply(ctx) {
         seen.add(key)
         return true
       })
-      const rounds = groupRounds(deduped)
+      const rounds = groupRounds(deduped, sortMessagesByTime)
       const take = Number.isFinite(Number(limit)) ? Math.max(0, Number(limit)) : 5
       return take > 0 ? rounds.slice(-take).flatMap(round => round.messages) : []
     },

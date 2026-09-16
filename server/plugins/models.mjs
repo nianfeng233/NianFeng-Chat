@@ -20,6 +20,7 @@ import http from 'node:http'
 import https from 'node:https'
 import tls from 'node:tls'
 import { Readable } from 'node:stream'
+import { toGeminiSchema } from '../../src/util/tool-schema.mjs'
 
 export const name = 'models'
 export const inject = ['settings', 'hub']
@@ -702,7 +703,9 @@ const adapters = {
                   functionDeclarations: toolDefs.map(tool => ({
                     name: tool.function?.name || tool.name,
                     description: tool.function?.description || '',
-                    parameters: tool.function?.parameters || { type: 'object', properties: {} },
+                    // Gemini 对 JSON Schema 的支持是子集：统一去掉联合类型、
+                    // additionalProperties 等字段，并保证顶层/数组结构合法。
+                    parameters: toGeminiSchema(tool.function?.parameters || { type: 'object', properties: {} }),
                   })),
                 },
               ],

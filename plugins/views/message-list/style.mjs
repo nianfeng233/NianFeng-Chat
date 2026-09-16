@@ -9,6 +9,8 @@ export const MESSAGE_LIST_CSS = `
     flex:1 1 0;min-height:0;
     overflow-y:auto;padding:22px 24px 16px;
     background:transparent;
+    /* 大历史窗口化：向上补消息时由脚本精确校正 scrollTop，关闭浏览器滚动锚定避免叠加跳动 */
+    overflow-anchor:none;
   }
   .msg-scroll::-webkit-scrollbar{width:8px;}
   .msg-scroll::-webkit-scrollbar-thumb{

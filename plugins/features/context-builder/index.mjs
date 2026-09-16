@@ -180,6 +180,25 @@ export function apply(ctx) {
     return rounds
   }
 
+  /**
+   * 只保留最近 limit 轮（按 role=user 切轮），保持原有消息顺序。
+   * 用于把跨渠道 / 旧记录 / 协议轨迹统一收口到同一个总预算，避免
+   * 各段各自截断后再叠加导致实际轮数远超设置值。
+   */
+  const takeLastRounds = (list, limit) => {
+    const count = Math.floor(Number(limit))
+    const source = Array.isArray(list) ? list : []
+    if (!Number.isFinite(count) || count <= 0) return []
+    const userIndexes = []
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index]?.role === 'user') userIndexes.push(index)
+    }
+    if (userIndexes.length <= count) return [...source]
+    // 从最旧的保留轮次的 user 消息开始切，确保被截掉轮次的 assistant /
+    // tool 消息不会以“孤立开头”的形式混进来。
+    return source.slice(userIndexes[userIndexes.length - count])
+  }
+
   const timezone = () => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -555,13 +574,29 @@ export function apply(ctx) {
       const isPrivacy = policy?.group === 'privacy'
       // 渠道插件可以按渠道指定上下文策略：
       //   contextMode === 'channel-only' 只使用当前渠道记录（例如 NapCat 群聊）；
-      //   contextRounds > 0 覆盖全局 channelRounds（例如群聊固定最近 20 轮）。
+      //   contextMessages > 0 表示群聊按“条”控制（默认 chat.groupMessages=20）；
+      //   contextRounds > 0 表示按“轮”控制（私聊 / 隐私等渠道）。
       const channelOnly = policy?.contextMode === 'channel-only'
       const memoryRoundsConfig = Math.max(0, Number(config.get('chat.memoryRounds', 5)) || 0)
+      // 工作记忆：角色级、可能跨多个普通私聊渠道；隐私 / 群聊 channel-only 不参与。
       const memoryRounds = isPrivacy || channelOnly ? 0 : memoryRoundsConfig
       const perChannelRounds = Math.max(0, Number(policy?.contextRounds) || 0)
-      const channelRounds = perChannelRounds > 0 ? perChannelRounds : Math.max(0, Number(config.get('chat.channelRounds', 5)) || 0)
-      const maxRounds = memoryRounds + channelRounds || 10
+      const perChannelMessages = Math.max(0, Number(policy?.contextMessages) || 0)
+      // 群聊按“条”控制上下文：群内发言节奏不像私聊，按轮推算不稳。
+      const messageBudget = channelOnly
+        ? Math.max(
+            1,
+            Math.min(
+              1000,
+              Math.floor(perChannelMessages > 0 ? perChannelMessages : Number(config.get('chat.groupMessages', 20)) || 20),
+            ),
+          )
+        : 0
+      // 渠道记忆：只属于当前这个渠道。两类记忆叠加注入，重合部分在下面按
+      // message_id 去重，并始终优先保留渠道记忆里的版本。
+      const channelRounds = messageBudget > 0 ? 0 : perChannelRounds > 0 ? perChannelRounds : Math.max(0, Number(config.get('chat.channelRounds', 5)) || 0)
+      const currentChannelRounds = Math.max(1, channelRounds)
+      const maxRounds = Math.max(1, memoryRounds + channelRounds)
       // 逐条 user 消息的结构化元数据：时间、渠道、角色都挂在这里，system 前缀
       // 只保留固定 prompt，DeepSeek 等前缀缓存才能在后续轮次持续命中。
       const tz = timezone()
@@ -615,8 +650,10 @@ export function apply(ctx) {
       const transcriptTurns =
         channelOnly || typeof store.transcriptTurns !== 'function'
           ? []
-          : store.transcriptTurns(useChannelId, { limitTurns: maxRounds })
-      const visibleAll = transcriptTurns.length ? store.messagesOf(useChannelId) : []
+          : store.transcriptTurns(useChannelId, { limitTurns: Math.min(20, currentChannelRounds + 1) })
+      // 当前渠道可见消息始终读取，用于补旧轨迹中缺失的 user wire、提取当前轮，
+      // 以及渠道记忆与工作记忆的重合去重；channel-only 渠道则由 transcriptTurns 为空、走可见消息路径。
+      const visibleAll = store.messagesOf(useChannelId)
       // 默认不把导入历史塞进最近上下文；需要时由模型调用 read_messages 检索。
       const visible = filterAutomaticHistory(visibleAll)
       const visibleUsers = visible.filter(message => message.role === 'user')
@@ -709,13 +746,13 @@ export function apply(ctx) {
       let totalRounds = 0
       let selectedRounds = 0
 
+      // 工作记忆：角色级、可能跨多个普通私聊渠道；与当前渠道记忆在下层合并，
+      // 重合部分固定保留渠道记忆版本。
+      const workingAll =
+        memoryRounds > 0 ? filterAutomaticHistory(store.workingMessages({ roleId, limit: memoryRounds })) : []
+      let channelHistory = []
+
       if (transcript.length) {
-        // 隐私渠道 / 群聊 channel-only 渠道：不引入任何其它渠道的工作记忆。
-        const others =
-          memoryRounds <= 0
-            ? []
-            : filterAutomaticHistory(store.workingMessages({ roleId, limit: memoryRounds, excludeChannelId: useChannelId }))
-        const otherWire = others.map(message => toModelMessage(message, contextForMessage(message))).filter(Boolean)
         const firstUserWire = transcript.find(message => message.role === 'user')
         const firstUserAt = wireTimestamp(firstUserWire)
         const transcriptInfo = store.transcriptInfo?.(useChannelId)
@@ -727,12 +764,16 @@ export function apply(ctx) {
         const legacySource = Number.isNaN(cutoffAt)
           ? []
           : visible.filter(message => (Date.parse(message.timestamp) || 0) < cutoffAt)
+        // 渠道记忆预算只算当前渠道；协议轨迹已经占掉的轮数从里面扣除，
+        // legacy 只补当前渠道仍缺的旧轮次，不再额外扩大预算。
+        const legacyLimit = Math.max(0, currentChannelRounds - Math.max(1, transcriptTurns.length))
+        const legacyLimited =
+          legacyLimit > 0
+            ? groupRounds(legacySource)
+                .slice(-legacyLimit)
+                .flatMap(round => round.messages)
+            : []
         // legacy 段已经包含的用户消息标记为已使用，避免后面的 tail 段重复补一遍。
-        const legacyLimited = groupRounds(legacySource)
-          .slice(-Math.max(1, maxRounds))
-          .flatMap(round => round.messages)
-        // legacy 是协议轨迹之前的历史：即使开启导入历史自动进入，也只取最近 maxRounds 轮，
-        // 避免旧版本遗留 / 导入数据把请求撑爆。
         for (const message of legacyLimited) {
           if (message.role !== 'user') continue
           const id = String(message.message_id || message.id || '')
@@ -755,49 +796,85 @@ export function apply(ctx) {
           })
           .map(message => toModelMessage(message, contextForMessage(message)))
           .filter(Boolean)
-        history = [
-          ...otherWire,
-          ...legacyVisible,
-          ...transcript,
-          ...tailUsers,
-          ...(currentWire && currentUserId !== String(lastTranscriptUserId || '') ? [currentWire] : []),
-        ]
-        totalRounds = transcriptTurns.length
+        // 当前渠道记忆：最多 currentChannelRounds 轮，协议轨迹版本优先。
+        channelHistory = takeLastRounds(
+          [
+            ...legacyVisible,
+            ...transcript,
+            ...tailUsers,
+            ...(currentWire && currentUserId !== String(lastTranscriptUserId || '') ? [currentWire] : []),
+          ],
+          currentChannelRounds,
+        )
       } else {
-        // 隐私渠道 / 群聊 channel-only 渠道不使用角色级工作记忆，只用本渠道自己的历史。
-        const working = memoryRounds <= 0 ? [] : filterAutomaticHistory(store.workingMessages({ roleId, limit: memoryRounds }))
-        const fromChannel = groupRounds(filterAutomaticHistory(store.messagesOf(useChannelId)))
-          .slice(-channelRounds)
-          .flatMap(round => round.messages)
         const currentMessage = currentMessageId
           ? store.messageById?.(useChannelId, currentMessageId) ||
             store.messagesOf(useChannelId).find(message => String(message.message_id || message.id || '') === String(currentMessageId)) ||
             null
           : null
         const cutoffSeq = Number(currentMessage?.seq) || 0
-
-        // message_id 去重；重叠部分以工作记忆为准，当前渠道记忆只补不重复
-        const seen = new Set()
-        const merged = []
-        for (const message of [...working, ...fromChannel]) {
-          // 当前渠道若已连续落库多条消息，只纳入当前处理这条及更早的记录。
-          if (cutoffSeq && message.channel_id === useChannelId && (Number(message.seq) || 0) > cutoffSeq) continue
-          const key = message.message_id || message.id
-          if (seen.has(key)) continue
-          seen.add(key)
-          merged.push(message)
-        }
-        const rounds = groupRounds(merged)
-        totalRounds = rounds.length
-        const limited = rounds.slice(-maxRounds)
-        selectedRounds = limited.length
-        for (const round of limited) {
-          for (const message of round.messages) {
-            const converted = toModelMessage(message, contextForMessage(message))
-            if (converted) history.push(converted)
+        // 当前渠道记忆只处理到当前这条，避免把渠道连发中尚未轮到的后续消息带入。
+        const channelMessages = filterAutomaticHistory(store.messagesOf(useChannelId)).filter(
+          message => !cutoffSeq || message.channel_id !== useChannelId || (Number(message.seq) || 0) <= cutoffSeq,
+        )
+        if (messageBudget > 0) {
+          // 群聊：直接取当前渠道最近 messageBudget 条消息，不按轮切分。
+          for (const message of channelMessages.slice(-messageBudget)) {
+            const wire = toModelMessage(message, contextForMessage(message))
+            if (wire) channelHistory.push(wire)
+          }
+        } else {
+          const currentRounds = groupRounds(channelMessages).slice(-currentChannelRounds)
+          for (const round of currentRounds) {
+            for (const message of round.messages) {
+              const wire = toModelMessage(message, contextForMessage(message))
+              if (wire) channelHistory.push(wire)
+            }
           }
         }
       }
+
+      if (messageBudget > 0) {
+        // 群聊：不叠加角色级工作记忆，只保留当前群最近 messageBudget 条消息。
+        history = channelHistory.slice(-messageBudget)
+      } else {
+        // 渠道记忆里的 user 消息 id：工作记忆重合时以这些 id 为准丢弃工作记忆版本，
+        // 实现“渠道记忆优先 + 重合自动去重”。
+        const channelUserIdSet = new Set()
+        for (const wire of channelHistory) {
+          if (wire?.role !== 'user') continue
+          const id = wireMessageId(wire)
+          if (id) channelUserIdSet.add(String(id))
+        }
+        const historyParts = []
+        // 其它渠道的工作记忆全部注入。
+        for (const message of workingAll) {
+          if (String(message.channel_id || '') === String(useChannelId)) continue
+          const wire = toModelMessage(message, contextForMessage(message))
+          if (wire) historyParts.push(wire)
+        }
+        // 当前渠道中尚未被渠道记忆覆盖的旧轮次（memoryRounds > channelRounds 时可能出现）
+        // 也按工作记忆注入；已被渠道记忆覆盖的轮次丢弃，保证渠道记忆优先。
+        const workingCurrentRounds = groupRounds(
+          workingAll.filter(
+            message =>
+              String(message.channel_id || '') === String(useChannelId) &&
+              (!currentSeq || (Number(message.seq) || 0) <= currentSeq),
+          ),
+        )
+        for (const round of workingCurrentRounds) {
+          const userMessage = round.messages.find(message => message.role === 'user') || round.messages[0] || null
+          const userId = String(userMessage?.message_id || userMessage?.id || '')
+          if (userId && channelUserIdSet.has(userId)) continue
+          for (const message of round.messages) {
+            const wire = toModelMessage(message, contextForMessage(message))
+            if (wire) historyParts.push(wire)
+          }
+        }
+        history = takeLastRounds([...historyParts, ...channelHistory], maxRounds)
+      }
+      totalRounds = groupRounds(history).length
+      selectedRounds = totalRounds
 
       // 图片预算保险：只保留最近预算内的原图，其余降级为 [图片] 文本。
       applyImageBudget(history)

@@ -74,7 +74,7 @@ export function apply(ctx) {
           row('导入历史自动进入上下文', '默认关闭：风语 / QQ 导入的旧记录只供 read_messages 检索，不会自动塞进最近上下文；开启后按正常轮次规则只带最近几轮', switchBtn('chat.includeImportedHistory', false)) +
           row('工具纠错次数', '严格模式下最多纠正几次；0 = 不纠正，直接走正文兜底。总轮次仍受“最大工具轮次”约束',
             input('chat.toolRetryLimit', config.get('chat.toolRetryLimit', 3), { type: 'number', width: 70 })) +
-          row('空回复纠正次数', '模型既没输出正文也没调用工具时，最多纠正几次；仍为空则明确报错并停止本轮',
+          row('空回复纠正次数', '后端对同一请求自动重试仍为空后，前端最多追加几次系统纠正；0 = 不纠正',
             input('chat.emptyRetryLimit', config.get('chat.emptyRetryLimit', 2), { type: 'number', width: 70 })) +
           row('最大工具轮次', '一轮回复内最多执行多少次“模型 → 工具 → 模型”循环（1-20）',
             input('chat.maxToolRounds', config.get('chat.maxToolRounds', 10), { type: 'number', width: 90 })) +
@@ -82,10 +82,12 @@ export function apply(ctx) {
             input('chat.contextTokens', config.get('chat.contextTokens', 0), { type: 'number', width: 110 })) +
           row('单次输出上限', '每次回复最多生成的 token 数，默认 8192；模型设置里单独填了 max_tokens 时以模型级为准',
             input('chat.maxOutputTokens', config.get('chat.maxOutputTokens', 8192), { type: 'number', width: 110 })) +
-          row('工作记忆轮数', '角色级普通私聊记忆保留轮数',
+          row('工作记忆轮数', '角色级、可跨多个普通私聊渠道的工作记忆：把所有私聊渠道按时间合并后保留最近 N 轮',
             input('chat.memoryRounds', config.get('chat.memoryRounds', 5), { type: 'number', width: 80 })) +
-          row('渠道记忆轮数', '当前渠道最近消息保留轮数',
+          row('渠道记忆轮数', '当前渠道自身保留的最近 M 轮；与工作记忆叠加注入，重合部分自动去重并以渠道记忆优先',
             input('chat.channelRounds', config.get('chat.channelRounds', 5), { type: 'number', width: 80 })) +
+          row('群聊上下文条数', 'NapCat 群聊默认保留本群最近多少条消息；可在群聊渠道的“群聊规则”里单独覆盖。默认 20',
+            input('chat.groupMessages', config.get('chat.groupMessages', 20), { type: 'number', width: 80 })) +
           row('单次读取上限', 'read_messages / read_document 单次返回的 token 上限',
             input('chat.readTokens', config.get('chat.readTokens', 1500), { type: 'number', width: 100 })) +
           row('敏感操作确认', '跨渠道读写等敏感操作需要在输入框输入“确认”', switchBtn('chat.confirmSensitive', true)) +
