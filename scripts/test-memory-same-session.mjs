@@ -199,10 +199,12 @@ async function main() {
     timeout: 15000,
     label: `模型 ${MODEL_KEY} 注册`,
   })
-  await waitFor(() => ctx.inject('session-service')?.get?.(convId)?.messages?.length >= seedMessages.length, {
+  await waitFor(() => ctx.inject('session-service')?.get?.(convId), {
     timeout: 15000,
     label: '测试角色从后端同步',
   })
+  // 新版会话同步默认只取 messageCount；测试需要完整历史，显式按需全量加载一次。
+  await ctx.inject('session-service')?.loadAllMessages?.(convId).catch(() => null)
 
   const sessions = ctx.inject('session-service')
   const messages = ctx.inject('message-service')

@@ -101,6 +101,7 @@ export function apply(ctx) {
 聊天链路新增的服务：`chat-store`（渠道记录）、`document-service`（资料库）、
 `chat-permissions`（权限 / 确认 / 审计）、`chat-queue`（角色级队列）、
 `tool-registry`（工具编目执行）、`chat-tools`（聊天工具集）、
+`memory-store`（角色级长期记忆：概括 / 向量 / 混合检索）、
 `context-builder`（记忆合并与 token 截断）。它们之间只通过服务与事件协作。
 
 ---

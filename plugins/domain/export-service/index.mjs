@@ -167,7 +167,8 @@ export function apply(ctx) {
   const service = {
     name: 'export-service',
     formats: () => ['markdown', 'json', 'txt', 'html', 'csv', 'pdf'],
-    exportConversation(id, format = 'markdown') {
+    async exportConversation(id, format = 'markdown') {
+      if (typeof sessions.loadAllMessages === 'function') await sessions.loadAllMessages(id).catch(() => null)
       const conv = sessions.get(id)
       if (!conv) return false
       const base = safeName(conv.name)
@@ -182,8 +183,11 @@ export function apply(ctx) {
       events.emit('export:done', { id, format })
       return true
     },
-    exportAll(format = 'json') {
+    async exportAll(format = 'json') {
       const conversations = sessions.list()
+      if (typeof sessions.loadAllMessages === 'function') {
+        await Promise.all(conversations.map(conv => sessions.loadAllMessages(conv.id).catch(() => null)))
+      }
       const stamp = Date.now()
       if (format === 'html') {
         download(`念风-全部会话-${stamp}.html`, toAllHtml(conversations), 'text/html;charset=utf-8')
@@ -206,9 +210,12 @@ export function apply(ctx) {
       toast.success('已导出全部会话（JSON）')
       return true
     },
-    exportMany(ids = [], format = 'json') {
+    async exportMany(ids = [], format = 'json') {
       const conversations = (Array.isArray(ids) ? ids : []).map(id => sessions.get(id)).filter(Boolean)
       if (!conversations.length) return false
+      if (typeof sessions.loadAllMessages === 'function') {
+        await Promise.all(conversations.map(conv => sessions.loadAllMessages(conv.id).catch(() => null)))
+      }
       const stamp = Date.now()
       if (format === 'txt') {
         const text = conversations.map(c => `${'='.repeat(20)}\n${c.name}\n${'='.repeat(20)}\n\n${toText(c)}`).join('\n\n')
@@ -238,7 +245,9 @@ export function apply(ctx) {
     toAllHtml,
   }
 
-  const off = events.on('export:conversation', ({ id, format }) => service.exportConversation(id, format))
+  const off = events.on('export:conversation', ({ id, format }) => {
+    Promise.resolve(service.exportConversation(id, format)).catch(err => toast.error(`导出失败：${err?.message || err}`))
+  })
   ctx.effect(off)
 
   ctx.provide('export-service', service, { type: 'singleton' })

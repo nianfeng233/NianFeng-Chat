@@ -40,7 +40,8 @@
   │         └─ [model-adapter-backend] -> /api/chat（SSE，含 tool_call 事件）
   │              └─ 后端 [models]：OpenAI 兼容 / Ollama 的 tools / tool_calls 协议
   │       [chat-tools].execute(...)
-  │         · read_messages  读取当前 / 有权限渠道
+  │         · read_messages  读取当前 / 有权限渠道（可 + semantic 向量语义检索）
+  │         · search_memory  语义搜索角色长期记忆概括（每 10 轮一条），按需带回原文
   │         · chat_send      发送聊天消息（end=true 结束本轮）
   │         · send_document  资料入库；渠道侧按「聊天记录转发」发送（首条标题 + 正文）
   │         · read_document  按 token 分段加载资料原文
@@ -71,7 +72,8 @@
 | `chat-store` | domain | 渠道标识、消息元数据、seq、工作记忆、历史查询 | 不调模型、不管 UI |
 | `document-service` | domain | 资料原文存储、分段读取 | 不进入聊天记录正文 |
 | `tool-registry` | domain | 通用工具注册 / 编目 / 执行 | 不认识具体聊天业务 |
-| `chat-tools` | features | 把 read_messages / chat_send / send_document / read_document 注册成工具 | 不直接操作模型协议 |
+| `chat-tools` | features | 把 read_messages / search_memory / chat_send / send_document / read_document 注册成工具 | 不直接操作模型协议 |
+| `memory-store` | domain | 每 10 轮提交概括、角色级长期记忆、向量 + 关键词 + 时间混合检索 | 不保存权威原文，不负责权限确认 |
 | `context-builder` | features | 工作记忆 + 渠道记忆合并、去重、排序、token 截断、untrusted 包装 | 不负责模型选择 |
 | `chat-flow` | features | 串联队列 → 存 → 上下文 → 工具循环 → 收尾；兼容文本工具协议 | 不认识任何具体模型 / 工具实现 |
 | `model-service` | domain | `stream / complete` 抽象接口，转发 tools / onToolCall | 不关心 OpenAI / Ollama 差异 |

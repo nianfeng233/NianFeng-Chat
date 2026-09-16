@@ -214,7 +214,9 @@ export function apply(ctx) {
         if (!batchSelected.size) return toast.info('请先选择会话')
         const exportService = ctx.registry.get('export-service')
         if (!exportService?.exportMany) return toast.warn('导出服务未启用')
-        exportService.exportMany([...batchSelected], 'json')
+        Promise.resolve(exportService.exportMany([...batchSelected], 'json')).catch(err =>
+          toast.error(`导出失败：${err?.message || err}`),
+        )
       } else if (button.dataset.batchDelete !== undefined) {
         if (!batchSelected.size) return toast.info('请先选择会话')
         const confirmed = await modal.open({

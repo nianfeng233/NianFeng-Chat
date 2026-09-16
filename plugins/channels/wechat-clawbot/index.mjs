@@ -183,7 +183,24 @@ export function apply(ctx) {
     if (!isClawbotChannel(channel)) return null
     const role = roleOf(channel)
     const roleId = channel.meta?.roleId || role?.meta?.roleId || role?.id || channel.id
-    let conv = sessions.get(channel.meta?.conversationId)
+    const stableChannelId = channelKey(channel.id)
+    let conv = typeof sessions.findByChannelId === 'function' ? sessions.findByChannelId(stableChannelId) : null
+    if (!conv) conv = sessions.get(channel.meta?.conversationId)
+    if (
+      !conv &&
+      typeof sessions.ready === 'function' &&
+      typeof sessions.isInitialSyncSettled === 'function' &&
+      sessions.isInitialSyncSettled() === false
+    ) {
+      sessions.ready().then(() => {
+        try {
+          ensureConversation(channel)
+        } catch (_) {
+          /* ignore */
+        }
+      }).catch(() => {})
+      return null
+    }
     const metaPatch = {
       channelId: channelKey(channel.id),
       channelType: TYPE_ID,
@@ -223,6 +240,11 @@ export function apply(ctx) {
       sessions.update(conv.id, {
         name: conv.name || `${role?.name || '角色'} · 微信clawbot`,
         meta: { ...(conv.meta || {}), ...metaPatch },
+      })
+    }
+    if (String(channel.meta?.conversationId || '') !== String(conv.id)) {
+      channels.updateChannel(findTab(channel.id), channel.id, {
+        meta: { ...(channel.meta || {}), conversationId: conv.id },
       })
     }
     // 立刻登记到 chat-store 渠道索引：即使还没收到消息，设置 → 聊天记录里也能看到并可编辑。

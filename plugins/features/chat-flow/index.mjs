@@ -173,6 +173,22 @@ export function apply(ctx) {
 
   const roleOf = conv => conv.meta?.roleId || conv.id
   const toolsEnabled = () => !!store && !!tools && !!builder && config.get('chat.toolsEnabled', true) !== false
+  /** 分页同步后先保证当前会话最近几十条已加载，避免上下文里连刚说过的话都没有。 */
+  const ensureRecentMessages = conversationId => {
+    if (!conversationId || typeof sessions.ensureMessages !== 'function') return Promise.resolve(null)
+    const current = sessions.ensureMessages(conversationId, { limit: 40 }).catch(() => null)
+    // 角色级工作记忆还会汇总其它普通私聊渠道；这些渠道同样按需补一页，否则跨渠道记忆会变空。
+    let others = []
+    try {
+      const roleId = sessions.get(conversationId)?.meta?.roleId || conversationId
+      others = (store?.channels?.() || [])
+        .filter(record => record?.conversationId && record.conversationId !== conversationId && record.group === 'private' && record.roleId === roleId)
+        .map(record => sessions.ensureMessages(record.conversationId, { limit: 20 }).catch(() => null))
+    } catch (_) {
+      others = []
+    }
+    return Promise.all([current, ...others]).then(() => null)
+  }
 
   const abortError = () => {
     const err = new Error('请求已取消')
@@ -538,6 +554,7 @@ export function apply(ctx) {
       events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
       return
     }
+    await ensureRecentMessages(conversationId)
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
     const startedAt = Date.now()
@@ -995,6 +1012,7 @@ export function apply(ctx) {
       events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
       return
     }
+    await ensureRecentMessages(conversationId)
     const entry = createEntry(conversationId, roleId)
     running.set(conversationId, entry)
     try {

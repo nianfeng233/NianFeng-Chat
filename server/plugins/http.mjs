@@ -51,6 +51,18 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /** SSE 增量事件带的消息体：体积小才带，避免图片 data URL 把事件通道撑爆。 */
+  const eventMessagePayload = message => {
+    if (!message || typeof message !== 'object') return null
+    try {
+      const textSize = String(message.content ?? '').length
+      const metaSize = message.meta ? JSON.stringify(message.meta).length : 0
+      return textSize + metaSize <= 256 * 1024 ? message : null
+    } catch (_) {
+      return null
+    }
+  }
+
   const port = config.port ?? 8788
   const host = config.host ?? '127.0.0.1'
   const staticDir = config.staticDir ? resolve(config.staticDir) : null
@@ -390,6 +402,7 @@ export function apply(ctx, config = {}) {
         'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
         'external-plugins', 'plugin-dirs', 'plugin-upload', 'webui-auth', 'system-restart', 'plugin-http-routes',
         'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'health-detail-auth', 'provider-model-discover',
+        'embeddings', 'memory', 'session-message-pagination',
         ...extraCapabilities,
       ],
       authRequired: !!accessToken,
@@ -589,6 +602,27 @@ export function apply(ctx, config = {}) {
     sendJson(res, 200, { ok: true, providers: models.list() })
   })
 
+  /* ---------------- 向量模型（embedding） ---------------- */
+
+  /** 设置页「自动获取维度」与测试向量接口都走这里；API Key 只在后端使用。 */
+  route('POST', '/api/embeddings', async (req, res) => {
+    const body = await readBody(req)
+    const { provider, model, input } = body || {}
+    try {
+      const result = await models.embed({ provider, model, input })
+      sendJson(res, 200, {
+        ok: true,
+        provider: result.provider,
+        model: result.model,
+        dimension: result.dimension,
+        count: result.embeddings.length,
+        embeddings: result.embeddings,
+      })
+    } catch (err) {
+      sendError(res, err?.status || 502, err?.message || 'embedding 请求失败')
+    }
+  })
+
   /* ---------------- 聊天（SSE） ---------------- */
 
   route('POST', '/api/chat', async (req, res) => {
@@ -633,6 +667,34 @@ export function apply(ctx, config = {}) {
     sendJson(res, 200, { conversations: compact && typeof sessions.listCompact === 'function' ? sessions.listCompact() : sessions.list(), compact })
   })
 
+  /** 单会话读取：供 session-service 在收到 sessions/changed 时只拉变化的那一个会话，
+   *  避免每次消息写入都全量拉取 /api/sessions 导致大对象序列化风暴和健康检查超时。
+   *  compact=1 时只返回元数据 / messageCount，消息正文走分页接口。 */
+  route('GET', '/api/sessions/:id', async (req, res, params, url) => {
+    await sessions.ready()
+    const compact = url?.searchParams?.get('compact') === '1'
+    const conv = compact && typeof sessions.getCompact === 'function' ? sessions.getCompact(params.id) : sessions.get(params.id)
+    if (!conv) return sendError(res, 404, '会话不存在')
+    sendJson(res, 200, { conversation: conv, compact })
+  })
+
+  /**
+   * 单会话消息分页：聊天记录页 / Web 聊天窗口懒加载只取当前可见的一小段。
+   *   limit=20&beforeSeq=123   → 取 seq < 123 的更早一页
+   *   limit=20               → 取最新一页
+   *   all=1                  → 显式导出 / 搜索 / 保存编辑器时取完整原文
+   */
+  route('GET', '/api/sessions/:id/messages', async (req, res, params, url) => {
+    await sessions.ready()
+    const limit = Math.max(1, Math.min(500, Number(url?.searchParams?.get('limit')) || 20))
+    const beforeSeq = url?.searchParams?.get('beforeSeq')
+    const afterSeq = url?.searchParams?.get('afterSeq')
+    const all = url?.searchParams?.get('all') === '1'
+    const result = sessions.listMessages(params.id, { limit, beforeSeq, afterSeq, all })
+    if (!result) return sendError(res, 404, '会话不存在')
+    sendJson(res, 200, result)
+  })
+
   route('POST', '/api/sessions', async (req, res) => {
     await sessions.ready()
     const body = await readBody(req)
@@ -659,7 +721,7 @@ export function apply(ctx, config = {}) {
     const body = await readBody(req)
     const message = sessions.addMessage(params.id, body)
     if (!message) return sendError(res, 404, '会话不存在')
-    broadcastSessionChange(req, 'message', params.id, { messageId: message.id })
+    broadcastSessionChange(req, 'message', params.id, { messageId: message.id, message: eventMessagePayload(message) })
     sendJson(res, 201, message)
   })
 
@@ -668,7 +730,7 @@ export function apply(ctx, config = {}) {
     const body = await readBody(req)
     const message = sessions.updateMessage(params.id, params.messageId, body)
     if (!message) return sendError(res, 404, '消息不存在')
-    broadcastSessionChange(req, 'message-update', params.id, { messageId: params.messageId })
+    broadcastSessionChange(req, 'message-update', params.id, { messageId: params.messageId, message: eventMessagePayload(message) })
     sendJson(res, 200, message)
   })
 

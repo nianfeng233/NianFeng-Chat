@@ -33,7 +33,18 @@ built as cordis plugins. The points below are implemented today in code, with pa
 - The backend persists every message to SQLite (`user_data/chat.db`) with WAL enabled and an index on
   `(conversation_id, seq)`; environments without `node:sqlite` fall back to JSON persistence.
   `read_messages` can then recall history by keyword, exact `seq`, relative sequence range, time range,
-  and cursor pagination.
+  and cursor pagination. With `semantic`, it also runs vector search over role-level memory.
+- Conversation-list sync now pulls only compact metadata (name / preview / `messageCount`, no message bodies).
+  The chat-records page and Web chat window load the latest 20 messages first, then fetch older pages by
+  `beforeSeq` when the user scrolls up / clicks "load earlier". On startup the backend also merges historical
+  duplicate conversation containers that share one channel id, so a channel can no longer show 0 records while
+  its real history lives under another `conv.id`.
+- Long-term memory (`memory.db` / `memory.json`) is isolated per role: every 10 complete rounds are
+  compressed into a short summary and embedded. `search_memory` performs hybrid retrieval (vector + BM25
+  + time) and returns the most relevant summary plus its 10 source rounds by default. Cross-channel
+  originals are treated as private and returned only after authorization; privacy channels are computed
+  independently. The embedding model is configured under Settings → Model → Memory Model, and dimensions
+  can be detected automatically.
 - Input context is not truncated by tokens by default (`chat.contextTokens = 0`; a positive value acts as
   a safety cap, and if the model defines a context length the budget becomes `context length - output
   reserve`). Only recent rounds are injected and older history is retrieved on demand. Output is limited
@@ -140,8 +151,9 @@ built as cordis plugins. The points below are implemented today in code, with pa
 
 The model reads and writes messages through tools:
 
-- Read tools: `read_messages` (query message history), `read_document` (read long documents within a
-  token budget).
+- Read tools: `read_messages` (query message history by keyword / seq / time / semantics), `search_memory`
+  (semantic search over role-level summaries; returns one summary plus its 10 source rounds by default),
+  `read_document` (read long documents within a token budget).
 - Write tools: `chat_send` (send one or more chat messages), `send_document` (send one or more long
   documents; the full text goes into the document library and is delivered over the channel as a QQ
   merged-forward record: the first node is the title, the next node is the whole body).

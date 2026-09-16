@@ -66,6 +66,18 @@ export function apply(ctx) {
   const api = ctx.inject('api?')
   const napcatChannel = ctx.inject('napcat-channel?')
   const imageService = ctx.inject('image-service?') || ctx.registry.get('image-service')
+  const memoryStore = () => ctx.registry.get('memory-store')
+
+  const messageTextForSearch = message => {
+    const content = message?.content
+    if (Array.isArray(content)) {
+      return content
+        .map(part => (typeof part === 'string' ? part : part?.type === 'text' ? part.text || '' : '[图片]'))
+        .filter(Boolean)
+        .join('\n')
+    }
+    return String(content ?? '')
+  }
 
   const unavailable = () => ({ ok: false, code: 'CHANNEL_UNAVAILABLE', error: '目标渠道不可用' })
 
@@ -175,10 +187,66 @@ export function apply(ctx) {
     return out
   }
 
-  const readMessages = async (args, context) => {
-    const decision = await authorize(args, context, 'read')
-    if (!decision.ok) return denied(decision)
-    const query = args.query ?? (args.semantic ? String(args.semantic) : '')
+  /** 把工具结果消息裁到 token 预算内：至少保留第一条，超限时截断并标记。 */
+  const formatToolMessages = (messageList, maxTokens) => {
+    const items = []
+    let used = 0
+    let truncated = false
+    for (const message of messageList || []) {
+      const item = contextBuilder.formatForTool(message)
+      if (!item) continue
+      const tokens = contextBuilder.estimateTokens(JSON.stringify(item))
+      if (items.length && used + tokens > maxTokens) {
+        truncated = true
+        break
+      }
+      items.push(item)
+      used += tokens
+    }
+    return { items, used, truncated }
+  }
+
+  /** 按需查看图片：默认只给 [图片] 占位；include_images / image_message_ids 才真带原图。 */
+  const collectToolImages = (candidates, { includeImages = false, wantedIds = [], imageLimit = 2 } = {}) => {
+    const images = []
+    if (!includeImages && !wantedIds.length) return images
+    for (const message of candidates || []) {
+      if (images.length >= imageLimit) break
+      const messageId = String(message.message_id || message.id || '')
+      const list = Array.isArray(message.meta?.images) ? message.meta.images : []
+      for (const image of list) {
+        if (images.length >= imageLimit) break
+        const url = image?.dataUrl || image?.url
+        if (!url) continue
+        images.push({ type: 'image_url', image_url: { url: String(url) }, message_id: messageId })
+      }
+    }
+    return images
+  }
+
+  const filterMessagesByTime = (messageList, timeStart, timeEnd) => {
+    const from = timeStart ? Date.parse(timeStart) : NaN
+    const to = timeEnd ? Date.parse(timeEnd) : NaN
+    return (messageList || []).filter(message => {
+      const at = Date.parse(message?.timestamp || '')
+      if (Number.isNaN(at)) return true
+      if (!Number.isNaN(from) && at < from) return false
+      if (!Number.isNaN(to) && at > to) return false
+      return true
+    })
+  }
+
+  /**
+   * 旧关键词 / 序号 / 时间检索路径。semantic 未启用或语义检索不可用时回退到这里。
+   * options.semanticHint 只用于在结果里如实说明“语义没有生效 / 已回退”。
+   */
+  const runKeywordRead = async (args, context, decision, { queryOverride = null, semanticHint = '' } = {}) => {
+    const query = queryOverride ?? args.query ?? ''
+    // 浏览器默认只缓存最近可见的一页；模型显式 read_messages 检索历史时必须按需拉全量。
+    const targetRecord = store.channelRecord?.(decision.channelId)
+    if (targetRecord?.conversationId && typeof sessions.loadAllMessages === 'function') {
+      await sessions.loadAllMessages(targetRecord.conversationId).catch(() => null)
+    }
     const result = store.search({
       channelId: decision.channelId,
       query,
@@ -189,47 +257,17 @@ export function apply(ctx) {
       timeEnd: args.time_end ?? null,
       cursor: args.cursor ?? null,
     })
-
     const maxTokens = Math.max(200, Number(config.get('chat.readTokens', 1500)) || 1500)
-    const items = []
-    let used = 0
-    let truncated = false
-    for (const message of result.messages) {
-      const item = contextBuilder.formatForTool(message)
-      const tokens = contextBuilder.estimateTokens(JSON.stringify(item))
-      if (items.length && used + tokens > maxTokens) {
-        truncated = true
-        break
-      }
-      items.push(item)
-      used += tokens
-    }
-
-    // 按需查看图片：默认只给 [图片] 占位；include_images=true / image_message_ids
-    // 才把图片作为额外 content parts 返回（chat-flow 会把它们作为下一条 user 消息注入）。
+    const { items, truncated } = formatToolMessages(result.messages, maxTokens)
     const includeImages = args.include_images === true || String(args.include_images) === 'true'
     const wantedIds = Array.isArray(args.image_message_ids)
       ? args.image_message_ids.map(item => String(item || '')).filter(Boolean)
       : []
     const imageLimit = Math.min(4, Math.max(1, Number(args.image_limit) || 2))
-    const images = []
-    if (includeImages || wantedIds.length) {
-      const candidates = wantedIds.length
-        ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
-        : result.messages
-      for (const message of candidates) {
-        if (images.length >= imageLimit) break
-        const messageId = String(message.message_id || message.id || '')
-        const list = Array.isArray(message.meta?.images) ? message.meta.images : []
-        for (const image of list) {
-          if (images.length >= imageLimit) break
-          const url = image?.dataUrl || image?.url
-          if (!url) continue
-          images.push({ type: 'image_url', image_url: { url: String(url) }, message_id: messageId })
-        }
-      }
-    }
-
+    const candidates = wantedIds.length
+      ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
+      : result.messages
+    const images = collectToolImages(candidates, { includeImages, wantedIds, imageLimit })
     const payload = {
       ok: true,
       channel: decision.channelId,
@@ -246,9 +284,291 @@ export function apply(ctx) {
       payload.image_note = '没有找到可用的图片（可能图片已过期、只存在 URL 或 message_id 不正确）。'
     }
     if (truncated) payload.hint = '结果超过单次读取 token 上限，已返回部分消息；请缩小时间 / 关键词范围或使用 cursor 继续。'
-    if (args.semantic) {
+    if (semanticHint) {
       payload.semantic_applied = false
-      payload.hint = [payload.hint, '语义检索将在第三阶段启用，本次已按关键词匹配。'].filter(Boolean).join(' ')
+      payload.hint = [payload.hint, semanticHint].filter(Boolean).join(' ')
+    }
+    return payload
+  }
+
+  /**
+   * 语义检索主路径（MemMachine 复刻的核心）：
+   *   1. 在角色记忆库的概括向量里做混合召回，模型可指定 top_summaries；
+   *   2. 同一渠道的概括默认带回原文；
+   *   3. 其它渠道的原文属于隐私内容，先走 chat-permissions 授权，拒绝时只返回概括；
+   *   4. 可用 query 做关键词二次过滤，time_start / time_end 做时间过滤。
+   */
+  const readSemanticMessages = async (args, context, decision) => {
+    const semantic = String(args.semantic || '').trim()
+    const memory = memoryStore()
+    const fallbackQuery = String(args.query || semantic || '').trim()
+    if (!semantic) return runKeywordRead(args, context, decision)
+    if (!memory?.search) {
+      return runKeywordRead(args, context, decision, { queryOverride: fallbackQuery, semanticHint: '记忆库服务未启用，本次已按关键词回退查询原记录。' })
+    }
+    const channelRecord = store.channelRecord(decision.channelId) || store.channelForConversation(context.conversationId)
+    const roleId = String(channelRecord?.roleId || context.roleId || '')
+    const topSummaries = Math.max(1, Math.min(10, Number(args.semantic_limit ?? args.top_summaries ?? 1) || 1))
+    const memoryScope = channelRecord?.group === 'privacy' ? 'privacy' : 'normal'
+    const result = await memory.search({
+      roleId,
+      memoryScope,
+      channelId: channelRecord?.channelId || decision.channelId || '',
+      semantic,
+      keywords: args.query || '',
+      timeStart: args.time_start || '',
+      timeEnd: args.time_end || '',
+      topSummaries,
+    })
+    if (!result?.ok) {
+      return runKeywordRead(args, context, decision, {
+        queryOverride: fallbackQuery,
+        semanticHint: `语义检索不可用（${result?.error || '未知原因'}），本次已按关键词回退查询原记录。`,
+      })
+    }
+    const summaries = Array.isArray(result.summaries) ? result.summaries : []
+    if (!summaries.length) {
+      return runKeywordRead(args, context, decision, {
+        queryOverride: fallbackQuery,
+        semanticHint: '记忆库暂未找到匹配的概括（可能尚未累计到 N 轮或向量模型未返回结果），已按关键词回退查询原记录。',
+      })
+    }
+
+    const rawMessages = []
+    const seenMessages = new Set()
+    const summaryOut = []
+    const channelAccess = new Map()
+    const canReadChannel = async sourceChannelId => {
+      if (!sourceChannelId) return { ok: false, reason: '来源渠道未知' }
+      if (sourceChannelId === decision.channelId) return { ok: true }
+      if (channelAccess.has(sourceChannelId)) return channelAccess.get(sourceChannelId)
+      const authDecision = await permissions.authorize({
+        conversationId: context.conversationId,
+        action: 'read',
+        channel: sourceChannelId,
+      })
+      const access = authDecision.ok === true ? { ok: true } : { ok: false, reason: authDecision.error || '需要授权' }
+      channelAccess.set(sourceChannelId, access)
+      return access
+    }
+    for (const hit of summaries) {
+      const sourceChannelId = String(hit.source?.channel_id || '')
+      const sameChannel = !!sourceChannelId && sourceChannelId === decision.channelId
+      let allowed = sameChannel
+      let deniedReason = ''
+      if (!allowed) {
+        // 跨渠道原文：复用现有权限 / 敏感确认链路；用户拒绝或未授权时只返回概括。
+        // 同一次工具调用里按来源渠道缓存结果，避免同一渠道的多个概括反复弹确认。
+        const access = await canReadChannel(sourceChannelId)
+        allowed = access.ok === true
+        if (!allowed) deniedReason = access.reason || '需要授权'
+      }
+      const info = {
+        id: hit.id,
+        summary: hit.summary,
+        score: hit.score,
+        source_channel_id: sameChannel || allowed ? sourceChannelId || undefined : undefined,
+        source_group: sameChannel || allowed ? hit.source?.group || undefined : undefined,
+        started_at: hit.source?.started_at || undefined,
+        ended_at: hit.source?.ended_at || undefined,
+        round_count: Number(hit.round_count) || 0,
+        included_messages: false,
+        privacy: !sameChannel,
+        authorization_required: !sameChannel && !allowed,
+        authorization_error: deniedReason || undefined,
+      }
+      if (allowed) {
+        const liveMessages = sourceChannelId ? store.messagesOf(sourceChannelId) : []
+        const byId = new Map(liveMessages.map(message => [String(message.message_id || message.id || ''), message]))
+        const candidates = (hit.messages || []).map(message => byId.get(String(message.message_id || '')) || message)
+        for (const message of filterMessagesByTime(candidates, args.time_start, args.time_end)) {
+          const id = String(message.message_id || message.id || '')
+          if (id && seenMessages.has(id)) continue
+          if (id) seenMessages.add(id)
+          rawMessages.push(message)
+        }
+        info.included_messages = true
+      }
+      summaryOut.push(info)
+    }
+
+    // 明确传了关键词时，对原文再做一次关键词过滤（概括命中可能存在语义相近但关键词不出现的轮次）。
+    const keyword = String(args.query || '').trim()
+    const filteredRaw = keyword
+      ? rawMessages.filter(message => {
+          const hay = `${messageTextForSearch(message)} ${message.sender_name || ''}`.toLowerCase()
+          return hay.includes(keyword.toLowerCase())
+        })
+      : rawMessages
+    const maxTokens = Math.max(200, Number(config.get('chat.readTokens', 1500)) || 1500)
+    const { items, truncated } = formatToolMessages(filteredRaw, maxTokens)
+    const includeImages = args.include_images === true || String(args.include_images) === 'true'
+    const wantedIds = Array.isArray(args.image_message_ids)
+      ? args.image_message_ids.map(item => String(item || '')).filter(Boolean)
+      : []
+    const imageLimit = Math.min(4, Math.max(1, Number(args.image_limit) || 2))
+    const imageCandidates = wantedIds.length
+      ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
+      : filteredRaw
+    const images = collectToolImages(imageCandidates, { includeImages, wantedIds, imageLimit })
+
+    const payload = {
+      ok: true,
+      channel: decision.channelId,
+      total: filteredRaw.length,
+      returned: items.length,
+      next_cursor: null,
+      truncated,
+      messages: items,
+      semantic_applied: true,
+      memory_scope: memoryScope,
+      summaries: summaryOut,
+    }
+    if (images.length) {
+      payload.images = images
+      payload.image_note = '图片已追加在本次工具结果之后；一般情况下不需要查看图片，只有确实必要时才使用 include_images。'
+    } else if (includeImages || wantedIds.length) {
+      payload.image_note = '没有找到可用的图片（可能图片已过期、只存在 URL 或 message_id 不正确）。'
+    }
+    if (truncated) payload.hint = '结果超过单次读取 token 上限，已返回部分消息；请缩小时间 / 关键词范围或减少概括条数。'
+    if (summaryOut.some(item => !item.included_messages)) {
+      payload.authorization_required = true
+      payload.hint = [
+        payload.hint,
+        '部分相关概括来自其它渠道，原文属于隐私内容；未获授权时只返回概括。可先向用户说明需要授权，再由用户输入“确认”。',
+      ]
+        .filter(Boolean)
+        .join(' ')
+    } else if (!filteredRaw.length && keyword) {
+      payload.hint = '相关概括已命中，但按关键词过滤原文后为空；可去掉 query 重试，或查看 summaries 后再决定。'
+    }
+    return payload
+  }
+
+  const readMessages = async (args, context) => {
+    const decision = await authorize(args, context, 'read')
+    if (!decision.ok) return denied(decision)
+    if (args.semantic) return readSemanticMessages(args, context, decision)
+    return runKeywordRead(args, context, decision)
+  }
+
+  /**
+   * 独立的长期记忆搜索工具（MemMachine 式 episode_summary 检索）。
+   * 语义query -> 概括向量混合召回；默认返回最相关的 1 条概括；
+   * 同渠道直接带出该概括底下的 10 轮原文；跨渠道/群聊默认只返回概括，
+   * 只有模型显式传 include_messages=true 时才走授权并展开原文。
+   */
+  const searchMemory = async (args, context) => {
+    const semantic = String(args.semantic ?? args.query ?? '').trim()
+    if (!semantic) return { ok: false, error: '请提供 semantic（语义描述）或 query（关键词）。' }
+    const memory = memoryStore()
+    if (!memory?.search) {
+      return { ok: false, code: 'NO_MEMORY_STORE', error: '长期记忆库未启用（需要后端支持）。' }
+    }
+    const currentChannel = store.channelForConversation(context.conversationId)
+    if (!currentChannel) return unavailable()
+    const roleId = String(currentChannel.roleId || context.roleId || '')
+    const memoryScope = currentChannel.group === 'privacy' ? 'privacy' : 'normal'
+    const topSummaries = Math.max(1, Math.min(10, Number(args.top_summaries ?? args.topSummaries ?? args.limit ?? 1) || 1))
+    const explicitInclude = args.include_messages === true || String(args.include_messages) === 'true'
+    const result = await memory.search({
+      roleId,
+      memoryScope,
+      channelId: currentChannel.channelId || '',
+      semantic,
+      keywords: args.keywords ?? args.query ?? '',
+      timeStart: args.time_start || '',
+      timeEnd: args.time_end || '',
+      topSummaries,
+    })
+    if (!result?.ok) {
+      return { ok: false, code: result?.code || 'MEMORY_SEARCH_FAILED', error: result?.error || '记忆检索失败' }
+    }
+    const rawMessages = []
+    const seen = new Set()
+    const summaries = []
+    const channelAccess = new Map()
+    const canReadChannel = async sourceChannelId => {
+      if (!sourceChannelId) return { ok: false, reason: '来源渠道未知' }
+      if (sourceChannelId === currentChannel.channelId) return { ok: true }
+      if (channelAccess.has(sourceChannelId)) return channelAccess.get(sourceChannelId)
+      const authDecision = await permissions.authorize({
+        conversationId: context.conversationId,
+        action: 'read',
+        channel: sourceChannelId,
+      })
+      const access = authDecision.ok === true ? { ok: true } : { ok: false, reason: authDecision.error || '需要授权' }
+      channelAccess.set(sourceChannelId, access)
+      return access
+    }
+    for (const hit of result.summaries || []) {
+      const sourceChannelId = String(hit.source?.channel_id || '')
+      const sameChannel = !!sourceChannelId && sourceChannelId === currentChannel.channelId
+      const omitted = args.include_messages === false || String(args.include_messages) === 'false'
+      let allowed = sameChannel && !omitted
+      let deniedReason = ''
+      if (!sameChannel && explicitInclude) {
+        const access = await canReadChannel(sourceChannelId)
+        allowed = access.ok === true
+        if (!allowed) deniedReason = access.reason || '需要授权'
+      }
+      if (allowed) {
+        const liveMessages = sourceChannelId ? store.messagesOf(sourceChannelId) : []
+        const byId = new Map(liveMessages.map(message => [String(message.message_id || message.id || ''), message]))
+        const candidates = (hit.messages || []).map(message => byId.get(String(message.message_id || '')) || message)
+        for (const message of filterMessagesByTime(candidates, args.time_start, args.time_end)) {
+          const id = String(message.message_id || message.id || '')
+          if (id && seen.has(id)) continue
+          if (id) seen.add(id)
+          rawMessages.push(message)
+        }
+      }
+      summaries.push({
+        id: hit.id,
+        summary: hit.summary,
+        score: hit.score,
+        source_channel_id: sameChannel || (allowed && explicitInclude) ? sourceChannelId || undefined : undefined,
+        source_group: sameChannel || allowed ? hit.source?.group || undefined : undefined,
+        started_at: hit.source?.started_at || undefined,
+        ended_at: hit.source?.ended_at || undefined,
+        round_count: Number(hit.round_count) || 0,
+        included_messages: allowed,
+        privacy: !sameChannel,
+        authorization_required: !sameChannel && !allowed,
+        authorization_error: deniedReason || undefined,
+        message_note: omitted
+          ? '调用方指定 include_messages=false，本次只返回概括。'
+          : !sameChannel && !allowed
+            ? '该概括来自其它渠道，原文属于隐私内容；需要授权后才能展开，已仅返回概括。'
+            : undefined,
+      })
+    }
+
+    const maxTokens = Math.max(200, Number(config.get('chat.readTokens', 1500)) || 1500)
+    const { items, truncated } = formatToolMessages(rawMessages, maxTokens)
+    const payload = {
+      ok: true,
+      role_id: roleId,
+      memory_scope: memoryScope,
+      returned_summaries: summaries.length,
+      top_summaries: topSummaries,
+      messages_returned: items.length,
+      truncated,
+      summaries,
+      query: semantic,
+      embedding: result.embedding || undefined,
+    }
+    if (items.length) {
+      payload.messages = items
+      payload.note = `默认返回每条概括底下的最近 ${summaries[0]?.round_count || config.get('memory.summaryRounds', 10)} 轮原文；跨渠道原文需授权。`
+    } else if (summaries.length) {
+      payload.messages = []
+      payload.note = summaries.some(item => item.authorization_required)
+        ? '已只返回相关概括；其它渠道原文属于隐私内容，需要授权。模型可先向用户说明，再传 include_messages=true 请求授权展开。'
+        : '相关概括已命中，但调用方未要求展开原文（include_messages=false）。'
+    } else {
+      payload.messages = []
+      payload.note = '记忆库中暂时没有匹配的概括；可能这段对话还没累计到 N 轮。'
     }
     return payload
   }
@@ -709,12 +1029,12 @@ export function apply(ctx) {
       'read_messages',
       {
         description:
-          '读取聊天记录。只有确实缺少必要上下文时才调用，同一轮最多一次，不要为了“确认一下”反复读取。默认当前渠道；可用 query 关键词、seq 精确序号、relative 相对序号范围、time_start / time_end 时间段、semantic 语义检索、cursor 分页。图片默认以“[图片]”占位；一般不需要查看原图，确需时用 include_images 或 image_message_ids，并受 image_limit 约束。',
+          '读取聊天记录。只有确实缺少必要上下文时才调用，同一轮最多一次，不要为了“确认一下”反复读取。默认当前渠道；query 是关键词过滤，semantic 会用长期记忆库的概括做向量语义检索并回捞对应原文（比关键词更能找到同义改述），可再叠加 time_start / time_end 和 query 关键词做精确过滤；seq / relative / cursor 保留原有精确读取能力。跨渠道原文需要授权，未授权时只会返回相关概括。图片默认以“[图片]”占位；确需原图时用 include_images 或 image_message_ids。',
         parameters: {
           type: 'object',
           properties: {
             channel: { type: 'string', description: '目标渠道 ID，默认当前渠道；跨渠道需要权限。' },
-            query: { type: 'string', description: '关键词过滤。' },
+            query: { type: 'string', description: '关键词过滤；在 semantic 检索时作为二次精筛。' },
             seq: { type: 'number', description: '精确消息序号。' },
             relative: {
               type: 'object',
@@ -724,7 +1044,8 @@ export function apply(ctx) {
             limit: { type: 'number', description: '返回条数，默认 10，最大 50。' },
             time_start: { type: 'string', description: 'ISO 8601 起始时间。' },
             time_end: { type: 'string', description: 'ISO 8601 结束时间。' },
-            semantic: { type: 'string', description: '语义检索内容（第三阶段启用，当前回退为关键词）。' },
+            semantic: { type: 'string', description: '语义检索描述，例如“用户之前提到的咖啡习惯 / 上海出差安排”。' },
+            semantic_limit: { type: 'number', description: '语义检索先取多少条概括来比对，默认 1，最大 10；调大可对比更多候选概括。' },
             cursor: { type: 'number', description: '上一页返回的 next_cursor。' },
             include_images: {
               type: 'boolean',
@@ -740,6 +1061,26 @@ export function apply(ctx) {
         },
       },
       readMessages,
+    ),
+    registry.register(
+      'search_memory',
+      {
+        description:
+          '长期记忆语义检索：先用一段语义描述在角色的记忆库里查找相关的概括（每条约 10 轮对话压缩而成），再按需展开概括底下的原文。默认只返回最相关的 1 条概括；top_summaries 可指定返回几条供模型比对；同一渠道的概括会附带原文，跨渠道 / 群聊场景默认只返回概括，并把原文标记为隐私内容，只有显式传 include_messages=true 才会请求授权并展开。可用 keywords 叠加关键词精筛、time_start / time_end 限定时间。用户问“我们之前聊过什么 / 你还记得吗 / 找以前某段对话”时优先用本工具，而不是反复调用 read_messages。',
+        parameters: {
+          type: 'object',
+          properties: {
+            semantic: { type: 'string', description: '需要的语义描述；也可以用 query 代替。' },
+            query: { type: 'string', description: 'semantic 的别名；若同时传 keywords，query 会作为关键词精筛。' },
+            keywords: { type: 'string', description: '可选关键词，与向量语义做混合检索 / 二次过滤。' },
+            top_summaries: { type: 'number', description: '返回的概括条数，默认 1，最大 10；返回多条时便于模型比对哪条底下的记录更符合需求。' },
+            include_messages: { type: 'boolean', description: '是否展开概括底下的聊天原文。同渠道默认可展开；跨渠道默认只给概括，显式传 true 才会走授权展开。' },
+            time_start: { type: 'string', description: 'ISO 8601 起始时间。' },
+            time_end: { type: 'string', description: 'ISO 8601 结束时间。' },
+          },
+        },
+      },
+      searchMemory,
     ),
     registry.register(
       'chat_send',

@@ -235,7 +235,23 @@ export function apply(ctx) {
 
   const channelRecord = channelId => {
     if (!channelId) return null
-    if (data.channels[channelId]) return data.channels[channelId]
+    const existing = data.channels[channelId]
+    if (existing) {
+      const bound = sessions.get(existing.conversationId)
+      if (bound) return existing
+      // 后端数据修复 / 渠道会话去重后旧 conversationId 可能不存在：按稳定 channelId 重新绑定。
+      const repaired = sessions
+        .list()
+        .filter(conv => String(conv?.meta?.channelId || '') === String(channelId))
+        .sort((a, b) => (Number(b.messageCount) || 0) - (Number(a.messageCount) || 0))[0]
+      if (repaired) {
+        existing.conversationId = repaired.id
+        persist()
+        ensureConversation(repaired)
+        return existing
+      }
+      return existing
+    }
     const conv = findConversationByChannel(channelId)
     return conv ? ensureConversation(conv) : null
   }
@@ -486,6 +502,34 @@ export function apply(ctx) {
       return service.messagesOf(channelId).find(message => message.message_id === messageId || message.id === messageId) || null
     },
 
+    /** 渠道消息总数（来自 session-service.messageCount，不要求原文已加载）。 */
+    messageCount(channelId) {
+      const record = channelRecord(channelId)
+      if (!record) return 0
+      if (typeof sessions.messageCount === 'function') return sessions.messageCount(record.conversationId) || 0
+      return service.messagesOf(channelId).length
+    },
+
+    /** 分页加载渠道消息，并修正 chat-store 索引指向的 conversationId。 */
+    async loadMessages(channelId, options = {}) {
+      const record = channelRecord(channelId)
+      if (!record || typeof sessions.loadMessages !== 'function') return null
+      const result = await sessions.loadMessages(record.conversationId, options)
+      const conv = sessions.get(record.conversationId)
+      if (conv) {
+        data.channels[channelId] = { ...(data.channels[channelId] || record), conversationId: conv.id }
+        persist()
+      }
+      return result
+    },
+
+    /** 显式全量加载渠道原文（导出 / 搜索 / 保存编辑器）。 */
+    async loadAllMessages(channelId) {
+      const record = channelRecord(channelId)
+      if (!record || typeof sessions.loadAllMessages !== 'function') return null
+      return sessions.loadAllMessages(record.conversationId)
+    },
+
     /**
      * 用一段 JSON 覆盖某个渠道的聊天记录（设置 → 聊天记录 JSON 编辑器使用）。
      * 只补齐结构字段，不允许写入 tool_call 协议消息；返回写入条数。
@@ -660,7 +704,8 @@ export function apply(ctx) {
       const records = Object.values(data.channels)
       const messageCount = records.reduce((sum, record) => {
         const conv = sessions.get(record.conversationId)
-        return sum + (conv?.messages?.length || 0)
+        if (!conv) return sum
+        return sum + (Number(conv.messageCount) || conv.messages?.length || 0)
       }, 0)
       return { channels: records.length, messages: messageCount }
     },
@@ -673,7 +718,10 @@ export function apply(ctx) {
   // 会话创建 / 从后端同步 / 角色信息变化时，保证渠道元数据存在
   const refresh = payload => {
     const dropTranscriptIfEmpty = conv => {
-      if (!conv || (conv.messages && conv.messages.length)) return
+      if (!conv) return
+      // 分页加载后内存里 messages 为空是常态；messageCount > 0 说明后端仍有原文，不能清轨迹。
+      if (Array.isArray(conv.messages) && conv.messages.length > 0) return
+      if (Number(conv.messageCount) > 0) return
       const channelId = conv.meta?.channelId || novaChannelId(conv.id)
       const record = data.channels[channelId]
       if (record?.agentTurns?.length) record.agentTurns = []

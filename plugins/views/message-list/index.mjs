@@ -84,8 +84,12 @@ export function apply(ctx) {
     const windowInitial = readInt(config.get('chat.messageWindowInitial', 80), 80, 20, 500)
     const windowStep = readInt(config.get('chat.messageWindowStep', 80), 80, 20, 500)
     const windowMax = Math.max(windowInitial, readInt(config.get('chat.messageWindowMax', 300), 300, windowInitial, 2000))
+    // 网络只拉当前可见的一小段；往上翻再拉下一页，避免一次同步几万条历史。
+    const fetchPageSize = readInt(config.get('chat.messagePageSize', 20), 20, 10, 200)
 
     let destroyed = false
+    let loadingOlderPage = false
+    const initialPageRequested = new Set()
     let renderFrame = 0
     let scrollFrame = 0
     let patchFrame = 0
@@ -244,6 +248,55 @@ export function apply(ctx) {
       })
     }
 
+    /** 历史是否还有更早的一页未加载：messages 只是当前页，真正总数在 messageCount。 */
+    const hasMoreBefore = conv => {
+      if (!conv) return false
+      const loaded = Array.isArray(conv.messages) ? conv.messages.length : 0
+      const total = Number(conv.messageCount)
+      if (Number.isFinite(total) && total > loaded) return true
+      return conv.messagesComplete === false
+    }
+
+    /** 当前会话首屏：内存里为空但后端有总数时才走网络，只取一小页。 */
+    const ensureInitialPage = conv => {
+      if (destroyed || !conv) return
+      const loaded = Array.isArray(conv.messages) ? conv.messages.length : 0
+      const total = Number(conv.messageCount) || 0
+      if (loaded > 0 || total <= 0) return
+      if (typeof sessions.loadMessages !== 'function' || initialPageRequested.has(conv.id)) return
+      initialPageRequested.add(conv.id)
+      sessions
+        .loadMessages(conv.id, { limit: fetchPageSize })
+        .catch(err => {
+          if (err) ctx.logger?.debug?.(`[message-list] 首屏加载失败：${err?.message || err}`)
+        })
+    }
+
+    /** 滚动到顶部时向后端要下一页；拿到后保持当前锚点，不把用户甩回底部。 */
+    const fetchOlderPage = conv => {
+      if (destroyed || loadingOlderPage || !conv || typeof sessions.loadMessages !== 'function' || !hasMoreBefore(conv)) return
+      const loaded = Array.isArray(conv.messages) ? conv.messages : []
+      const firstSeq = Number(loaded[0]?.seq)
+      const anchor = captureAnchor()
+      loadingOlderPage = true
+      sessions
+        .loadMessages(conv.id, {
+          limit: fetchPageSize,
+          beforeSeq: Number.isFinite(firstSeq) && firstSeq > 0 ? firstSeq : null,
+        })
+        .then(() => {
+          if (destroyed) return
+          // loadMessages 会替换 conv.messages 引用；按原来的消息 id 恢复滚动位置。
+          scheduleRender({ keepAnchor: true, anchor, stickBottom: false })
+        })
+        .catch(err => {
+          toast?.warn?.(`加载更早聊天记录失败：${err?.message || err}`)
+        })
+        .finally(() => {
+          loadingOlderPage = false
+        })
+    }
+
     const renderWindow = ({ anchor = null, stickBottom = false } = {}) => {
       if (destroyed) return
       const conv = sessions.active()
@@ -295,6 +348,7 @@ export function apply(ctx) {
         }
         const replaced = conv.id !== boundConversationId || conv.messages !== boundMessagesRef
         messageTotal = Array.isArray(conv.messages) ? conv.messages.length : 0
+        ensureInitialPage(conv)
         if (replaced || optionsNow.reset || optionsNow.tail) {
           if (replaced) {
             pendingPatches.clear()
@@ -361,10 +415,16 @@ export function apply(ctx) {
       const conv = sessions.active()
       if (!conv || conv.id !== boundConversationId) return
       messageTotal = Array.isArray(conv.messages) ? conv.messages.length : 0
-      // 用户翻到当前 DOM 顶部：把更早的一段补进 DOM。
-      if (scrollEl.scrollTop <= 80 && windowStart > 0) {
-        loadOlderChunk(conv)
-        return
+      // 用户翻到当前 DOM 顶部：先补内存里已加载但未渲染的更早一段；内存见底则向后端拉下一页。
+      if (scrollEl.scrollTop <= 80) {
+        if (windowStart > 0) {
+          loadOlderChunk(conv)
+          return
+        }
+        if (hasMoreBefore(conv)) {
+          fetchOlderPage(conv)
+          return
+        }
       }
       // 用户回到当前 DOM 底部但后面还有未渲染的新消息：继续向后补。
       const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120

@@ -109,6 +109,113 @@ export function apply(ctx) {
 
   useStyle(ctx, MODEL_PAGE_CSS)
 
+  /** 记忆模型分区：向量模型用于长期记忆向量检索，概括模型用于每 N 轮摘要。 */
+  const memoryPanel = providers => {
+    const list = (Array.isArray(providers) ? providers : []).filter(provider => provider && !provider.deleted)
+    const providerOptions = (selected, { followDefault = false } = {}) => {
+      const options = []
+      if (followDefault) options.push(`<option value="" ${!selected ? 'selected' : ''}>（跟随全局默认）</option>`)
+      for (const provider of list) {
+        options.push(
+          `<option value="${escapeHtml(provider.id)}" ${String(selected || '') === String(provider.id) ? 'selected' : ''}>${escapeHtml(
+            provider.name || provider.id,
+          )}</option>`,
+        )
+      }
+      return options.join('')
+    }
+    const modelOptions = (providerId, selected) => {
+      const provider = list.find(item => String(item.id) === String(providerId || ''))
+      const models = (provider?.models || []).filter(model => model && model.enabled !== false)
+      const options = [`<option value="" ${!selected ? 'selected' : ''}>（未选择）</option>`]
+      for (const model of models) {
+        options.push(
+          `<option value="${escapeHtml(model.id)}" ${String(selected || '') === String(model.id) ? 'selected' : ''}>${escapeHtml(
+            model.name || model.id,
+          )}</option>`,
+        )
+      }
+      return options.join('')
+    }
+    const embeddingProvider = config.get('memory.embeddingProvider', '')
+    const embeddingModel = config.get('memory.embeddingModel', '')
+    const embeddingDimension = config.get('memory.embeddingDimension', 0)
+    const summaryProvider = config.get('memory.summaryProvider', '')
+    const summaryModel = config.get('memory.summaryModel', '')
+    const summaryRounds = config.get('memory.summaryRounds', 10)
+    return section(
+      '记忆模型',
+      card(
+        row(
+          '向量模型提供商',
+          '用于把每 N 轮概括转成向量；建议选择支持 /embeddings 的 OpenAI 兼容服务或本地 Ollama。',
+          `<select class="setting-select" style="min-width:230px" data-memory-field="embeddingProvider">${providerOptions(embeddingProvider)}</select>`,
+        ) +
+          row(
+            '向量模型',
+            '例如 text-embedding-3-small、bge-m3、nomic-embed-text。未配置时记忆仍可用，但语义检索会降级为 BM25 关键词。',
+            `<select class="setting-select" style="min-width:230px" data-memory-field="embeddingModel">${modelOptions(
+              embeddingProvider,
+              embeddingModel,
+            )}</select>`,
+          ) +
+          row(
+            '向量维度',
+            '由向量接口实际返回自动获取；点击右侧按钮可立即检测并写回。',
+            `<div style="display:flex;align-items:center;gap:8px"><input class="setting-input" style="width:100px" data-config-input="memory.embeddingDimension" value="${escapeHtml(
+              String(embeddingDimension ?? ''),
+            )}" /><button class="outline-btn model-mini-btn" data-memory-action="detect-dimension">自动获取</button></div>`,
+          ) +
+          row(
+            '自动概括',
+            '每累计 summaryRounds 轮完整对话时自动生成一条记忆；关闭后不会写入新概括，但已存记忆仍可检索。',
+            switchBtn('memory.autoSummarize', true),
+          ) +
+          row(
+            '概括模型提供商',
+            '每 N 轮完整对话用它生成短概括；留空跟随全局默认模型。',
+            `<select class="setting-select" style="min-width:230px" data-memory-field="summaryProvider">${providerOptions(
+              summaryProvider,
+              { followDefault: true },
+            )}</select>`,
+          ) +
+          row(
+            '概括模型',
+            '概括模型可以比对话模型便宜；留空则使用全局默认模型。',
+            `<select class="setting-select" style="min-width:230px" data-memory-field="summaryModel">${modelOptions(
+              summaryProvider,
+              summaryModel,
+            )}</select>`,
+          ) +
+          row(
+            '概括轮数',
+            '每累计多少轮完整对话生成一条概括，默认 10；范围 2-50。',
+            `<input class="setting-input" type="number" min="2" max="50" style="width:90px" data-config-input="memory.summaryRounds" value="${escapeHtml(
+              String(summaryRounds ?? 10),
+            )}" />`,
+          ),
+      ),
+    )
+  }
+
+  const detectEmbeddingDimension = async () => {
+    const provider = String(config.get('memory.embeddingProvider', '') || '').trim()
+    const model = String(config.get('memory.embeddingModel', '') || '').trim()
+    if (!provider || !model) {
+      toast.warn('请先选择向量模型提供商和向量模型')
+      return
+    }
+    try {
+      const result = await api.embeddings({ provider, model, input: ['念风向量维度检测'] })
+      const dimension = Math.max(0, Number(result?.dimension) || 0)
+      if (!dimension) throw new Error('接口没有返回向量维度')
+      config.set('memory.embeddingDimension', dimension)
+      toast.success(`已自动获取向量维度：${dimension}`)
+    } catch (err) {
+      toast.error(`向量维度检测失败：${err?.message || err}`)
+    }
+  }
+
   pages.register({
     id: 'model',
     group: '核心',
@@ -339,8 +446,9 @@ export function apply(ctx) {
       const modelRow = (provider, model) => {
         const editing = editingModelId === model.id
         const enabled = model.enabled !== false
+        const searchText = `${model.id || ''} ${model.name || ''} ${model.ownedBy || ''}`.toLowerCase()
         return `
-          <div class="model-item ${enabled ? '' : 'dim'} ${editing ? 'open' : ''}" data-model-id="${escapeHtml(model.id)}">
+          <div class="model-item ${enabled ? '' : 'dim'} ${editing ? 'open' : ''}" data-model-row data-model-id="${escapeHtml(model.id)}" data-search-text="${escapeHtml(searchText)}">
             <div class="model-item-main-row">
               ${
                 provider.managed
@@ -380,7 +488,7 @@ export function apply(ctx) {
             ${discoveredModels
               .map(
                 model => `
-                <div class="model-item ${model.installed ? 'dim' : ''}">
+                <div class="model-item ${model.installed ? 'dim' : ''}" data-discover-row data-search-text="${escapeHtml(`${model.id || ''} ${model.name || ''}`.toLowerCase())}">
                   <div class="model-item-main-row">
                     <span class="model-status-dot ${model.installed ? 'ok' : ''}"></span>
                     <div class="model-item-info">
@@ -416,6 +524,10 @@ export function apply(ctx) {
                    </div>`
             }
           </div>
+          <div class="model-list-filter" style="display:flex;align-items:center;gap:8px;margin:8px 0 10px;flex-wrap:wrap">
+            <input class="setting-input" style="flex:1;min-width:220px" data-model-filter placeholder="搜索模型 ID / 名称，快速过滤下面的模型" autocomplete="off" spellcheck="false" />
+            <span class="model-list-sub" data-model-filter-count>${models.length} 个</span>
+          </div>
           ${
             addingModel && !provider.managed
               ? `<div class="model-add-form">
@@ -431,6 +543,9 @@ export function apply(ctx) {
               ? models.map(model => modelRow(provider, model)).join('')
               : '<div class="model-empty"><div class="model-empty-desc">还没有模型。点击「获取模型列表」从远端真实拉取，或添加一个自定义模型。</div></div>'
           }
+          <div class="model-empty" data-model-filter-empty style="display:none">
+            <div class="model-empty-desc">没有匹配的模型；试试其它关键词，或清空搜索框。</div>
+          </div>
           ${discoveredSection(provider)}`
       }
 
@@ -655,7 +770,35 @@ export function apply(ctx) {
         )
       }
 
-      /* ---------------- 渲染 ---------------- */
+      /** 记忆模型下拉框：provider 改变时清掉旧的 model，重新渲染对应模型列表。 */
+  const bindMemoryControls = containerNode => {
+    for (const el of containerNode.querySelectorAll('[data-memory-field]')) {
+      const field = String(el.dataset.memoryField || '')
+      if (!field) continue
+      el.addEventListener('change', () => {
+        config.set(`memory.${field}`, String(el.value || ''))
+        if (field.endsWith('Provider')) {
+          const modelField = field === 'embeddingProvider' ? 'embeddingModel' : 'summaryModel'
+          config.set(`memory.${modelField}`, '')
+        }
+        render()
+      })
+    }
+    for (const button of containerNode.querySelectorAll('[data-memory-action]')) {
+      if (button.dataset.memoryAction !== 'detect-dimension') continue
+      button.addEventListener('click', async () => {
+        button.disabled = true
+        try {
+          await detectEmbeddingDimension()
+        } finally {
+          button.disabled = false
+          render()
+        }
+      })
+    }
+  }
+
+  /* ---------------- 渲染 ---------------- */
       const render = () => {
         // 设置容器会在切页时复用同一个 .settings-content 节点；
         // 离开本页后，任何迟到的异步 render 都不能再写进来。
@@ -663,7 +806,7 @@ export function apply(ctx) {
         const official = officialService()
         const useBuiltin = !!official && config.get('model.useBuiltin', true) !== false
         const backendOnline = !!health
-        const staleBackend = backendOnline && ['provider-crud', 'provider-model-discover'].some(name => !(health?.capabilities || []).includes(name))
+        const staleBackend = backendOnline && ['provider-crud', 'provider-model-discover', 'embeddings'].some(name => !(health?.capabilities || []).includes(name))
         unbindConfig?.()
         unbindSliderConfig?.()
         container.innerHTML = page(
@@ -692,6 +835,7 @@ export function apply(ctx) {
           }
           ${useBuiltin ? builtinPanel() : customPanel()}
           ${currentSection()}
+          ${memoryPanel(providerPayload.providers || [])}
           <div class="settings-note">
             ${
               backendOnline
@@ -703,6 +847,7 @@ export function apply(ctx) {
 
         unbindConfig = bindConfigControls(container, ctx)
         bindActions()
+        bindMemoryControls(container)
         bindCompactSliders()
       }
 
@@ -872,6 +1017,27 @@ export function apply(ctx) {
             addDiscoveredModel(el.dataset.discoverAdd)
           })
         })
+        const modelFilter = container.querySelector('[data-model-filter]')
+        if (modelFilter) {
+          const rows = [...container.querySelectorAll('[data-model-row], [data-discover-row]')]
+          const countEl = container.querySelector('[data-model-filter-count]')
+          const emptyEl = container.querySelector('[data-model-filter-empty]')
+          const total = rows.length
+          const applyFilter = () => {
+            const keyword = String(modelFilter.value || '').trim().toLowerCase()
+            let visible = 0
+            for (const row of rows) {
+              const hit = !keyword || String(row.dataset.searchText || '').includes(keyword)
+              row.hidden = !hit
+              row.style.display = hit ? '' : 'none'
+              if (hit) visible += 1
+            }
+            if (countEl) countEl.textContent = keyword ? `${visible}/${total} 个` : `${total} 个`
+            if (emptyEl) emptyEl.style.display = keyword && visible === 0 ? 'flex' : 'none'
+          }
+          modelFilter.addEventListener('input', applyFilter)
+          applyFilter()
+        }
         container.querySelectorAll('[data-active-model]').forEach(select => {
           select.addEventListener('change', () => {
             try {

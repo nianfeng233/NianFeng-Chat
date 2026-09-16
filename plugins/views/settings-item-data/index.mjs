@@ -207,7 +207,7 @@ export function apply(ctx) {
         const format = readSelect(container.querySelector('[data-field="export-format"]')) || 'json'
         const exportService = ctx.registry.get('export-service')
         if (exportService) {
-          exportService.exportAll(format)
+          Promise.resolve(exportService.exportAll(format)).catch(() => {})
           return
         }
         const data = { version: '0.42.0', exportedAt: new Date().toISOString(), ...storage.exportAll() }

@@ -404,7 +404,26 @@ export function apply(ctx) {
     const identity = channelIdentity(channel)
     const targetType = targetTypeOf(channel)
     const instance = findInstance(instanceIdOf(channel))
-    let conv = sessions.get(channel.meta?.conversationId)
+    const stableChannelId = channelKey(channel.id)
+    // 先按稳定 channelId 找已有容器（历史竞态可能产生多个，取消息最多的规范容器）。
+    let conv = typeof sessions.findByChannelId === 'function' ? sessions.findByChannelId(stableChannelId) : null
+    if (!conv) conv = sessions.get(channel.meta?.conversationId)
+    // 首次后端同步结束前不要创建：否则每次启动都会新建空容器，旧记录被落在另一个 conv.id 下。
+    if (
+      !conv &&
+      typeof sessions.ready === 'function' &&
+      typeof sessions.isInitialSyncSettled === 'function' &&
+      sessions.isInitialSyncSettled() === false
+    ) {
+      sessions.ready().then(() => {
+        try {
+          ensureConversation(channel)
+        } catch (_) {
+          /* ignore */
+        }
+      }).catch(() => {})
+      return null
+    }
     const label = targetDisplayName(channel)
     const metaPatch = {
       channelId: channelKey(channel.id),
@@ -452,6 +471,12 @@ export function apply(ctx) {
         name: `${role?.name || '角色'} · ${SESSION_LABEL[targetType] || 'QQ'} · ${label}`,
         preview: `${role?.name || '角色'} 的 NapCat 渠道 · ${bindingSummary(channel)}`,
         meta: { ...(conv.meta || {}), ...metaPatch },
+      })
+    }
+    // 历史重复容器修复后，把渠道配置指向规范容器，后续页面/代聊都不会再用旧空会话。
+    if (String(channel.meta?.conversationId || '') !== String(conv.id)) {
+      channels.updateChannel(findTab(channel.id), channel.id, {
+        meta: { ...(channel.meta || {}), conversationId: conv.id },
       })
     }
     try {

@@ -207,7 +207,25 @@ export function apply(ctx) {
     const permissions = permissionsOf(channel)
     const identity = channelIdentity(channel)
     const sessionType = sessionTypeOf(channel)
-    let conv = sessions.get(channel.meta?.conversationId)
+    const stableChannelId = channelKey(channel.id)
+    // 先按稳定 channelId 找已有容器（历史上可能就是它产生了“渠道 0 条 / 旧记录在另一个 conv.id”）。
+    let conv = typeof sessions.findByChannelId === 'function' ? sessions.findByChannelId(stableChannelId) : null
+    if (!conv) conv = sessions.get(channel.meta?.conversationId)
+    if (
+      !conv &&
+      typeof sessions.ready === 'function' &&
+      typeof sessions.isInitialSyncSettled === 'function' &&
+      sessions.isInitialSyncSettled() === false
+    ) {
+      sessions.ready().then(() => {
+        try {
+          ensureConversation(channel)
+        } catch (_) {
+          /* ignore */
+        }
+      }).catch(() => {})
+      return null
+    }
     const firstBinding = bindingsOf(channel)[0]
     const suffix = firstBinding ? `（${bindingLabel(firstBinding)}）` : ''
     const metaPatch = {
@@ -248,6 +266,11 @@ export function apply(ctx) {
         name: conv.name || `${role?.name || '角色'} · ${SESSION_LABEL[sessionType] || 'QQ'}`,
         preview: conv.preview || `${role?.name || '角色'} 的 QQ 官方机器人渠道`,
         meta: { ...(conv.meta || {}), ...metaPatch },
+      })
+    }
+    if (String(channel.meta?.conversationId || '') !== String(conv.id)) {
+      channels.updateChannel(findTab(channel.id), channel.id, {
+        meta: { ...(channel.meta || {}), conversationId: conv.id },
       })
     }
     try {

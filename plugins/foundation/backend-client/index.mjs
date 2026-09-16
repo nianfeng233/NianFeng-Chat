@@ -135,6 +135,17 @@ export function apply(ctx) {
       request(`/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, { method: 'PUT', body: patch }),
     removeModel: (providerId, modelId) =>
       request(`/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' }),
+
+    /** 向量模型：设置页「自动获取维度」和记忆库向量化共用。 */
+    embeddings: payload => request('/embeddings', { method: 'POST', body: payload || {}, timeoutMs: 60000 }),
+
+    /** 长期记忆库（按角色独立；概括、向量、混合检索都在后端完成）。 */
+    memoryStatus: () => request('/memory/status'),
+    memoryIngest: payload => request('/memory/ingest', { method: 'POST', body: payload || {}, timeoutMs: 180000 }),
+    memorySearch: payload => request('/memory/search', { method: 'POST', body: payload || {}, timeoutMs: 60000 }),
+    memorySummaries: (roleId, scope = 'normal', channelId = '') =>
+      request(`/memory/summaries?roleId=${encodeURIComponent(roleId || '')}&scope=${encodeURIComponent(scope)}&channelId=${encodeURIComponent(channelId)}`),
+
     logs: (limit = 100) => request(`/logs?limit=${limit}`),
     plugins: () => request('/plugins'),
     pluginDirs: () => request('/plugins/dirs'),
@@ -147,6 +158,22 @@ export function apply(ctx) {
     restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
 
     sessions: (options = {}) => request(`/sessions${options?.compact ? '?compact=1' : ''}`),
+    session: (id, options = {}) => request(`/sessions/${encodeURIComponent(id)}${options?.compact ? '?compact=1' : ''}`),
+    sessionMessages: (id, options = {}) => {
+      const params = []
+      if (options?.limit !== undefined) params.push(`limit=${encodeURIComponent(options.limit)}`)
+      if (options?.beforeSeq !== undefined && options?.beforeSeq !== null && options?.beforeSeq !== '') {
+        params.push(`beforeSeq=${encodeURIComponent(options.beforeSeq)}`)
+      }
+      if (options?.afterSeq !== undefined && options?.afterSeq !== null && options?.afterSeq !== '') {
+        params.push(`afterSeq=${encodeURIComponent(options.afterSeq)}`)
+      }
+      if (options?.all) params.push('all=1')
+      return request(`/sessions/${encodeURIComponent(id)}/messages${params.length ? `?${params.join('&')}` : ''}`, {
+        timeoutMs: options?.all ? 120000 : 30000,
+      })
+    },
+    allMessages: id => request(`/sessions/${encodeURIComponent(id)}/messages?all=1`, { timeoutMs: 120000 }),
     createSession: conv => request('/sessions', { method: 'POST', body: conv }),
     saveSession: conv => request(`/sessions/${conv.id}`, { method: 'PUT', body: conv }),
     deleteSession: id => request(`/sessions/${id}`, { method: 'DELETE' }),

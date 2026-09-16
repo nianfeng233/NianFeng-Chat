@@ -73,8 +73,44 @@ export async function startHeadlessRuntime(options = {}) {
   if (api?.health) await api.health().catch(() => {})
   const flow = ctx.inject('chat-flow')
   const flowMode = flow?.mode?.() || 'unknown'
-  console.log(`[headless] 服务端代聊已就绪 · 后端 ${backendUrl} · chat-flow=${flowMode}`)
-  parentPort?.postMessage({ type: 'ready', backendUrl, flowMode, plugins: app.activeCount, total: app.list?.().length || 0 })
+  let sessionStatus = ctx.inject('session-service')?.status?.() || null
+  // 后台代聊 Worker 的会话同步如果第一次没成功，这里在 ready 前再补一次；
+  // 避免代聊运行在本地空会话上，导致 NapCat 新消息没有写进后端聊天记录。
+  if (sessionStatus && sessionStatus.source !== 'server') {
+    // 先等 session-service 的首次 compact 同步结束，避免再起一次并发全量同步；
+    // 如果首次就是离线失败，才尝试补一次，ready 时会把 sessions=local 一起上报。
+    try {
+      await ctx.inject('session-service')?.ready?.()
+    } catch (_) {
+      /* ignore */
+    }
+    sessionStatus = ctx.inject('session-service')?.status?.() || sessionStatus
+    if (sessionStatus?.source !== 'server') {
+      try {
+        await ctx.inject('session-service')?.sync?.()
+      } catch (_) {
+        /* ready 时会把 sessions=local 一起上报，start.mjs 记日志 */
+      }
+      sessionStatus = ctx.inject('session-service')?.status?.() || sessionStatus
+    }
+  }
+  console.log(
+    `[headless] 服务端代聊已就绪 · 后端 ${backendUrl} · chat-flow=${flowMode} · sessions=${sessionStatus?.source || 'unknown'}`,
+  )
+  parentPort?.postMessage({
+    type: 'ready',
+    backendUrl,
+    flowMode,
+    plugins: app.activeCount,
+    total: app.list?.().length || 0,
+    sessionsSource: sessionStatus?.source || '',
+    sessionsError: sessionStatus?.error || '',
+    at: Date.now(),
+  })
+  const heartbeat = setInterval(() => {
+    parentPort?.postMessage({ type: 'heartbeat', at: Date.now() })
+  }, 15_000)
+  heartbeat.unref?.()
 
   if (isMainThread) {
     process.on('SIGINT', () => {

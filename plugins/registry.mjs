@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 93 个插件，按目录名排序；真正的加载顺序由
+ * 共 94 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -402,6 +402,46 @@ export const plugins = [
     "dir": "plugins/domain/image-service"
   },
   {
+    "id": "memory-store",
+    "version": "1.0.0",
+    "displayName": "长期记忆库",
+    "description": "业务服务 · 每 10 轮概括、向量语义 + 关键词 + 时间混合检索。",
+    "author": "念风内核",
+    "core": false,
+    "enabled": true,
+    "icon": "🧠",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "chat-store": "^1.0.0",
+      "config": ">=1.1.0",
+      "event-bus": "*",
+      "session-service": "^2.0.0"
+    },
+    "optionalDepends": {
+      "backend-client": ">=1.0.0",
+      "model-registry": ">=1.0.0"
+    },
+    "inject": [
+      "chat-store",
+      "session-service",
+      "config",
+      "event-bus",
+      "api?",
+      "model-registry?"
+    ],
+    "provides": [
+      {
+        "name": "memory-store",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/domain/memory-store/index.mjs",
+    "dir": "plugins/domain/memory-store"
+  },
+  {
     "id": "message-service",
     "version": "1.0.0",
     "displayName": "消息服务",
@@ -579,7 +619,8 @@ export const plugins = [
     "unavailableReason": "",
     "depends": {
       "config": "^1.0.0",
-      "storage": "^1.0.0"
+      "storage": "^1.0.0",
+      "event-bus": "*"
     },
     "optionalDepends": {
       "backend-client": ">=1.0.0"
@@ -587,6 +628,7 @@ export const plugins = [
     "inject": [
       "storage",
       "config",
+      "event-bus",
       "api?"
     ],
     "provides": [
@@ -953,7 +995,11 @@ export const plugins = [
       "session-service": ">=2.0.0",
       "tool-registry": "^1.0.0"
     },
-    "optionalDepends": {},
+    "optionalDepends": {
+      "napcat": "^1.0.0",
+      "backend-client": ">=1.0.0",
+      "image-service": ">=1.0.0"
+    },
     "inject": [
       "tool-registry",
       "chat-store",
@@ -962,7 +1008,10 @@ export const plugins = [
       "context-builder",
       "session-service",
       "config",
-      "event-bus"
+      "event-bus",
+      "api?",
+      "napcat-channel?",
+      "image-service?"
     ],
     "provides": [
       {
@@ -1328,10 +1377,13 @@ export const plugins = [
       "config": "^1.0.0",
       "event-bus": "*"
     },
-    "optionalDepends": {},
+    "optionalDepends": {
+      "backend-client": ">=1.0.0"
+    },
     "inject": [
       "config",
-      "event-bus"
+      "event-bus",
+      "api?"
     ],
     "provides": [
       {
@@ -2297,9 +2349,9 @@ export const plugins = [
   },
   {
     "id": "message-list",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "消息列表",
-    "description": "视觉内容 · 消息滚动区容器与渲染调度。",
+    "description": "视觉内容 · 消息滚动区容器、大历史窗口化与渲染调度。",
     "author": "念风内核",
     "core": true,
     "enabled": true,

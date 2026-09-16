@@ -160,6 +160,25 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
       return { detail: `${label} 可用模型 ${models.length} 个` }
     },
 
+    /** OpenAI 兼容的 /embeddings 接口（DeepSeek 官方可能不支持，错误会原样上报）。 */
+    async embed({ provider, model, input }, ctx) {
+      const base = trimSlash(provider.baseURL || defaultBaseURL)
+      const res = await request(ctx, `${base}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+        timeoutMs: providerTimeout(provider),
+        proxy: provider.proxy,
+        body: JSON.stringify({ model, input }),
+      })
+      const json = await res.json()
+      const list = Array.isArray(json.data) ? json.data : Array.isArray(json.embeddings) ? json.embeddings : []
+      const embeddings = list
+        .map(item => (Array.isArray(item) ? item : item?.embedding))
+        .filter(item => Array.isArray(item) && item.length)
+      if (!embeddings.length) throw createError(502, `${label} 未返回 embedding 向量`)
+      return embeddings
+    },
+
     async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
       const base = trimSlash(provider.baseURL || defaultBaseURL)
       const deepseekMode = deepseek || isDeepseekProvider(provider, model)
@@ -484,6 +503,39 @@ const adapters = {
       const models = await adapters.ollama.listModels(provider, ctx)
       return { detail: `本地模型 ${models.length} 个` }
     },
+    /** 优先新版 /api/embed；旧版 Ollama 回退到 /api/embeddings。 */
+    async embed({ provider, model, input }, ctx) {
+      const base = trimSlash(provider.baseURL || 'http://localhost:11434')
+      const texts = input.map(text => String(text ?? ''))
+      try {
+        const res = await request(ctx, `${base}/api/embed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+          timeoutMs: providerTimeout(provider),
+          proxy: provider.proxy,
+          body: JSON.stringify({ model, input: texts }),
+        })
+        const json = await res.json()
+        const embeddings = Array.isArray(json.embeddings) ? json.embeddings : []
+        if (embeddings.length) return embeddings
+      } catch (err) {
+        if (!String(err?.message || err).includes('404')) throw err
+      }
+      const out = []
+      for (const text of texts) {
+        const res = await request(ctx, `${base}/api/embeddings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
+          timeoutMs: providerTimeout(provider),
+          proxy: provider.proxy,
+          body: JSON.stringify({ model, prompt: text }),
+        })
+        const json = await res.json()
+        if (Array.isArray(json.embedding) && json.embedding.length) out.push(json.embedding)
+      }
+      if (!out.length) throw createError(502, 'Ollama 未返回 embedding 向量')
+      return out
+    },
     async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
       const base = trimSlash(provider.baseURL || 'http://localhost:11434')
       const toolDefs = options?.toolChoice === 'none' ? [] : Array.isArray(options?.tools) ? options.tools.filter(Boolean) : []
@@ -683,6 +735,25 @@ const adapters = {
     async test(provider, ctx) {
       const models = await adapters.gemini.listModels(provider, ctx)
       return { detail: `可用模型 ${models.length} 个` }
+    },
+    /** Gemini embedContent：逐个文本请求，兼容纯文本 embedding 模型。 */
+    async embed({ provider, model, input }, ctx) {
+      const apiBase = geminiApiBase(provider)
+      const out = []
+      for (const text of input) {
+        const res = await request(ctx, `${apiBase}/models/${encodeURIComponent(model)}:embedContent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...geminiHeaders(provider) },
+          timeoutMs: providerTimeout(provider),
+          proxy: provider.proxy,
+          body: JSON.stringify({ content: { parts: [{ text: String(text ?? '') }] } }),
+        })
+        const json = await res.json()
+        const values = json?.embedding?.values
+        if (Array.isArray(values) && values.length) out.push(values)
+      }
+      if (!out.length) throw createError(502, 'Gemini 未返回 embedding 向量')
+      return out
     },
     async stream({ provider, model, messages, options, signal, onChunk, onToolCall, onReasoning, onDone }, ctx) {
       const apiBase = geminiApiBase(provider)
@@ -1229,6 +1300,33 @@ export function apply(ctx) {
       let text = ''
       await service.stream({ provider, model, messages, options, signal, onChunk: delta => (text += delta) })
       return text
+    },
+
+    /**
+     * 文本向量化。从已配置提供商里调用对应模型的 embedding 接口，
+     * 返回 { embeddings, dimension, provider, model }；维度由接口实际返回自动决定。
+     */
+    async embed({ provider, model, input } = {}) {
+      const providerId = provider || settings.get().defaultProvider
+      if (!providerId) throw createError(400, '请先在「设置 → 模型」选择向量模型提供商')
+      const cfg = getProvider(providerId)
+      const adapter = requireAdapter(cfg.type)
+      if (typeof adapter.embed !== 'function') throw createError(400, `提供商类型「${cfg.type}」不支持 embedding 接口`)
+      if (needsKey(cfg.type) && !cfg.apiKey) throw createError(400, `提供商「${cfg.name}」尚未配置 API Key`)
+      const useModel = model || cfg.defaultModel
+      if (!useModel) throw createError(400, `请先为「${cfg.name}」选择向量模型`)
+      const texts = (Array.isArray(input) ? input : [input]).map(value => String(value ?? '')).filter(value => value.trim())
+      if (!texts.length) throw createError(400, 'embedding 输入不能为空')
+      const raw = await adapter.embed({ provider: cfg, model: useModel, input: texts }, ctx)
+      const embeddings = (Array.isArray(raw) ? raw : [])
+        .map(vector => (Array.isArray(vector) ? vector.map(value => Number(value)).filter(Number.isFinite) : []))
+        .filter(vector => vector.length)
+      if (!embeddings.length) throw createError(502, `${cfg.name} / ${useModel} 未返回有效的 embedding 向量`)
+      const dimension = embeddings[0].length
+      if (embeddings.some(vector => vector.length !== dimension)) {
+        throw createError(502, 'embedding 返回的向量维度不一致')
+      }
+      return { embeddings, dimension, provider: providerId, model: useModel }
     },
 
     /** 真实翻译（通过已配置模型；没有模型就明确报错） */

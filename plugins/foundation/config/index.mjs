@@ -115,6 +115,8 @@ const DEFAULTS = {
   'chat.messageWindowInitial': 80,
   'chat.messageWindowStep': 80,
   'chat.messageWindowMax': 300,
+  // 会话聊天页每次从后端拉取的可见消息条数（懒加载，不再首屏全量同步历史）。
+  'chat.messagePageSize': 20,
   // 聊天链路（文档：工具调用 / 记忆 / 权限 / 确认）
   'chat.toolsEnabled': true,
   'chat.toolChoice': 'required',
@@ -127,6 +129,16 @@ const DEFAULTS = {
   // 群聊不适合按“轮”推算，统一按逐条消息数量控制。
   'chat.groupMessages': 20,
   'chat.readTokens': 1500,
+  // 长期记忆（参考 MemMachine）：每 summaryRounds 轮完整对话压缩成一段短概括并向量化。
+  // 存储与检索都在后端完成，设置页「模型 → 记忆模型」选择向量 / 概括模型。
+  'memory.enabled': true,
+  'memory.autoSummarize': true,
+  'memory.summaryRounds': 10,
+  'memory.embeddingProvider': '',
+  'memory.embeddingModel': '',
+  'memory.embeddingDimension': 0,
+  'memory.summaryProvider': '',
+  'memory.summaryModel': '',
   // 图片策略：自动上下文最多带几张、单条消息最多带几张、每张图按固定 token 估算
   'chat.imagesPerRequest': 2,
   'chat.imagesPerMessage': 2,

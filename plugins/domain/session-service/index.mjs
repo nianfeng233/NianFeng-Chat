@@ -54,6 +54,22 @@ export function apply(ctx) {
   let source = 'local'
   let lastSyncError = ''
   let syncing = false
+  let syncRetryTimer = null
+  let syncRetryCount = 0
+  // 渠道插件在拿到后端会话列表前不要创建“同渠道新会话”，否则每次重启都会多出一个空容器。
+  // 首次同步结束（成功或失败）后放行；没有后端时立即放行，走纯本地离线模式。
+  let initialSyncSettled = !api
+  let initialSyncResolved = false
+  let markInitialSyncSettled = () => {}
+  const initialSyncPromise = new Promise(resolve => {
+    markInitialSyncSettled = () => {
+      if (initialSyncResolved) return
+      initialSyncResolved = true
+      initialSyncSettled = true
+      resolve()
+    }
+    if (initialSyncSettled) markInitialSyncSettled()
+  })
   const pushTimers = new Map()
   const messagePushTimers = new Map()
 
@@ -62,9 +78,15 @@ export function apply(ctx) {
     const loaded = Array.isArray(conv?.messages) ? conv.messages.length : 0
     return Math.max(Number.isFinite(explicit) && explicit >= 0 ? explicit : 0, loaded)
   }
+  /**
+   * 会话对象上的内部懒加载字段，绝不能随 withoutMessages / 写盘发送给后端：
+   *   - messagesComplete    内存里是否已包含完整原文
+   *   - messagesLoading     正在请求分页（防重复请求）
+   *   - pendingMessageIds   source=local 时新建、尚未写回后端的消息 id
+   */
   const withoutMessages = conv => {
     if (!conv) return conv
-    const { messages, localTruncated, ...meta } = conv
+    const { messages, localTruncated, messagesComplete, messagesLoading, pendingMessageIds, ...meta } = conv
     meta.messageCount = messageCountOf(conv)
     return meta
   }
@@ -107,10 +129,50 @@ export function apply(ctx) {
    * 不能整段二选一，否则本地截断缓存会在 updatedAt 较新时把后端全量历史“顶掉”。
    * 这里以某一侧为底稿做并集，并保留本地尚未写回的新消息。
    */
-  const mergeConversationMessages = (localConv, remoteConv) => {
+  const mergeMessageLists = (...lists) => {
+    const seen = new Set()
+    const messages = []
+    for (const list of lists) {
+      for (const message of Array.isArray(list) ? list : []) {
+        const key = messageIdentity(message)
+        if (key && seen.has(key)) continue
+        if (key) seen.add(key)
+        messages.push(message)
+      }
+    }
+    return sortConversationMessages(messages)
+  }
+
+  const pendingMessagesOf = conv => {
+    const ids = new Set((Array.isArray(conv?.pendingMessageIds) ? conv.pendingMessageIds : []).map(value => String(value || '')).filter(Boolean))
+    if (!ids.size) return []
+    return (Array.isArray(conv?.messages) ? conv.messages : []).filter(message => ids.has(String(message?.id || message?.message_id || '')))
+  }
+
+  /**
+   * 合并本地缓存与后端会话。
+   * compactRemote=true 表示后端只返回了元数据 / messageCount（分页接口未来会成为默认）：
+   *   - 不能用本地滚动缓存补出假的 messageCount；
+   *   - 本地已加载的一小段原文继续保留给离线兜底，等当前会话真正打开时再按页刷新；
+   *   - source=local 时新建、尚未写回后端的 pending 消息永远不会被丢弃。
+   */
+  const mergeConversationMessages = (localConv, remoteConv, { compactRemote = false } = {}) => {
     const localMessages = Array.isArray(localConv?.messages) ? localConv.messages : []
     const remoteMessages = Array.isArray(remoteConv?.messages) ? remoteConv.messages : []
-    // 后端只返回了元数据（未来 compact / 分页接口）时，绝不能用本地滚动缓存整段覆盖。
+    if (compactRemote) {
+      const remoteCount = Math.max(0, Number(remoteConv?.messageCount) || 0)
+      const pending = pendingMessagesOf(localConv)
+      if (!remoteCount && !pending.length) return { messages: [], messageCount: 0, localTruncated: false, messagesComplete: true }
+      // 只有“已经完整加载过”的本地缓存才可以继续留用；滚动缓存里可能有上一版本的假消息，
+      // 绝不能因为 localMessages.length <= remoteCount 就把它当成服务端原文保留。
+      const cache =
+        localConv?.messagesComplete === true && localMessages.length >= remoteCount && remoteCount > 0 ? localMessages : []
+      const messages = mergeMessageLists(cache, pending)
+      const messageCount = Math.max(remoteCount, messages.length)
+      const localTruncated = messages.length < messageCount
+      return { messages, messageCount, localTruncated, messagesComplete: !localTruncated }
+    }
+    // 后端只返回了元数据（compact / 分页接口）时，绝不能用本地滚动缓存整段覆盖。
     const remoteLooksMetadataOnly = !!remoteConv && remoteMessages.length === 0 && Number(remoteConv.messageCount) > 0
     const localTruncated =
       localConv?.localTruncated === true ||
@@ -122,22 +184,13 @@ export function apply(ctx) {
       !!remoteConv && (localTruncated || !isNewerConversation(localConv, remoteConv) || localMessages.length < remoteMessages.length)
     const base = useRemoteAsBase ? remoteMessages : localMessages
     const extra = useRemoteAsBase ? localMessages : remoteMessages
-    if (!base.length && !extra.length) return { messages: [], messageCount: 0, localTruncated }
-    const seen = new Set()
-    const messages = []
-    for (const message of base) {
-      const key = messageIdentity(message)
-      if (key && seen.has(key)) continue
-      if (key) seen.add(key)
-      messages.push(message)
+    const messages = mergeMessageLists(base, extra)
+    return {
+      messages,
+      messageCount: messages.length,
+      localTruncated,
+      messagesComplete: !localTruncated && messages.length >= Number(remoteConv?.messageCount ?? messages.length),
     }
-    for (const message of extra) {
-      const key = messageIdentity(message)
-      if (key && seen.has(key)) continue
-      if (key) seen.add(key)
-      messages.push(message)
-    }
-    return { messages: sortConversationMessages(messages), messageCount: messages.length, localTruncated }
   }
 
   /**
@@ -156,7 +209,16 @@ export function apply(ctx) {
       // 判断截断必须看 messageCount，而不是当前数组长度：本地只剩 20 条但 messageCount=100 时，
       // 旧逻辑会误标为完整，下一次启动可能把截断缓存当成全量。
       const keep = messages.slice(-20)
-      return { ...conv, messages: keep, messageCount: messageCountOf(conv), localTruncated: messageCountOf(conv) > keep.length }
+      const total = messageCountOf(conv)
+      return {
+        ...conv,
+        messages: keep,
+        messageCount: total,
+        localTruncated: total > keep.length,
+        messagesComplete: keep.length >= total,
+        messagesLoading: false,
+        pendingMessageIds: Array.isArray(conv.pendingMessageIds) ? conv.pendingMessageIds : [],
+      }
     })
     storage.set(NS, KEY, { conversations, activeId: data.activeId, removedIds: data.removedIds || [] })
   }
@@ -235,7 +297,61 @@ export function apply(ctx) {
    *   - 同一 id 的元数据取 updatedAt 更新的；消息记录做并集，本地截断缓存不能覆盖后端全量
    *   - 本地独有的会话保留，等待写回后端
    */
-  const mergeServerConversations = (serverList = []) => {
+  /**
+   * 同一个渠道（meta.channelId 稳定）出现多个会话容器时，只保留消息最多的一个：
+   *   - 这是曾经“渠道里记录为 0、旧记录另起一个会话”的修复核心；
+   *   - 选择消息多 / 较新的容器，并把其它容器的原文并进来；
+   *   - 被合并掉的 id 交给 sync 删除后端，渠道插件之后用 findByChannelId 找到唯一容器。
+   * 只处理外部渠道（nova:web 是每个角色唯一的普通会话，不参与去重）。
+   */
+  const dedupeChannelConversations = list => {
+    const groups = new Map()
+    const result = []
+    const dedupedIds = []
+    for (const conv of list) {
+      const channelId = String(conv?.meta?.channelId || '')
+      const key = channelId && !channelId.startsWith('nova:web:') ? channelId : ''
+      if (!key) {
+        result.push(conv)
+        continue
+      }
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(conv)
+    }
+    for (const items of groups.values()) {
+      if (items.length <= 1) {
+        result.push(items[0])
+        continue
+      }
+      const canonical = items.reduce((best, item) => (messageCountOf(item) > messageCountOf(best) ? item : best), items[0])
+      const messages = mergeMessageLists(...items.map(item => item.messages))
+      const messageCount = Math.max(...items.map(messageCountOf), messages.length)
+      const latest = items.reduce((best, item) => {
+        const bestHasMessages = messageCountOf(best) > 0
+        const itemHasMessages = messageCountOf(item) > 0
+        if (bestHasMessages !== itemHasMessages) return itemHasMessages ? item : best
+        return Number(item?.updatedAt || 0) > Number(best?.updatedAt || 0) ? item : best
+      }, canonical)
+      const complete = items.every(item => item?.messagesComplete === true || Array.isArray(item?.messages)) &&
+        messages.length >= messageCount
+      result.push({
+        ...canonical,
+        // 名称 / preview 取最近更新的容器，避免去重后回退到旧名字。
+        name: latest?.name || canonical.name,
+        preview: latest?.preview ?? canonical.preview,
+        updatedAt: Math.max(...items.map(item => Number(item?.updatedAt || 0) || 0), Date.now()),
+        messages,
+        messageCount,
+        localTruncated: !complete,
+        messagesComplete: complete,
+        pendingMessageIds: [...new Set(items.flatMap(item => item?.pendingMessageIds || []))],
+      })
+      for (const item of items) if (item.id !== canonical.id) dedupedIds.push(item.id)
+    }
+    return { conversations: result, dedupedIds }
+  }
+
+  const mergeServerConversations = (serverList = [], { compact = false } = {}) => {
     const all = (serverList || []).filter(conv => conv?.id)
     const tombstones = new Set(data.removedIds || [])
     const serverById = new Map(all.map(conv => [conv.id, conv]))
@@ -248,7 +364,7 @@ export function apply(ctx) {
         merged.set(localConv.id, localConv)
         continue
       }
-      const mergedMessages = mergeConversationMessages(localConv, remote)
+      const mergedMessages = mergeConversationMessages(localConv, remote, { compactRemote: compact })
       const metaSource = shouldUseRemoteMeta(localConv, remote) ? remote : localConv
       merged.set(localConv.id, {
         ...metaSource,
@@ -256,24 +372,61 @@ export function apply(ctx) {
         messageCount: mergedMessages.messageCount,
         updatedAt: Math.max(Number(localConv.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || metaSource.updatedAt,
         // 保留“本地缓存原本是否只有一部分”的标记，供写回时决定 replace 还是逐条 upsert；
-        // withoutMessages / 写盘都会剥掉这个内部字段，不会污染后端。
+        // withoutMessages / 写盘都会剥掉这些内部字段，不会污染后端。
         localTruncated: mergedMessages.localTruncated,
+        messagesComplete: mergedMessages.messagesComplete,
+        pendingMessageIds: Array.isArray(localConv.pendingMessageIds) ? localConv.pendingMessageIds : [],
       })
     }
-    for (const remote of serverKept) if (!merged.has(remote.id)) merged.set(remote.id, remote)
-    const conversations = [...merged.values()].sort(
-      (a, b) => Number(b?.updatedAt || b?.createdAt || 0) - Number(a?.updatedAt || a?.createdAt || 0),
-    )
+    for (const remote of serverKept) {
+      if (merged.has(remote.id)) continue
+      const remoteMessages = Array.isArray(remote.messages) ? remote.messages : []
+      const remoteCount = Math.max(Number(remote.messageCount) || 0, remoteMessages.length)
+      const complete = remoteMessages.length >= remoteCount
+      merged.set(remote.id, {
+        ...remote,
+        messages: remoteMessages,
+        messageCount: remoteCount,
+        localTruncated: !complete,
+        messagesComplete: complete,
+        pendingMessageIds: [],
+      })
+    }
+    const { conversations, dedupedIds } = dedupeChannelConversations([...merged.values()])
+    conversations.sort((a, b) => Number(b?.updatedAt || b?.createdAt || 0) - Number(a?.updatedAt || a?.createdAt || 0))
     return {
       conversations,
       serverById,
+      dedupedIds,
       removedIds: [...tombstones].filter(id => serverById.has(id)),
     }
   }
 
   /** 后端已关闭 / 离线时的请求失败不值得刷警告，页面会在重连后自动补写。 */
   const isTransientSyncError = err =>
-    err?.status === 404 || /fetch failed|Failed to fetch|NetworkError|ECONNREFUSED|连接|离线/i.test(String(err?.message || err || ''))
+    err?.status === 404 ||
+    err?.name === 'AbortError' ||
+    /aborted|The user aborted|fetch failed|Failed to fetch|NetworkError|ECONNREFUSED|连接|离线|timeout|超时/i.test(String(err?.message || err || ''))
+
+  const clearSyncRetry = () => {
+    if (syncRetryTimer) {
+      clearTimeout(syncRetryTimer)
+      syncRetryTimer = null
+    }
+  }
+
+  /** 同步遇到网络抖动 / 页面刷新导致的 abort 时自动退避重试，避免永久停在 local。 */
+  const scheduleSyncRetry = () => {
+    if (syncRetryTimer) return
+    if (!api || typeof api.sessions !== 'function') return
+    const delay = Math.min(30_000, 2000 * 2 ** Math.min(syncRetryCount, 4))
+    syncRetryCount += 1
+    syncRetryTimer = setTimeout(() => {
+      syncRetryTimer = null
+      service.sync().catch(() => {})
+    }, delay)
+    syncRetryTimer.unref?.()
+  }
 
   /** 消息级写回：SQLite 后端每条消息独立 upsert，不再重写整个会话。 */
   const scheduleMessagePush = (conversationId, message, delay = 220) => {
@@ -286,7 +439,16 @@ export function apply(ctx) {
       const current = find(conversationId)
       const latest = current?.messages?.find(item => item.id === message.id)
       if (!latest || source !== 'server' || !api) return
-      api.addMessage(conversationId, latest).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`消息写回失败：${err.message}`) })
+      api
+        .addMessage(conversationId, latest)
+        .then(() => {
+          const current = find(conversationId)
+          if (!current) return
+          const id = String(latest.id || latest.message_id || '')
+          current.pendingMessageIds = (current.pendingMessageIds || []).filter(value => String(value) !== id)
+          if (current.pendingMessageIds.length === 0) delete current.pendingMessageIds
+        })
+        .catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`消息写回失败：${err.message}`) })
     }, delay)
     messagePushTimers.set(key, pending)
   }
@@ -323,6 +485,28 @@ export function apply(ctx) {
     await api.replaceMessages(conv.id, conv.messages).catch(() => {})
   }
 
+  /**
+   * 离线重连后只补写“本地新增 / 本地改动”的消息；compact 元数据下不再把整段滚动缓存
+   * replace 回后端，最多逐条 upsert 本地缓存（20 条以内），不会覆盖后端历史。
+   */
+  const pushLocalMessages = async (conv, { all = false } = {}) => {
+    if (!api || !conv || !Array.isArray(conv.messages) || !conv.messages.length) return
+    const pendingIds = new Set((Array.isArray(conv.pendingMessageIds) ? conv.pendingMessageIds : []).map(value => String(value || '')))
+    const targets = all
+      ? conv.messages
+      : conv.messages.filter(message => pendingIds.has(String(message?.id || message?.message_id || '')))
+    for (const message of targets) {
+      const id = String(message?.id || message?.message_id || '')
+      if (!id) continue
+      await api.addMessage(conv.id, message).catch(err => {
+        if (!isTransientSyncError(err)) ctx.logger.warn(`离线消息补写失败：${err.message}`)
+        throw err
+      })
+      conv.pendingMessageIds = (conv.pendingMessageIds || []).filter(value => String(value) !== id)
+    }
+    if (Array.isArray(conv.pendingMessageIds) && !conv.pendingMessageIds.length) conv.pendingMessageIds = []
+  }
+
   const service = {
     name: 'session-service',
 
@@ -333,6 +517,16 @@ export function apply(ctx) {
     /** 用后端数据插入/替换（渠道入站消息等场景） */
     adopt(conversation, { activate = false } = {}) {
       if (!conversation?.id) return null
+      const messages = Array.isArray(conversation.messages) ? conversation.messages : []
+      const total = messageCountOf({ ...conversation, messages })
+      conversation = {
+        ...conversation,
+        messages,
+        messageCount: total,
+        localTruncated: messages.length < total,
+        messagesComplete: messages.length >= total,
+        pendingMessageIds: Array.isArray(conversation.pendingMessageIds) ? conversation.pendingMessageIds : [],
+      }
       const index = data.conversations.findIndex(c => c.id === conversation.id)
       if (index >= 0) data.conversations[index] = conversation
       else data.conversations.unshift(conversation)
@@ -343,21 +537,27 @@ export function apply(ctx) {
       return conversation
     },
 
-    /** 手动从后端整体拉取 */
+    /**
+     * 手动 / 启动后的整体同步。
+     * 会话列表默认只拉 compact 元数据（名称 / preview / messageCount，不含 messages），
+     * 当前打开页面的消息由 loadMessages / loadAllMessages 按需分页拉取。
+     */
     async sync() {
       if (!api) throw new Error('后端未连接')
+      if (syncing) throw new Error('正在同步中')
+      const wasLocal = source !== 'server'
       syncing = true
       try {
-        const payload = await api.sessions()
+        const payload = await api.sessions({ compact: true })
+        const compact = payload?.compact === true
         const server = (payload.conversations || []).filter(conv => conv?.id)
-        const { conversations, serverById, removedIds } = mergeServerConversations(server)
+        const { conversations, serverById, removedIds, dedupedIds = [] } = mergeServerConversations(server, { compact })
         const activeId = conversations.some(conv => conv.id === data.activeId) ? data.activeId : conversations[0]?.id || null
         data = { conversations, activeId, removedIds }
         source = 'server'
         persistLocal()
 
-        // 手动同步同样只推差异，不丢弃本地独有的新会话 / 未写回修改。
-        // 消息本体按会话批量补写，元数据只发送 withoutMessages(conv)，避免大 JSON。
+        // 只推本地独有新会话 / 元数据变化 / 未写回消息；消息正文永远不整段重发。
         const queue = []
         for (const conv of conversations) {
           const remote = serverById.get(conv.id)
@@ -370,14 +570,20 @@ export function apply(ctx) {
             )
           } else {
             if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
-            await pushFullMessagesIfNeeded(conv, remote)
+            // 只补真正待写回的消息；滚动缓存（可能是服务端旧页 / 假消息）绝不能 upload 回后端。
+            queue.push(pushLocalMessages(conv, { all: false }).catch(() => {}))
           }
         }
-        for (const id of removedIds) queue.push(api.deleteSession(id))
+        void dedupedIds
+        void wasLocal
+        for (const id of removedIds) queue.push(api.deleteSession(id).catch(() => {}))
         if (queue.length) await Promise.allSettled(queue)
 
-        source = 'server'
         lastSyncError = ''
+        clearSyncRetry()
+        syncRetryCount = 0
+        markInitialSyncSettled()
+        persistLocal()
         ctx.emit('sessions:synced', { source, count: conversations.length })
         ctx.emit('conversation:sync', { conversations })
         return { ok: true, count: conversations.length }
@@ -386,6 +592,7 @@ export function apply(ctx) {
         lastSyncError = err.message
         persistLocal()
         ctx.emit('sessions:source', service.status())
+        if (isTransientSyncError(err)) scheduleSyncRetry()
         throw err
       } finally {
         syncing = false
@@ -400,6 +607,140 @@ export function apply(ctx) {
     messages: id => find(id)?.messages || [],
     message: (id, messageId) => service.messages(id).find(msg => msg.id === messageId) || null,
     count: () => data.conversations.length,
+    /** 首次后端同步是否已经结束（渠道插件用它避免在空本地缓存上抢先建会话）。 */
+    ready: () => initialSyncPromise,
+    isInitialSyncSettled: () => initialSyncSettled,
+
+    /**
+     * 按稳定渠道 ID 查找已有会话容器；多个重复时优先消息最多的那个。
+     * 渠道插件应先调用它，再决定是否 create，避免再次产生空容器。
+     */
+    findByChannelId(channelId) {
+      const key = String(channelId || '').trim()
+      if (!key) return null
+      const matches = data.conversations.filter(conv => String(conv?.meta?.channelId || '') === key)
+      if (!matches.length) return null
+      return matches.reduce((best, item) => (messageCountOf(item) > messageCountOf(best) ? item : best), matches[0])
+    },
+
+    /** 渠道容器安全创建：首次同步结束后先按 channelId 找旧的，找不到才建新会话。 */
+    async ensureChannelConversation(channelId, partial = {}) {
+      const key = String(channelId || '').trim()
+      if (!key) return null
+      if (initialSyncSettled) {
+        const existing = service.findByChannelId(key) || (partial?.conversationId ? find(partial.conversationId) : null)
+        if (existing) {
+          service.update(existing.id, {
+            meta: { ...(existing.meta || {}), ...(partial?.meta || {}), channelId: key },
+          })
+          return existing
+        }
+        return service.create(partial)
+      }
+      // 同步最多等一小段；即便失败（后端离线）也继续走本地创建，保证离线可用。
+      await Promise.race([initialSyncPromise, new Promise(resolve => setTimeout(resolve, 8000))])
+      const existing = service.findByChannelId(key) || (partial?.conversationId ? find(partial.conversationId) : null)
+      if (existing) return existing
+      return service.create(partial)
+    },
+
+    messageCount(id) {
+      const conv = find(id)
+      return conv ? messageCountOf(conv) : 0
+    },
+
+    /**
+     * 分页拉取消息（不传 beforeSeq 取最新一页）。
+     * 返回当前页，同时把一页消息合并进会话内存缓存；UI 向上翻页传 beforeSeq=当前最早 seq。
+     */
+    async loadMessages(id, { limit = 20, beforeSeq = null, force = false } = {}) {
+      const conv = find(id)
+      if (!conv) return null
+      const size = Math.max(1, Math.min(500, Math.floor(Number(limit) || 20)))
+      if (!api || source !== 'server') {
+        return { conversation: conv, messages: [], ...service.localPage(conv, { limit: size, beforeSeq }) }
+      }
+      if (!force && !beforeSeq && conv.messagesComplete === true && conv.messages.length) {
+        const local = service.localPage(conv, { limit: size, beforeSeq })
+        return { conversation: conv, ...local, hasMoreBefore: false }
+      }
+      if (conv.messagesLoading && !force) return null
+      conv.messagesLoading = true
+      try {
+        const page = await api.sessionMessages(id, beforeSeq ? { limit: size, beforeSeq } : { limit: size })
+        const incoming = Array.isArray(page?.messages) ? page.messages : []
+        const pending = pendingMessagesOf(conv)
+        if (beforeSeq) conv.messages = mergeMessageLists(conv.messages, incoming)
+        else conv.messages = mergeMessageLists(incoming, pending)
+        const total = Math.max(Number(page?.messageCount) || 0, conv.messages.length)
+        conv.messageCount = total
+        conv.localTruncated = conv.messages.length < total
+        conv.messagesComplete = page?.hasMoreBefore !== true && conv.messages.length >= total
+        persistLocal()
+        ctx.emit('conversation:update', conv)
+        return {
+          conversation: conv,
+          conversationId: id,
+          messages: incoming,
+          messageCount: total,
+          total,
+          hasMoreBefore: page?.hasMoreBefore === true,
+          hasMoreAfter: page?.hasMoreAfter === true,
+          oldestSeq: incoming.length ? Number(incoming[0]?.seq) || null : null,
+          newestSeq: incoming.length ? Number(incoming[incoming.length - 1]?.seq) || null : null,
+        }
+      } finally {
+        conv.messagesLoading = false
+        persistLocal()
+      }
+    },
+
+    /** 显式全量加载：导出 / 搜索 / 保存 JSON 编辑器等确实需要完整历史的场景。 */
+    async loadAllMessages(id) {
+      const conv = find(id)
+      if (!conv) return null
+      if (!api || source !== 'server') {
+        const messages = conv.messages || []
+        return { conversation: conv, messages, messageCount: messages.length, total: messages.length, hasMoreBefore: false, hasMoreAfter: false }
+      }
+      const page = api.allMessages ? await api.allMessages(id) : await api.sessionMessages(id, { all: true })
+      const messages = Array.isArray(page?.messages) ? page.messages : []
+      conv.messages = messages
+      conv.messageCount = messages.length
+      conv.localTruncated = false
+      conv.messagesComplete = true
+      persistLocal()
+      ctx.emit('conversation:update', conv)
+      return { conversation: conv, messages, messageCount: messages.length, total: messages.length, hasMoreBefore: false, hasMoreAfter: false }
+    },
+
+    /**
+     * 确保当前会话至少有 limit 条最近消息已加载；不完整时才走网络。
+     * chat-flow / 导出 / 记忆概括在需要近期原文前调用它，避免分页优化把上下文打空。
+     */
+    async ensureMessages(id, { limit = 20, all = false } = {}) {
+      const conv = find(id)
+      if (!conv) return null
+      if (!initialSyncSettled) await service.ready()
+      if (all) return service.loadAllMessages(id)
+      const total = messageCountOf(conv)
+      if (total <= 0) return conv
+      const need = Math.max(1, Math.min(total, Math.floor(Number(limit) || 20)))
+      if (conv.messagesComplete === true || (Array.isArray(conv.messages) && conv.messages.length >= need)) return conv
+      return service.loadMessages(id, { limit: need, force: true })
+    },
+
+    /** 本地无网络时按数组切片模拟分页，保证 UI 代码路径一致。 */
+    localPage(conv, { limit = 20, beforeSeq = null } = {}) {
+      const list = sortConversationMessages(conv?.messages || [])
+      if (beforeSeq !== null && beforeSeq !== undefined && beforeSeq !== '') {
+        const before = list.filter(message => (Number(message?.seq) || 0) < Number(beforeSeq))
+        const messages = before.slice(-limit)
+        return { messages, total: list.length, messageCount: list.length, hasMoreBefore: before.length > messages.length, hasMoreAfter: false }
+      }
+      const messages = list.slice(-limit)
+      return { messages, total: list.length, messageCount: list.length, hasMoreBefore: list.length > messages.length, hasMoreAfter: false }
+    },
 
     /** 组装模型上下文：最近 limit 条可对话消息（文档 §8.1） */
     context(id, limit = 30) {
@@ -416,6 +757,8 @@ export function apply(ctx) {
       const next = id && find(id) ? id : null
       data.activeId = next
       persistLocal()
+      // 打开会话时补一页最近原文（异步、失败不影响切换），保证首轮上下文不空。
+      if (next && typeof service.ensureMessages === 'function') service.ensureMessages(next, { limit: 40 }).catch(() => {})
       ctx.emit('conversation:switch', { id: next })
       return next
     },
@@ -439,6 +782,10 @@ export function apply(ctx) {
         createdAt: Date.now(),
         metaUpdatedAt: Date.now(),
         messages: partial.messages || [],
+        messageCount: Array.isArray(partial.messages) ? partial.messages.length : Number(partial.messageCount) || 0,
+        messagesComplete: true,
+        localTruncated: false,
+        pendingMessageIds: [],
         meta: partial.meta || {},
       }
       data.conversations.unshift(conv)
@@ -472,6 +819,9 @@ export function apply(ctx) {
       if (Array.isArray(patch.messages)) {
         conv.messages = patch.messages
         conv.messageCount = patch.messages.length
+        conv.messagesComplete = true
+        conv.localTruncated = false
+        conv.pendingMessageIds = []
         replacedMessages = true
         if (source === 'server' && api) api.replaceMessages(conv.id, patch.messages).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`整段聊天记录写回失败：${err.message}`) })
       }
@@ -507,8 +857,18 @@ export function apply(ctx) {
       const conv = find(id)
       if (!conv) return null
       if (!Array.isArray(conv.messages)) conv.messages = []
+      const total = messageCountOf(conv)
       conv.messages.push(message)
-      conv.messageCount = conv.messages.length
+      // 分页加载后本地只有最近一页，计数必须用 max/总数，不能让 push 后的数组长度把 messageCount 改小。
+      conv.messageCount = Math.max(total, conv.messages.length)
+      conv.messagesComplete = conv.messages.length >= conv.messageCount
+      conv.localTruncated = conv.messages.length < conv.messageCount
+      const messageId = String(message?.id || message?.message_id || '')
+      if (messageId) {
+        const pending = new Set(Array.isArray(conv.pendingMessageIds) ? conv.pendingMessageIds : [])
+        pending.add(messageId)
+        conv.pendingMessageIds = [...pending]
+      }
       if (message.kind !== 'divider') {
         conv.preview = String(message.content || '').replace(/\n/g, ' ').slice(0, 80)
         conv.updatedAt = Date.now()
@@ -524,7 +884,12 @@ export function apply(ctx) {
       if (!message) return null
       Object.assign(message, patch)
       const conv = find(id)
-      if (conv) conv.updatedAt = Date.now()
+      if (conv) {
+        conv.updatedAt = Date.now()
+        const pending = new Set(Array.isArray(conv.pendingMessageIds) ? conv.pendingMessageIds : [])
+        if (message.id || message.message_id) pending.add(String(message.id || message.message_id))
+        conv.pendingMessageIds = [...pending]
+      }
       persistLocal()
       scheduleMessagePush(id, message)
       return message
@@ -535,8 +900,12 @@ export function apply(ctx) {
       if (!conv) return false
       const index = conv.messages.findIndex(msg => msg.id === messageId)
       if (index < 0) return false
+      const previousCount = messageCountOf(conv)
       conv.messages.splice(index, 1)
-      conv.messageCount = conv.messages.length
+      conv.messageCount = Math.max(0, previousCount - 1)
+      conv.messagesComplete = conv.messages.length >= conv.messageCount
+      conv.localTruncated = conv.messages.length < conv.messageCount
+      conv.pendingMessageIds = (conv.pendingMessageIds || []).filter(value => String(value) !== String(messageId))
       conv.updatedAt = Date.now()
       persistLocal()
       if (source === 'server' && api) {
@@ -553,6 +922,9 @@ export function apply(ctx) {
       if (!conv) return null
       conv.messages = Array.isArray(messages) ? messages : []
       conv.messageCount = conv.messages.length
+      conv.messagesComplete = true
+      conv.localTruncated = false
+      conv.pendingMessageIds = []
       conv.updatedAt = Date.now()
       persistLocal()
       if (source === 'server' && api) api.replaceMessages(id, conv.messages).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`替换后端聊天记录失败：${err.message}`) })
@@ -565,6 +937,9 @@ export function apply(ctx) {
       if (!conv) return
       conv.messages = []
       conv.messageCount = 0
+      conv.messagesComplete = true
+      conv.localTruncated = false
+      conv.pendingMessageIds = []
       conv.updatedAt = Date.now()
       persistLocal()
       if (source === 'server' && api) api.clearMessages(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`清空后端聊天记录失败：${err.message}`) })
@@ -613,25 +988,69 @@ export function apply(ctx) {
   // 浏览器端只负责刷新对应会话，不重复处理入站消息。
   let agentRefreshTimer = null
   let agentRefreshChannel = ''
+
+  /**
+   * 增量事件直接合并到本地会话，能省掉“写一条消息->全量 GET /api/sessions”的同步风暴。
+   * 事件里没带消息体（图片过大等）或本地还没有这个会话时，再退回拉单个会话。
+   */
+  const applyRemoteMessageChange = (conversationId, message) => {
+    const conv = find(conversationId)
+    if (!conv || !message) return false
+    const identity = messageIdentity(message)
+    if (!identity) return false
+    const list = Array.isArray(conv.messages) ? conv.messages : []
+    const index = list.findIndex(item => messageIdentity(item) === identity)
+    if (index >= 0) list[index] = { ...list[index], ...message }
+    else list.push(message)
+    conv.messages = sortConversationMessages(list)
+    conv.messageCount = Math.max(Number(conv.messageCount) || 0, conv.messages.length)
+    conv.updatedAt = Math.max(Number(conv.updatedAt) || 0, messageAtOf(message) || 0, Date.now())
+    persistLocal()
+    ctx.emit('conversation:update', conv)
+    return true
+  }
+
+  const applyRemoteMessageRemove = (conversationId, messageId) => {
+    const conv = find(conversationId)
+    if (!conv || !messageId) return false
+    const target = String(messageId)
+    const before = Array.isArray(conv.messages) ? conv.messages.length : 0
+    const messages = (conv.messages || []).filter(
+      message => String(message.message_id || message.id || '') !== target && String(message.id || '') !== target,
+    )
+    if (messages.length === before) return false
+    conv.messages = messages
+    conv.messageCount = Math.max(0, (Number(conv.messageCount) || before) - 1)
+    conv.updatedAt = Date.now()
+    persistLocal()
+    ctx.emit('conversation:update', conv)
+    return true
+  }
+
   const refreshConversationFromBackend = async conversationId => {
     if (!api || source !== 'server') return
     try {
-      const payload = await api.sessions()
-      const remote = (payload.conversations || []).find(conv => conv.id === conversationId)
+      const remote = api.session
+        ? (await api.session(conversationId, { compact: true }))?.conversation
+        : (await api.sessions({ compact: true }))?.conversations?.find(conv => conv.id === conversationId)
       if (!remote) return
       const local = find(conversationId)
       let next = remote
       if (local) {
-        const merged = mergeConversationMessages(local, remote)
+        const compactRemote = !Array.isArray(remote.messages) || remote.messages.length === 0
+        const merged = mergeConversationMessages(local, remote, { compactRemote })
         next = {
           ...(shouldUseRemoteMeta(local, remote) ? remote : local),
           messages: merged.messages,
           messageCount: merged.messageCount,
           updatedAt: Math.max(Number(local.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || remote.updatedAt,
           localTruncated: merged.localTruncated,
+          messagesComplete: merged.messagesComplete,
+          pendingMessageIds: local.pendingMessageIds,
         }
       }
       service.adopt(next)
+      if (local) await service.loadMessages(conversationId, { limit: 20, force: true }).catch(() => {})
     } catch (err) {
       if (!isTransientSyncError(err)) ctx.logger.warn(`同步服务端代聊消息失败：${err.message}`)
     }
@@ -641,9 +1060,16 @@ export function apply(ctx) {
       events.on('backend:event', payload => {
         const data = payload?.data || {}
         if (payload?.event !== 'sessions/changed' || !data.id) return
+        const action = String(data.action || '')
         // 只处理“另一边”的写入：浏览器处理服务端代聊的消息，代聊 runtime 处理浏览器写回的消息。
         const fromAgent = data.agent === true
         if (globalThis.__NIANFENG_SERVER_AGENT__ === true ? fromAgent : !fromAgent) return
+        // 有增量消息体时直接合并，避免每写一条消息就 GET 整个会话 / 全部会话。
+        if ((action === 'message' || action === 'message-update') && data.message) {
+          if (applyRemoteMessageChange(String(data.id), data.message)) return
+        } else if (action === 'message-remove' && data.messageId) {
+          if (applyRemoteMessageRemove(String(data.id), data.messageId)) return
+        }
         agentRefreshChannel = String(data.id)
         if (agentRefreshTimer) return
         agentRefreshTimer = setTimeout(() => {
@@ -651,7 +1077,7 @@ export function apply(ctx) {
           const id = agentRefreshChannel
           agentRefreshChannel = ''
           refreshConversationFromBackend(id).catch(() => {})
-        }, 180)
+        }, 350)
       }),
     )
     ctx.effect(() => () => {
@@ -661,6 +1087,7 @@ export function apply(ctx) {
   }
 
   ctx.effect(() => {
+    clearSyncRetry()
     for (const { timer } of pushTimers.values()) if (timer) clearTimeout(timer)
     pushTimers.clear()
     for (const { timer } of messagePushTimers.values()) if (timer) clearTimeout(timer)
@@ -681,10 +1108,13 @@ export function apply(ctx) {
   /* 启动时与后端对齐（不阻塞插件加载） */
   if (api) {
     const boot = async () => {
+      syncing = true
       try {
-        const payload = await api.sessions()
+        const wasLocal = source !== 'server'
+        const payload = await api.sessions({ compact: true })
+        const compact = payload?.compact === true
         const server = (payload.conversations || []).filter(conv => conv?.id)
-        const { conversations, serverById, removedIds } = mergeServerConversations(server)
+        const { conversations, serverById, removedIds, dedupedIds = [] } = mergeServerConversations(server, { compact })
         const restoreLast = config.get('general.restore', false)
         const isNormalSession = conv => conv && conv.meta?.hiddenFromSessionList !== true && conv.meta?.channelConversation !== true
         const remembered = conversations.find(conv => conv.id === data.activeId)
@@ -706,25 +1136,39 @@ export function apply(ctx) {
             )
           } else {
             if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
-            await pushFullMessagesIfNeeded(conv, remote)
+            queue.push(pushLocalMessages(conv, { all: false }).catch(() => {}))
           }
         }
-        for (const id of removedIds) queue.push(api.deleteSession(id))
+        void dedupedIds
+        void wasLocal
+        for (const id of removedIds) queue.push(api.deleteSession(id).catch(() => {}))
         if (queue.length) await Promise.allSettled(queue)
 
         lastSyncError = ''
-        ctx.emit('sessions:source', service.status())
         ctx.logger.info(`会话已与后端同步（${server.length} 个，合并后 ${conversations.length} 个）`)
       } catch (err) {
         source = 'local'
         lastSyncError = err.message
+        ctx.logger.warn(`后端不可用，会话暂存本地：${err.message}`)
+      } finally {
+        syncing = false
+        markInitialSyncSettled()
         persistLocal()
         ctx.emit('sessions:source', service.status())
-        ctx.logger.warn(`后端不可用，会话暂存本地：${err.message}`)
       }
     }
     boot()
+  } else {
+    markInitialSyncSettled()
   }
+
+  // 后端从离线恢复时自动重新拉取一次；否则 session-service 会在 boot 失败后
+  // 永远停在本地缓存，导致聊天记录页看不到后端/服务端代聊写入的新消息。
+  const offBackendStatus = events.on('backend:status', status => {
+    if (status?.online !== true || source === 'server' || syncing) return
+    service.sync().catch(err => ctx.logger.debug?.(`后端恢复后自动同步失败：${err?.message || err}`))
+  })
+  ctx.effect(() => offBackendStatus)
 
   ctx.logger.debug(`会话服务就绪（${data.conversations.length} 个会话 · ${source}）`)
 }

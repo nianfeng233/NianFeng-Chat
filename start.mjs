@@ -378,6 +378,9 @@ async function main() {
   let restarting = false
   let agentWorker = null
   let agentCapabilityDispose = null
+  let agentReady = false
+  let agentLastHeartbeat = 0
+  let agentWatchdogTimer = null
   let shuttingDown = false
 
   const closeWebServer = () =>
@@ -431,14 +434,57 @@ async function main() {
     process.exit(0)
   }
 
-  /** 关闭服务端代聊 Worker；同时撤销 server-agent 能力，让 WebUI 可以接管。 */
-  const stopHeadlessAgent = () => {
+  /** server-agent 能力只在 Worker 真正 ready 后才上报，避免 WebUI 误以为后端能处理入站。 */
+  const setAgentCapability = () => {
+    const registerCapability = backend?.ctx?.httpApi?.registerCapability
+    if (typeof registerCapability !== 'function' || agentCapabilityDispose) return
+    agentCapabilityDispose = registerCapability('server-agent')
+  }
+
+  const clearAgentCapability = () => {
     try {
       agentCapabilityDispose?.()
     } catch (_) {
       /* ignore */
     }
     agentCapabilityDispose = null
+  }
+
+  const stopAgentWatchdog = () => {
+    if (agentWatchdogTimer) {
+      clearInterval(agentWatchdogTimer)
+      agentWatchdogTimer = null
+    }
+  }
+
+  /**
+   * Worker 心跳看门狗：ready 后每 15 秒应有一次 heartbeat；
+   * 超过 45 秒没收到就撤销 server-agent，让 WebUI 重新接管入站消息。
+   * 这样服务端代聊 Worker 卡死时，NapCat/QQ 消息不会只躺在后端 inbox 里没人写。
+   */
+  const startAgentWatchdog = () => {
+    stopAgentWatchdog()
+    agentLastHeartbeat = Date.now()
+    agentWatchdogTimer = setInterval(() => {
+      if (!agentWorker || !agentReady) return
+      if (Date.now() - agentLastHeartbeat < 45_000) return
+      console.warn('服务端代聊心跳超时，暂时撤销 server-agent 能力，让 WebUI 接管入站消息')
+      clearAgentCapability()
+      try {
+        agentWorker.terminate()?.catch?.(() => {})
+      } catch (_) {
+        /* ignore */
+      }
+    }, 5_000)
+    agentWatchdogTimer.unref?.()
+  }
+
+  /** 关闭服务端代聊 Worker；同时撤销 server-agent 能力，让 WebUI 可以接管。 */
+  const stopHeadlessAgent = () => {
+    clearAgentCapability()
+    stopAgentWatchdog()
+    agentReady = false
+    agentLastHeartbeat = 0
     const worker = agentWorker
     agentWorker = null
     if (!worker) return
@@ -454,8 +500,6 @@ async function main() {
   const startHeadlessAgent = () => {
     if (!headlessAgentEnabled || shuttingDown || agentWorker) return
     try {
-      const registerCapability = backend?.ctx?.httpApi?.registerCapability
-      agentCapabilityDispose = typeof registerCapability === 'function' ? registerCapability('server-agent') : null
       const worker = new Worker(new URL('./src/headless/runtime.mjs', import.meta.url), {
         workerData: {
           backendUrl: `${backend.url}/api`,
@@ -463,12 +507,24 @@ async function main() {
         },
       })
       agentWorker = worker
+      agentReady = false
       worker.once('error', err => {
         console.error('服务端代聊 Worker 异常：', err?.stack || err?.message || err)
       })
       worker.on('message', message => {
         if (message?.type === 'ready') {
-          console.log(`[headless] 服务端代聊已就绪 · 插件 ${message.plugins}/${message.total} · chat-flow=${message.flowMode}`)
+          agentReady = true
+          agentLastHeartbeat = Date.now()
+          setAgentCapability()
+          startAgentWatchdog()
+          console.log(
+            `[headless] 服务端代聊已就绪 · 插件 ${message.plugins}/${message.total} · chat-flow=${message.flowMode} · sessions=${message.sessionsSource || 'unknown'}`,
+          )
+          if (message.sessionsSource && message.sessionsSource !== 'server') {
+            console.warn(`[headless] 服务端代聊未同步到后端会话（source=${message.sessionsSource}）：${message.sessionsError || '未知原因'}`)
+          }
+        } else if (message?.type === 'heartbeat') {
+          agentLastHeartbeat = Date.now()
         }
       })
       worker.once('exit', code => {
@@ -476,12 +532,10 @@ async function main() {
         // 新 Worker 已经持有新的 capability，旧 Worker 不能再清理当前引用。
         if (agentWorker !== worker) return
         agentWorker = null
-        try {
-          agentCapabilityDispose?.()
-        } catch (_) {
-          /* ignore */
-        }
-        agentCapabilityDispose = null
+        agentReady = false
+        agentLastHeartbeat = 0
+        stopAgentWatchdog()
+        clearAgentCapability()
         if (shuttingDown || !headlessAgentEnabled) return
         console.warn(`服务端代聊 Worker 退出（code=${code ?? 'null'}），2 秒后重启`)
         const timer = setTimeout(() => {
@@ -491,12 +545,9 @@ async function main() {
       })
     } catch (err) {
       console.error('无法启动服务端代聊：', err?.message || err)
-      try {
-        agentCapabilityDispose?.()
-      } catch (_) {
-        /* ignore */
-      }
-      agentCapabilityDispose = null
+      clearAgentCapability()
+      stopAgentWatchdog()
+      agentReady = false
     }
   }
 

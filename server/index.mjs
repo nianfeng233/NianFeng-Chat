@@ -24,6 +24,7 @@ import * as modelsPlugin from './plugins/models.mjs'
 import * as instancePlugin from './plugins/instance.mjs'
 import * as pluginRegistryPlugin from './plugins/plugin-registry.mjs'
 import * as httpPlugin from './plugins/http.mjs'
+import * as memoriesPlugin from './plugins/memories.mjs'
 import * as logsPlugin from './plugins/logs.mjs'
 import { attachRuntimeLogStore } from './plugins/logs.mjs'
 
@@ -223,6 +224,7 @@ export async function startBackend({
         allowedHosts: [...new Set([...allowedHosts, ...envList('NIANFENG_ALLOWED_HOSTS'), ...envList('FENGYU_ALLOWED_HOSTS')])],
       },
     ],
+    [memoriesPlugin, { dataDir: paths.dataDir }],
     [logsPlugin, {}],
   ]
   for (const [plugin, config] of plugins) ctx.plugin(plugin, config)

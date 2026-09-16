@@ -133,6 +133,16 @@ export function apply(ctx) {
   const toast = ctx.inject('toast')
   const modal = ctx.inject('modal')
   const events = ctx.inject('event-bus')
+  // 记住用户最后查看的渠道；页面重新渲染 / 刷新后优先回到同一个渠道，
+  // 避免因为 store.listChannels() 的索引顺序变化而“每次刷新都是一个新样子”。
+  const LAST_CHANNEL_KEY = 'nianfeng:chat-records:active-channel'
+  let lastActiveChannelId = (() => {
+    try {
+      return localStorage.getItem(LAST_CHANNEL_KEY) || ''
+    } catch (_) {
+      return ''
+    }
+  })()
 
   useStyle(ctx, CSS)
 
@@ -165,6 +175,7 @@ export function apply(ctx) {
               <button class="record-btn active" data-record-mode="cards">图形视图</button>
               <button class="record-btn" data-record-mode="json">JSON 源码</button>
               <button class="record-btn" data-record-add>新增消息</button>
+              <button class="record-btn" data-record-sync-backend>从后端同步</button>
               <button class="record-btn" data-record-reload>取消修改</button>
               <button class="record-btn" data-record-undo-save hidden>恢复上次保存前</button>
               <button class="record-btn primary" data-record-save>保存</button>
@@ -233,7 +244,58 @@ export function apply(ctx) {
       const PAGE_SIZE = 20
       let queryKeyword = ''
       let visibleCount = PAGE_SIZE
+      let channelLoading = false
+      let channelLoadSeq = 0
       const expandedRoles = new Set()
+
+      /** 渠道排序固定：最近活跃优先，其次 channelId 字典序，保证每次刷新顺序一致。 */
+      const sortedRecords = () =>
+        store
+          .listChannels()
+          // 本地 chat-store 索引可能残留已删除 / 已切换数据目录的旧渠道，先过滤掉；
+          // channelRecord 会顺便按 meta.channelId 把旧的 conversationId 重绑到修复后的容器。
+          .filter(record => {
+            const current = store.channelRecord(record.channelId)
+            return !!(current && sessions.get(current.conversationId))
+          })
+          .slice()
+          .sort((a, b) => {
+            const ta = Date.parse(a.lastAt || '') || 0
+            const tb = Date.parse(b.lastAt || '') || 0
+            if (ta !== tb) return tb - ta
+            return String(a.channelId || '').localeCompare(String(b.channelId || ''))
+          })
+
+      const countOfRecord = record =>
+        typeof store.messageCount === 'function' ? store.messageCount(record.channelId) : store.messagesOf(record.channelId).length
+
+      /** 全局选择：优先当前有消息的渠道 → 记住的有消息渠道 → 最近非空渠道 → 兜底。 */
+      const pickBestChannel = () => {
+        const channels = sortedRecords()
+        if (!channels.length) return null
+        const current = channels.find(record => record.channelId === activeChannel)
+        if (current && countOfRecord(current) > 0) return current
+        const remembered = channels.find(record => record.channelId === lastActiveChannelId)
+        if (remembered && countOfRecord(remembered) > 0) return remembered
+        return channels.find(record => countOfRecord(record) > 0) || current || remembered || channels[0]
+      }
+
+      /** 当前为空渠道、但其它渠道已有消息时自动切过去；都会先保证草稿未修改。 */
+      const ensureBestChannel = () => {
+        if (dirty) return false
+        const best = pickBestChannel()
+        if (!best) return false
+        if (!activeChannel || best.channelId !== activeChannel || countOfRecord({ channelId: activeChannel }) === 0) {
+          if (best.channelId !== activeChannel) loadChannel(best.channelId)
+          else if (store.channelRecord(activeChannel)) loadChannel(activeChannel)
+          return true
+        }
+        if (activeChannel && store.channelRecord(activeChannel)) {
+          loadChannel(activeChannel)
+          return true
+        }
+        return false
+      }
 
       const setError = message => {
         if (!message) {
@@ -244,6 +306,7 @@ export function apply(ctx) {
         errorEl.textContent = message
         errorEl.classList.add('show')
       }
+      const backendOnline = () => ctx.registry.get('api')?.status?.().online === true
       const setDirty = value => {
         dirty = value
         dirtyEl.hidden = !value
@@ -330,22 +393,59 @@ export function apply(ctx) {
         return terms.every(term => haystack.includes(term))
       }
 
+      /** 聊天记录页“加载更早”按钮：只从后端拉下一页 20 条，不再一次性拉全量。 */
+      const fetchOlderPage = async () => {
+        const record = store.channelRecord(activeChannel)
+        const conv = record ? sessions.get(record.conversationId) : null
+        if (!conv || typeof sessions.loadMessages !== 'function') return
+        const oldestSeq = draft.reduce((min, message) => {
+          const seq = Number(message?.seq)
+          return Number.isFinite(seq) && seq > 0 ? Math.min(min, seq) : min
+        }, Number.POSITIVE_INFINITY)
+        try {
+          if (typeof store.loadMessages === 'function') {
+            await store.loadMessages(activeChannel, { limit: PAGE_SIZE, beforeSeq: Number.isFinite(oldestSeq) ? oldestSeq : null })
+          } else {
+            await sessions.loadMessages(conv.id, { limit: PAGE_SIZE, beforeSeq: Number.isFinite(oldestSeq) ? oldestSeq : null })
+          }
+          draft = JSON.parse(JSON.stringify(store.messagesOf(activeChannel)))
+          visibleCount = Math.max(draft.length, PAGE_SIZE)
+          setError('')
+          updateJsonSource()
+          renderCards()
+          renderList()
+          syncUndoSaveButton()
+        } catch (err) {
+          setError(`加载更早聊天记录失败：${err?.message || err}`)
+        }
+      }
+
       const renderCards = () => {
+        const backendTotal =
+          typeof store.messageCount === 'function' && activeChannel ? store.messageCount(activeChannel) : draft.length
         if (!draft.length) {
-          pageInfoEl.textContent = ''
           queryClearBtn.hidden = true
-          cardsEl.innerHTML = '<div class="record-empty">这个渠道还没有消息，点「新增消息」开始</div>'
+          if (backendTotal > 0) {
+            pageInfoEl.textContent = `共 ${backendTotal} 条记录 · 正在加载最新 ${PAGE_SIZE} 条…`
+            cardsEl.innerHTML = '<div class="record-empty">正在从后端加载聊天记录…</div>'
+          } else {
+            pageInfoEl.textContent = ''
+            const hint = backendOnline() ? '' : '（后端当前未连接：这里展示的是本地暂存数据，恢复连接后刷新）'
+            cardsEl.innerHTML = `<div class="record-empty">这个渠道还没有消息${hint}，点「新增消息」开始</div>`
+          }
           return
         }
         const matchedEntries = displayEntries().filter(entry => matchesQuery(entry.message))
-        const total = draft.length
+        const loadedTotal = draft.length
+        const total = backendTotal
         const matched = matchedEntries.length
         const visibleEntries = matchedEntries.slice(0, Math.max(1, visibleCount))
-        const more = matched - visibleEntries.length
+        const moreInDraft = matched - visibleEntries.length
+        const moreOnBackend = queryKeyword.trim() ? 0 : Math.max(0, total - loadedTotal)
         queryClearBtn.hidden = !queryKeyword.trim()
         pageInfoEl.textContent = queryKeyword.trim()
-          ? `共 ${total} 条记录 · 搜索命中 ${matched} 条 · 当前显示最新 ${visibleEntries.length} 条`
-          : `共 ${total} 条记录 · 已按最新在前显示 ${visibleEntries.length} 条`
+          ? `共 ${total} 条记录 · 已加载 ${loadedTotal} 条 · 搜索命中 ${matched} 条 · 当前显示 ${visibleEntries.length} 条`
+          : `共 ${total} 条记录 · 已加载最新 ${loadedTotal} 条 · 当前显示 ${visibleEntries.length} 条`
         if (!matched) {
           cardsEl.innerHTML = '<div class="record-empty">当前会话没有匹配的聊天记录，试试其它关键词。</div>'
           return
@@ -369,15 +469,21 @@ export function apply(ctx) {
             </div>`
           })
           .join('')
-        if (more > 0) {
+        if (moreInDraft > 0) {
           cardsEl.innerHTML +=
-            `<button class="record-load-more" data-record-load-more type="button">往下滑到底，点击加载更早的 ${Math.min(PAGE_SIZE, more)} 条（还有 ${more} 条）</button>`
+            `<button class="record-load-more" data-record-load-more type="button">往下滑到底，点击显示更早的 ${Math.min(PAGE_SIZE, moreInDraft)} 条（已加载但未显示）</button>`
           cardsEl.querySelector('[data-record-load-more]')?.addEventListener('click', () => {
             visibleCount += PAGE_SIZE
             renderCards()
           })
+        } else if (moreOnBackend > 0) {
+          cardsEl.innerHTML +=
+            `<button class="record-load-more" data-record-load-more type="button">点击从后端加载更早的 ${Math.min(PAGE_SIZE, moreOnBackend)} 条（还有 ${moreOnBackend} 条未拉取）</button>`
+          cardsEl.querySelector('[data-record-load-more]')?.addEventListener('click', () => {
+            fetchOlderPage()
+          })
         } else {
-          cardsEl.innerHTML += `<div class="record-list-end">已显示全部 ${matched} 条记录</div>`
+          cardsEl.innerHTML += `<div class="record-list-end">已显示全部 ${total} 条记录</div>`
         }
         for (const card of cardsEl.querySelectorAll('[data-record-card]')) {
           card.addEventListener('click', () => openEditor(Number(card.dataset.recordCard)))
@@ -401,7 +507,7 @@ export function apply(ctx) {
       }
 
       const renderList = () => {
-        const records = store.listChannels()
+        const records = sortedRecords()
         if (!records.length) {
           listEl.innerHTML = '<div class="record-empty">还没有渠道记录</div>'
           return
@@ -424,6 +530,12 @@ export function apply(ctx) {
           if (!matched.length) continue
           visible.push({ roleId, roleName, items: matched, allItems })
         }
+        // 角色分组也固定顺序，避免刷新后角色组上下乱跳。
+        visible.sort(
+          (a, b) =>
+            String(a.roleName || a.roleId).localeCompare(String(b.roleName || b.roleId), 'zh-Hans-CN') ||
+            String(a.roleId || '').localeCompare(String(b.roleId || '')),
+        )
         if (!visible.length) {
           listEl.innerHTML = '<div class="record-empty">没有匹配的角色或渠道</div>'
           return
@@ -440,7 +552,7 @@ export function apply(ctx) {
             const expanded = keyword ? true : expandedRoles.has(roleId)
             const channels = items
               .map(record => {
-                const count = store.messagesOf(record.channelId).length
+                const count = countOfRecord(record)
                 const label = channelKindLabel(record.channelId)
                 return `<button class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}">
                   <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(label)}</b><em>${escapeHtml(record.channelId)}</em></span>
@@ -472,8 +584,16 @@ export function apply(ctx) {
         }
       }
 
-      const loadChannel = channelId => {
+      const loadChannel = async channelId => {
+        const requestId = ++channelLoadSeq
         activeChannel = channelId
+        lastActiveChannelId = channelId
+        channelLoading = true
+        try {
+          localStorage.setItem(LAST_CHANNEL_KEY, channelId)
+        } catch (_) {
+          /* localStorage 不可用时忽略 */
+        }
         const record = store.channelRecord(channelId)
         draft = JSON.parse(JSON.stringify(store.messagesOf(channelId)))
         queryKeyword = ''
@@ -486,6 +606,25 @@ export function apply(ctx) {
         renderCards()
         renderList()
         syncUndoSaveButton()
+        // 首屏只向同一渠道拉一页（默认 20 条），完整历史永远不在这里整段同步。
+        if (backendOnline() && record && typeof store.loadMessages === 'function') {
+          try {
+            await store.loadMessages(channelId, { limit: PAGE_SIZE })
+            if (requestId !== channelLoadSeq) return
+            if (activeChannel === channelId && !dirty) {
+              draft = JSON.parse(JSON.stringify(store.messagesOf(channelId)))
+              visibleCount = PAGE_SIZE
+              setError('')
+              updateJsonSource()
+              renderCards()
+              renderList()
+              syncUndoSaveButton()
+            }
+          } catch (err) {
+            if (requestId === channelLoadSeq && activeChannel === channelId) setError(`加载聊天记录失败：${err?.message || err}`)
+          }
+        }
+        if (requestId === channelLoadSeq) channelLoading = false
       }
 
       const switchChannel = async channelId => {
@@ -595,7 +734,7 @@ export function apply(ctx) {
         }
       }
 
-      const saveAll = () => {
+      const saveAll = async () => {
         let parsed = draft
         if (mode === 'json') {
           try {
@@ -611,11 +750,40 @@ export function apply(ctx) {
           return
         }
         try {
-          // 保存前把当前状态留档，供改坏后一键撤回。
-          lastSavedSnapshots.set(activeChannel, JSON.parse(JSON.stringify(store.messagesOf(activeChannel))))
-          const result = store.replaceMessages(activeChannel, parsed)
+          const record = store.channelRecord(activeChannel)
+          const conv = record ? sessions.get(record.conversationId) : null
+          if (!conv) throw new Error('渠道会话不存在')
+          const loadedSnapshot = JSON.parse(JSON.stringify(store.messagesOf(activeChannel)))
+          // 保存前把当前加载页留档，供改坏后一键撤回。
+          lastSavedSnapshots.set(activeChannel, loadedSnapshot)
+          const keyOf = message => String(message?.message_id || message?.id || '')
+          const loadedIds = new Set(loadedSnapshot.map(keyOf).filter(Boolean))
+          const draftIds = new Set(parsed.map(keyOf).filter(Boolean))
+          // 编辑器只加载了当前可见的一页；保存前显式拉取完整原文再做合并，绝不能把旧历史覆盖掉。
+          if (typeof sessions.loadAllMessages === 'function') await sessions.loadAllMessages(conv.id)
+          const full = Array.isArray(sessions.messages(conv.id)) ? sessions.messages(conv.id) : []
+          const parsedById = new Map(parsed.filter(message => keyOf(message)).map(message => [keyOf(message), message]))
+          const merged = []
+          for (const message of full) {
+            const id = keyOf(message)
+            // 用户在这批已加载记录里删掉的一条：完整历史里同步删除。
+            if (id && loadedIds.has(id) && !draftIds.has(id)) continue
+            merged.push(parsedById.get(id) || message)
+            if (id) parsedById.delete(id)
+          }
+          // 新增或 message_id 不在完整历史里的草稿消息按原顺序追加。
+          for (const message of parsed) {
+            const id = keyOf(message)
+            if (id && parsedById.has(id)) {
+              merged.push(message)
+              parsedById.delete(id)
+            } else if (!id) {
+              merged.push(message)
+            }
+          }
+          const result = store.replaceMessages(activeChannel, merged)
           toast.success(`已保存 ${result.count} 条消息；如需回退，可点「恢复上次保存前」`)
-          loadChannel(activeChannel)
+          await loadChannel(activeChannel)
         } catch (err) {
           setError(`保存失败：${err.message}`)
         }
@@ -657,6 +825,23 @@ export function apply(ctx) {
       container.querySelector('[data-record-reload]').addEventListener('click', reloadDraft)
       container.querySelector('[data-record-undo-save]').addEventListener('click', undoLastSave)
       container.querySelector('[data-record-add]').addEventListener('click', () => openEditor(-1))
+      container.querySelector('[data-record-sync-backend]').addEventListener('click', async () => {
+        if (typeof sessions.sync !== 'function') {
+          toast.warn('当前版本不支持手动同步')
+          return
+        }
+        try {
+          toast.info('正在从后端同步会话…')
+          await sessions.sync()
+          renderList()
+          const best = pickBestChannel()
+          if (best) loadChannel(best.channelId)
+          else renderCards()
+          toast.success('已从后端重新同步')
+        } catch (err) {
+          toast.error(`同步失败：${err?.message || err}`)
+        }
+      })
       container.querySelector('[data-record-refresh-list]').addEventListener('click', () => {
         listInitialized = false
         renderList()
@@ -696,14 +881,21 @@ export function apply(ctx) {
       container.querySelector('[data-editor-cancel]').addEventListener('click', closeEditor)
       container.querySelector('[data-editor-confirm]').addEventListener('click', confirmEditor)
 
-      const first = store.listChannels()[0]
+      const first = pickBestChannel()
       if (first) loadChannel(first.channelId)
       else {
+        lastActiveChannelId = ''
         draft = []
         updateJsonSource()
         renderCards()
         renderList()
       }
+
+      const autoSelectTimers = [400, 1200, 3000].map(ms =>
+        setTimeout(() => {
+          ensureBestChannel()
+        }, ms),
+      )
 
       const offReplaced = events.on('chat:messages-replaced', payload => {
         if (payload?.channelId === activeChannel && !dirty) loadChannel(activeChannel)
@@ -730,10 +922,51 @@ export function apply(ctx) {
         loadChannel(channelId)
       })
 
+      // 会话从后端同步完成后再做一次“选有消息渠道 / 刷新当前渠道”。
+      // 页面首次渲染时 sync 可能还没完成，那时所有渠道都可能是 0 条；
+      // 如果没有这个监听，就会一直停在“初始化时选中的空渠道”。
+      let sessionSyncTimer = null
+      const refreshAfterSessionSync = () => {
+        if (sessionSyncTimer) clearTimeout(sessionSyncTimer)
+        sessionSyncTimer = setTimeout(() => {
+          sessionSyncTimer = null
+          if (dirty) {
+            renderList()
+            return
+          }
+          if (!ensureBestChannel()) renderList()
+        }, 80)
+      }
+      const offSessionsSynced = events.on('sessions:synced', refreshAfterSessionSync)
+      const offConversationSync = events.on('conversation:sync', refreshAfterSessionSync)
+      const offSessionsSource = events.on('sessions:source', () => renderList())
+      // 服务端代聊写入消息后 session-service 会触发 conversation:update；
+      // 当前正在查看的渠道自动刷新草稿，避免页面停在旧数据上。
+      const offConversationUpdate = events.on('conversation:update', conversation => {
+        const id = String(conversation?.id || '')
+        if (channelLoading) {
+          renderList()
+          return
+        }
+        const activeRecord = activeChannel ? store.channelRecord(activeChannel) : null
+        if (!dirty && id && activeRecord?.conversationId === id) {
+          loadChannel(activeChannel)
+          return
+        }
+        if (!dirty && ensureBestChannel()) return
+        renderList()
+      })
+
       return () => {
         offReplaced()
         offDeleted()
         offSelect()
+        offSessionsSynced()
+        offConversationSync()
+        offSessionsSource()
+        offConversationUpdate()
+        for (const timer of autoSelectTimers) clearTimeout(timer)
+        if (sessionSyncTimer) clearTimeout(sessionSyncTimer)
         container.innerHTML = ''
       }
     },

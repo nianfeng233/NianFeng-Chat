@@ -43,6 +43,9 @@ export function apply(ctx, config = {}) {
     if (!conv) return conv
     const { messages, ...meta } = conv
     meta.messageCount = Array.isArray(messages) ? messages.length : Number(meta.messageCount) || 0
+    // 记忆库需要“当前渠道已经聊到哪个 seq”作为升级基线；只给最后一页消息的序号，避免大对象。
+    const lastMessage = Array.isArray(messages) && messages.length ? messages[messages.length - 1] : null
+    meta.lastSeq = Number(lastMessage?.seq) || 0
     return meta
   }
 
@@ -147,13 +150,90 @@ export function apply(ctx, config = {}) {
     if (!db) return []
     try {
       return db
-        .prepare('SELECT data FROM messages WHERE conversation_id = ? ORDER BY seq ASC, created_at ASC')
+        .prepare('SELECT seq, data FROM messages WHERE conversation_id = ? ORDER BY seq ASC, created_at ASC')
         .all(String(conversationId))
-        .map(row => JSON.parse(row.data))
+        .map(row => {
+          try {
+            const message = JSON.parse(row.data)
+            if (!message) return null
+            // 旧数据 / 渠道写入时可能没把 seq 写进 JSON；以数据库列为权威补回，前端分页游标才可靠。
+            if (!(Number(message.seq) > 0)) message.seq = Number(row.seq) || 0
+            return message
+          } catch (_) {
+            return null
+          }
+        })
         .filter(Boolean)
     } catch (err) {
       ctx.logger.warn(`聊天记录读取失败：${err.message}`)
       return []
+    }
+  }
+
+  const dbMessageCount = conversationId => {
+    if (!db) return 0
+    try {
+      return Number(db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(String(conversationId))?.n || 0)
+    } catch (_) {
+      return 0
+    }
+  }
+
+  /**
+   * 按 seq 游标分页读取消息：
+   *   - beforeSeq：取比该 seq 更早的一页（返回按 seq 升序，供聊天窗口“往上翻”）
+   *   - afterSeq：取比该 seq 更新的一页（保留接口能力）
+   *   - 都不传：取最新一页
+   * 每次多查 1 条判断是否还有更多，避免额外的 COUNT 查询。
+   */
+  const dbMessagePage = (conversationId, { limit = 20, beforeSeq = null, afterSeq = null } = {}) => {
+    if (!db) return { messages: [], total: dbMessageCount(conversationId), hasMoreBefore: false, hasMoreAfter: false }
+    const size = Math.max(1, Math.min(500, Math.floor(Number(limit) || 20)))
+    const total = dbMessageCount(conversationId)
+    const params = [String(conversationId)]
+    let where = ''
+    let order = 'DESC'
+    let reverse = true
+    const hasBefore = beforeSeq !== null && beforeSeq !== undefined && beforeSeq !== ''
+    const hasAfter = afterSeq !== null && afterSeq !== undefined && afterSeq !== ''
+    if (hasBefore) {
+      where = ' AND seq < ?'
+      params.push(Number(beforeSeq) || 0)
+    } else if (hasAfter) {
+      where = ' AND seq > ?'
+      params.push(Number(afterSeq) || 0)
+      order = 'ASC'
+      reverse = false
+    }
+    let rows = []
+    try {
+      rows = db
+        .prepare(`SELECT seq, data FROM messages WHERE conversation_id = ?${where} ORDER BY seq ${order} LIMIT ?`)
+        .all(...params, size + 1)
+    } catch (err) {
+      ctx.logger.warn(`聊天记录分页读取失败：${err.message}`)
+      return { messages: [], total, hasMoreBefore: false, hasMoreAfter: false }
+    }
+    const hasExtra = rows.length > size
+    if (hasExtra) rows = rows.slice(0, size)
+    if (reverse) rows.reverse()
+    const messages = rows
+      .map(row => {
+        try {
+          const message = JSON.parse(row.data)
+          if (!message) return null
+          if (!(Number(message.seq) > 0)) message.seq = Number(row.seq) || 0
+          return message
+        } catch (_) {
+          return null
+        }
+      })
+      .filter(Boolean)
+    return {
+      messages,
+      total,
+      hasMoreBefore: hasBefore ? hasExtra : hasAfter ? true : total > messages.length,
+      hasMoreAfter: hasAfter ? hasExtra : hasBefore ? total > 0 : false,
     }
   }
 
@@ -177,6 +257,7 @@ export function apply(ctx, config = {}) {
       }
     }
     if (!seq) seq = dbNextSeq(conversationId)
+    if (!(Number(message.seq) > 0)) message.seq = seq
     const createdAt = Number(message.createdAt) || Date.now()
     db.prepare(
       'INSERT INTO messages(id, conversation_id, seq, data, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, seq = excluded.seq, data = excluded.data, updated_at = excluded.updated_at',
@@ -224,12 +305,115 @@ export function apply(ctx, config = {}) {
     await persistMetadata()
   }
 
+  const repairMessageKey = message =>
+    String(message?.id || message?.message_id || `${Number(message?.createdAt) || Date.parse(message?.timestamp || '') || 0}:${message?.seq || 0}:${message?.role || ''}`)
+
+  const repairMessageTime = message => {
+    const createdAt = Number(message?.createdAt)
+    if (Number.isFinite(createdAt) && createdAt > 0) return createdAt
+    const parsed = Date.parse(String(message?.timestamp || ''))
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
+  /**
+   * 修复历史竞态造成的“同一渠道多个会话容器”：
+   * 旧版渠道插件在 session-service 首次同步完成前抢建会话时，会把真实聊天记录留在
+   * 旧 conv.id，把 channel.meta.conversationId 指向新的空 conv.id，表现为“聊天记录 0 条”。
+   * 后端启动时按 meta.channelId 合并：
+   *   - 选原文最多的容器作为规范容器；
+   *   - 其余容器的消息按时间并入，重新分配连续 seq，避免重复序号；
+   *   - 删除重复容器，channel 侧 findByChannelId 会自然落到规范容器。
+   */
+  const repairDuplicateChannelConversations = () => {
+    const groups = new Map()
+    const kept = []
+    for (const conv of data.conversations) {
+      const channelId = String(conv?.meta?.channelId || '')
+      // 普通角色会话 / 网页渠道各自唯一，不参与外部渠道容器去重。
+      if (!channelId || channelId.startsWith('nova:web:')) {
+        kept.push(conv)
+        continue
+      }
+      if (!groups.has(channelId)) groups.set(channelId, [])
+      groups.get(channelId).push(conv)
+    }
+    let repaired = 0
+    for (const items of groups.values()) {
+      if (items.length <= 1) {
+        kept.push(items[0])
+        continue
+      }
+      const canonical = items.reduce((best, item) => {
+        const bestCount = Array.isArray(best?.messages) ? best.messages.length : Number(best?.messageCount) || 0
+        const itemCount = Array.isArray(item?.messages) ? item.messages.length : Number(item?.messageCount) || 0
+        if (itemCount !== bestCount) return itemCount > bestCount ? item : best
+        return Number(item?.updatedAt || 0) > Number(best?.updatedAt || 0) ? item : best
+      }, items[0])
+      const latest = items.reduce((best, item) => {
+        const bestHasMessages = Array.isArray(best?.messages) ? best.messages.length > 0 : false
+        const itemHasMessages = Array.isArray(item?.messages) ? item.messages.length > 0 : false
+        if (bestHasMessages !== itemHasMessages) return itemHasMessages ? item : best
+        return Number(item?.updatedAt || 0) > Number(best?.updatedAt || 0) ? item : best
+      }, canonical)
+      // 只有重复容器里确实带着原文时才重写规范容器的消息表；
+      // 否则（例如一堆 0 条空壳）直接删空壳，避免 36k 条历史在启动时被无意义地整表重写。
+      const hasExtraMessages = items.some(
+        item => item !== canonical && Array.isArray(item?.messages) && item.messages.length > 0,
+      )
+      if (hasExtraMessages) {
+        const allMessages = []
+        const seen = new Set()
+        for (const item of [canonical, ...items.filter(value => value !== canonical)]) {
+          for (const message of Array.isArray(item?.messages) ? item.messages : []) {
+            const key = repairMessageKey(message)
+            if (seen.has(key)) continue
+            seen.add(key)
+            allMessages.push(message)
+          }
+        }
+        allMessages.sort((a, b) => {
+          const ta = repairMessageTime(a)
+          const tb = repairMessageTime(b)
+          if (ta !== tb) return ta - tb
+          return (Number(a?.seq) || 0) - (Number(b?.seq) || 0)
+        })
+        allMessages.forEach((message, index) => {
+          message.seq = index + 1
+        })
+        canonical.messages = allMessages
+        canonical.messageCount = allMessages.length
+        if (sqliteAvailable && db) dbReplaceMessages(canonical.id, allMessages)
+      } else {
+        canonical.messages = Array.isArray(canonical.messages) ? canonical.messages : []
+        canonical.messageCount = canonical.messages.length || Number(canonical.messageCount) || 0
+      }
+      canonical.updatedAt = Math.max(...items.map(item => Number(item?.updatedAt || 0) || 0), Date.now())
+      if (latest?.name) canonical.name = latest.name
+      if (latest?.preview) canonical.preview = latest.preview
+      canonical.meta = { ...(items.find(item => item !== canonical)?.meta || {}), ...(canonical.meta || {}), ...(latest?.meta || {}) }
+      if (sqliteAvailable && db) {
+        for (const item of items) if (item.id !== canonical.id) dbDeleteConversation(item.id)
+      }
+      for (const item of items) if (item.id !== canonical.id) data.removedIds = [...new Set([...(data.removedIds || []), item.id])]
+      kept.push(canonical)
+      repaired += items.length - 1
+    }
+    if (repaired > 0) {
+      data.conversations = kept
+      data.updatedAt = Date.now()
+      ctx.logger.warn(`已合并同一渠道的重复聊天记录容器：修复 ${repaired} 个，当前 ${data.conversations.length} 个会话`)
+    }
+  }
+
   const load = async () => {
     await mkdir(dataDir, { recursive: true })
     const parsed = await readFrom(file)
     const opened = await openDatabase()
     if (!opened) {
       data = parsed || { conversations: [], updatedAt: 0 }
+      if (!Array.isArray(data.conversations)) data.conversations = []
+      repairDuplicateChannelConversations()
+      scheduleSave()
       ctx.logger.info(`会话数据已加载（JSON 回退模式）：${data.conversations.length} 个会话`)
       return
     }
@@ -257,6 +441,7 @@ export function apply(ctx, config = {}) {
         .filter(Boolean),
       updatedAt: Date.now(),
     }
+    repairDuplicateChannelConversations()
     await persistMetadata()
     ctx.logger.info(`会话数据已加载（SQLite 模式）：${data.conversations.length} 个会话 / ${service.totalMessages()} 条消息`)
   }
@@ -363,10 +548,12 @@ export function apply(ctx, config = {}) {
             dbReplaceMessages(conv.id, conv.messages || [])
           }
           data = previousData
+          repairDuplicateChannelConversations()
           await persistMetadata()
         } else {
           // JSON 回退模式：整体复制历史数据。
           data = previousData
+          repairDuplicateChannelConversations()
           await writeJsonAtomic(file, data)
         }
       } else {
@@ -386,8 +573,80 @@ export function apply(ctx, config = {}) {
     find(id) {
       return data.conversations.find(c => c.id === id) || null
     },
+    getCompact(id) {
+      const conv = service.find(id)
+      return conv ? metaOf(conv) : null
+    },
+    /** 按渠道稳定 ID 找聊天记录容器，供渠道插件避免在同步开始前误建新会话。 */
+    findByChannelId(channelId) {
+      const key = String(channelId || '').trim()
+      if (!key) return null
+      const matches = data.conversations.filter(conv => String(conv?.meta?.channelId || '') === key)
+      if (!matches.length) return null
+      return matches.reduce((best, item) => (messageCountOf(item) > messageCountOf(best) ? item : best), matches[0])
+    },
     count: () => data.conversations.length,
     totalMessages: () => data.conversations.reduce((sum, c) => sum + (c.messages?.length || 0), 0),
+
+    messageCount(id) {
+      const conv = service.find(id)
+      if (!conv) return 0
+      const count = Number(conv.messageCount)
+      return Number.isFinite(count) && count >= 0 ? count : messageCountOf(conv)
+    },
+
+    /**
+     * 单会话分页读取（聊天记录页 / Web 聊天窗口懒加载的共用接口）。
+     * 返回值按时间从旧到新排列，调用方只需把这批消息按 message_id 合并进本地页。
+     */
+    listMessages(id, { limit = 20, beforeSeq = null, afterSeq = null, all = false } = {}) {
+      const conv = service.find(id)
+      if (!conv) return null
+      if (all) {
+        const messages = sqliteAvailable && db ? dbLoadMessages(id) : clone(conv.messages || [])
+        return {
+          conversationId: id,
+          messageCount: messages.length,
+          total: messages.length,
+          messages,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+          oldestSeq: messages.length ? Number(messages[0]?.seq) || null : null,
+          newestSeq: messages.length ? Number(messages[messages.length - 1]?.seq) || null : null,
+        }
+      }
+      const page = sqliteAvailable && db
+        ? dbMessagePage(id, { limit, beforeSeq, afterSeq })
+        : (() => {
+            const sorted = [...(conv.messages || [])].sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0))
+            const total = sorted.length
+            if (beforeSeq !== null && beforeSeq !== undefined && beforeSeq !== '') {
+              const before = sorted.filter(message => (Number(message?.seq) || 0) < Number(beforeSeq))
+              const messages = before.slice(-Math.max(1, Math.floor(Number(limit) || 20)))
+              return { messages, total, hasMoreBefore: before.length > messages.length, hasMoreAfter: total > before.length }
+            }
+            const messages = sorted.slice(-Math.max(1, Math.floor(Number(limit) || 20)))
+            return { messages, total, hasMoreBefore: sorted.length > messages.length, hasMoreAfter: false }
+          })()
+      const messages = page.messages || []
+      const oldestSeq = messages.length ? Number(messages[0]?.seq) || null : null
+      const newestSeq = messages.length ? Number(messages[messages.length - 1]?.seq) || null : null
+      return {
+        conversationId: id,
+        messageCount: Number(page.total ?? conv.messageCount) || 0,
+        total: Number(page.total ?? conv.messageCount) || 0,
+        messages,
+        hasMoreBefore: page.hasMoreBefore === true,
+        hasMoreAfter: page.hasMoreAfter === true,
+        oldestSeq,
+        newestSeq,
+      }
+    },
+
+    /** 显式需要完整原文的场景（导出 / 搜索 / 保存 JSON 编辑器）才加载全部。 */
+    listAllMessages(id) {
+      return service.listMessages(id, { all: true })
+    },
 
     create(partial = {}) {
       const conv = {
