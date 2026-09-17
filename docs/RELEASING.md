@@ -5,7 +5,8 @@
 -->
 # 版本管理与发布规范（RELEASING）
 
-> 面向后续维护者与新会话的“单一事实来源”。任何发布动作都必须走本文件描述的流程；
+> 版本号语义、分支模型与 GitHub 仓库保留策略已独立到 [`VERSIONING.md`](./VERSIONING.md)；
+> 本文件保留发布、构建、安全扫描与产物流程。
 > 发布前的强制安全扫描见 [`scripts/prepare-publish.mjs`](../scripts/prepare-publish.mjs)。
 
 ---
@@ -47,41 +48,28 @@
 
 ## 3. 版本号规范
 
-采用 [语义化版本](https://semver.org/lang/zh-CN/)：`MAJOR.MINOR.PATCH`，统一前缀 `v` 作为 Git tag。
+版本号规则、预览/正式版本命名与发布顺序以 [`VERSIONING.md`](./VERSIONING.md) 为准。摘要：
 
-> 注意：README、文档措辞、注释等**不改变功能的改动不单独发 Release**，随下一次功能版本一起发布；
-> 只有在许可证、安全性或发布内容存在必须立即更正的问题时，才发 PATCH 并在说明中注明原因。
-
-| 版本 | 场景 | 示例 |
-|---|---|---|
-| `MAJOR` | 破坏性变更（数据结构、插件协议、配置不兼容） | `v1.0.0` |
-| `MINOR` | 向后兼容的新功能 | `v0.41.0` |
-| `PATCH` | 向后兼容的 Bug / 安全修复 | `v0.40.1` |
-| `-alpha.N` | 内部验证，随时可能大改 | `v0.41.0-alpha.1` |
-| `-beta.N` | 功能接近冻结，欢迎测试 | `v0.41.0-beta.2` |
-| `-rc.N` | 候选发布，只修阻塞问题 | `v0.41.0-rc.1` |
-
-规则：
-
-* 版本号同时写入 `package.json` 与 `scripts/desktop-wrapper/Cargo.toml`，发布前由脚本校验一致。
-* 预发布版本在 GitHub Release 上必须勾选 **Set as a pre-release**。
+* `MAJOR`：架构更换、开创性大型更新或破坏性变更。
+* `MINOR`：新增功能并进入稳定版。
+* `PATCH`：不新增功能、中途修改较小时用于 Bug 修复与优化。
+* 预览版统一使用 `-preview.N` 后缀，并在 GitHub Release 上勾选 pre-release；正式版去掉后缀。
+* 版本号必须同时写入 `package.json` 与 `scripts/desktop-wrapper/Cargo.toml`，发布前由脚本校验一致。
 * 不允许覆盖或移动已经发布的 tag；发现问题发新的 PATCH 版本。
-* 当前正式版本以 Git tag 与 GitHub Releases 为准。
+* 当前正式版本以 `main` 分支上的 Git tag 与 GitHub Releases 为准。
 
 ---
 
 ## 4. 分支模型
 
-| 分支 | 用途 | 规则 |
-|---|---|---|
-| `main` | 稳定发布分支 | 只接受通过测试的变更；每个发布从 main 打 tag |
-| `dev` | 日常开发集成分支 | 可选；多人协作时功能先合入 dev |
-| `feature/<name>` | 新功能 | 从 dev/main 拉出，完成后合回 |
-| `fix/<name>` | 普通修复 | 同上 |
-| `hotfix/<version>` | 线上紧急修复 | 从最新 tag 拉出，修复后直接发 PATCH |
-| `release/<version>` | 发布准备（仅大型版本） | 只修 release blocker，冻结功能 |
+* `main`：稳定发布线，只接收已经过预览验证的提交；正式 tag 从 `main` 打出。
+* `preview`：日常开发与集成；所有改动先进入这里，预览 tag 从 `preview` 打出。
+* `feature/*`、`fix/*`：从 `preview` 或对应的 `release/vX.Y` 拉出，完成后合回，不直接合入 `main`。
+* `release/vX.Y`：仅当 `MINOR` 变化时创建，用于该版本的预览、正式发布与后续 PATCH。
+* `hotfix/*`：仍先进入 `preview` 发 `vX.Y.Z-preview.N` 验证，确认后合入对应版本线并发布 PATCH。
 
-单人维护时可以简化：直接在 `main` 开发，但**任何发布都必须打 tag**，且发布工作树独立。
+规则：任何改动都必须先走预览版；预览验证通过后，才把对应提交并入 `main` 并发正式版。
+新版本分支只在至少 `MINOR` 变化时创建，PATCH 修复不新开版本分支。
 
 ---
 
@@ -102,8 +90,8 @@ release: 念风Chat v0.41.0
 ## 6. 标准发布流程
 
 ```powershell
-# 0. 版本号
-#    修改 package.json 与 scripts/desktop-wrapper/Cargo.toml 为同一版本，例如 0.41.0
+# 0. 版本号：例如预览 v1.2.0-preview.1，确认后正式 v1.2.0
+#    修改 package.json 与 scripts/desktop-wrapper/Cargo.toml 为同一版本
 
 # 1. 全量测试（模块检查 / 后端 / 前端端到端 / 对话 / 工具 / 厂商协议）
 npm test
@@ -115,10 +103,12 @@ npm run build:release
 node scripts/prepare-publish.mjs
 #    输出文件数与内容 SHA-256；如发现敏感内容会列出并退出
 
-# 4. 一键提交 / 打 tag / 推送 / 创建 Release（含附件）
-node scripts/publish-release.mjs --tag v0.41.0 --notes docs/releases/v0.41.0.md --assets "release/nianfeng-desktop-v0.41.0.exe,release/nianfeng-web-deploy-v0.41.0.zip,release/nianfeng-web-source-v0.41.0.zip"
+# 4. 先发预览：从 preview 分支打 -preview.N tag，发布 pre-release；验证通过后
+#    再把对应提交并入 main，在 main 上打正式 tag 并发布正式 Release
+node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --assets "release/nianfeng-desktop-v1.2.0.exe,release/nianfeng-web-deploy-v1.2.0.zip,release/nianfeng-web-source-v1.2.0.zip"
 ```
 
+预览与正式的完整顺序、分支与 tag 清理策略见 [`VERSIONING.md`](./VERSIONING.md)。
 如果 `gh` 未登录：`gh auth login`（推荐）或确保 SSH / PAT 凭据已配置。
 
 ---

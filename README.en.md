@@ -23,10 +23,10 @@ a Windows desktop application.
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
 
-## Why this is not just another chat shell
+## Core capabilities
 
-NianFeng-Chat is not a thin UI over a model API. Memory, context, tools, channels, and the entire UI are
-built as cordis plugins. The points below are implemented today in code, with paths and commands you can verify.
+NianFeng-Chat builds memory, context, tools, channels, and the entire UI as cordis plugins.
+The points below are implemented today in code, with paths and commands you can verify.
 
 ### 1. Near-unlimited memory: full persistence + on-demand recall
 
@@ -54,8 +54,8 @@ built as cordis plugins. The points below are implemented today in code, with pa
 - Long documents go into `document-service`: each document can hold up to 2M characters, while chat
   records keep only `doc_id + title + summary`. `read_document` reads it in chunks 100–4000 tokens at a
   time and returns `next_offset` so the model can continue to the end.
-- The model therefore sees "summary + recent context + retrieved chunks", not a giant prompt made by
-  dumping all history.
+- The model therefore sees "summary + recent context + retrieved chunks" while only the needed content
+  enters the prompt.
 
 ### 2. Cross-session / cross-channel interaction
 
@@ -65,8 +65,7 @@ built as cordis plugins. The points below are implemented today in code, with pa
 - A channel can enable `crossReadable` / `crossSendable`; the model can read another channel with
   `read_messages` or send to it with `chat_send` / `send_document`. Sensitive cross-channel operations
   still go through `chat-permissions` and user confirmation.
-- The current usable channels are injected into the system prompt, so the model does not have to guess
-  internal IDs or treat every cross-channel action as forbidden.
+- The current usable channels and their display names are injected into the system prompt for direct use.
 
 ### 3. Pollution-resistant context
 
