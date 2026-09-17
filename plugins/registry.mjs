@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 94 个插件，按目录名排序；真正的加载顺序由
+ * 共 95 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -2346,6 +2346,44 @@ export const plugins = [
     "slots": [],
     "path": "./plugins/views/global-search/index.mjs",
     "dir": "plugins/views/global-search"
+  },
+  {
+    "id": "library-view",
+    "version": "1.0.0",
+    "displayName": "视图 · 记忆与知识库",
+    "description": "独立视图：浏览长期记忆条目与对应消息原文，以及知识库条目全文与历史。",
+    "author": "念风内核",
+    "core": false,
+    "enabled": true,
+    "icon": "🧠",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "event-bus": "*",
+      "view-router": "^1.0.0"
+    },
+    "optionalDepends": {
+      "backend-client": ">=1.0.0",
+      "memory-store": "^1.0.0",
+      "session-service": ">=2.0.0"
+    },
+    "inject": [
+      "view-router",
+      "event-bus",
+      "api?",
+      "memory-store?",
+      "session-service?"
+    ],
+    "provides": [
+      {
+        "name": "library-view",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/views/library-view/index.mjs",
+    "dir": "plugins/views/library-view"
   },
   {
     "id": "message-list",

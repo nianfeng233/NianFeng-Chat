@@ -79,6 +79,9 @@ export function apply(ctx) {
           return
         }
         finished = true
+        ctx.logger.error(
+          `[model-service] 模型 ${currentKey || '未选择'} 调用失败（${elapsed()}ms）：${error?.message || error}`,
+        )
         callbacks.onError?.(error)
         events.emit('model:error', { key: currentKey, error, elapsedMs: elapsed() })
       }

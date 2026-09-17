@@ -38,18 +38,46 @@ export const provides = [{ name: 'memory-store', type: 'singleton' }]
 
 const MAX_ROUNDS_PER_INGEST = 30
 const AUTO_INGEST_DELAY_MS = 800
+/** 群聊窗口概括：窗口内至少要有这么多条“从未概括过”的消息，才值得再调一次概括模型。 */
+const MIN_WINDOW_NEW_MESSAGES = 5
+/** 单次窗口概括最多携带的消息数，与后端 MAX_MESSAGES_PER_ROUND 对齐。 */
+const MAX_WINDOW_MESSAGES = 80
+
+/**
+ * 只有真正触发过模型的用户消息才能开始一轮记忆；群聊里的静默上下文消息
+ * （NapCat 等渠道会写入 chat-store 供模型参考，但 meta.triggered === false）
+ * 绝不能单独成轮，否则未触发模型的聊天也会被概括，造成 token 浪费。
+ *
+ * 没有 meta.triggered 字段的渠道（网页 / 私聊 / QQBot / 微信）默认视为每条
+ * 用户消息都触发过模型；助手回复只有挂在一轮已触发的用户消息后才能成轮。
+ */
+function isTriggeredUserMessage(message) {
+  return message?.role === 'user' && message?.meta?.triggered !== false
+}
 
 function groupRounds(messages) {
   const rounds = []
   let current = null
+  const flush = () => {
+    if (current && current.messages.some(message => message.role === 'assistant')) rounds.push(current)
+    current = null
+  }
   for (const message of messages || []) {
     if (!message || message.kind === 'divider' || message.role === 'system') continue
-    if (message.role === 'user' || !current) {
-      current = { messages: [] }
-      rounds.push(current)
+    if (message.role === 'user') {
+      if (!isTriggeredUserMessage(message)) {
+        // 静默消息出现时，如果当前轮已经有回复，说明这一轮已经闭环：先封口，
+        // 防止后续主动发出的 assistant 消息被错误算进上一轮触发对话。
+        if (current && current.messages.some(item => item.role === 'assistant')) flush()
+        continue
+      }
+      flush()
+      current = { messages: [message] }
+      continue
     }
-    current.messages.push(message)
+    if (message.role === 'assistant' && current) current.messages.push(message)
   }
+  flush()
   return rounds
 }
 
@@ -111,6 +139,21 @@ export function apply(ctx) {
 
   const resolveScope = channel => (channel?.group === 'privacy' ? 'privacy' : 'normal')
 
+  /** 群聊记忆窗口大小：优先本群上下文条数，其次聊天通用设置，默认 20。 */
+  const groupWindowSizeOf = channel => {
+    const groupOverride = Number(channel?.contextMessages)
+    const globalMessages = Number(config.get('chat.groupMessages', 20))
+    const raw = groupOverride > 0 ? groupOverride : globalMessages > 0 ? globalMessages : 20
+    return Math.max(2, Math.min(MAX_WINDOW_MESSAGES, Math.floor(raw) || 20))
+  }
+
+  /** 群聊窗口按“最近 N 条消息”取值，包含未触发模型的静默上下文，和模型实际看到的一致。 */
+  const collectWindowMessages = (channelId, limit) => {
+    const messages = store.messagesOf(channelId)
+    if (!messages.length) return []
+    return messages.slice(-Math.max(1, Number(limit) || 20)).map(compactMessage)
+  }
+
   const ingestConversation = async conversationId => {
     if (config.get('memory.enabled', true) === false) return { ok: false, code: 'MEMORY_DISABLED', error: '长期记忆已关闭' }
     const conv = sessions.get(conversationId)
@@ -121,13 +164,42 @@ export function apply(ctx) {
     if (typeof sessions.ensureMessages === 'function') {
       await sessions.ensureMessages(conversationId, { limit: 80 }).catch(() => null)
     }
-    const rounds = collectCompleteRounds(channel.channelId)
+    // 群聊按“最近 N 条消息窗口”概括：每次模型轮结束后由后端对照已概括过的 message id，
+    // 重复 > N-5 条时跳过，避免同一段群聊被反复概括。其他渠道继续走完整轮次概括。
+    const groupWindowSize = channel.group === 'group' ? groupWindowSizeOf(channel) : 0
+    let rounds = []
+    if (groupWindowSize > 0) {
+      const messages = collectWindowMessages(channel.channelId, groupWindowSize)
+      const lastMessage = messages.at(-1)
+      if (messages.length) {
+        rounds = [
+          {
+            id: `window:${channel.channelId}:${lastMessage?.message_id || lastMessage?.seq || '0'}`,
+            channel_id: channel.channelId,
+            conversation_id: conversationId,
+            source_group: channel.group || 'group',
+            messages,
+          },
+        ]
+      }
+    } else {
+      rounds = collectCompleteRounds(channel.channelId)
+    }
     if (!rounds.length) return { ok: true, created: 0, pending: 0, ignored: 0 }
     const client = api()
     if (!client?.memoryIngest && !client?.post) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用' }
     const active = ctx.registry.get('model-registry')?.active?.() || null
+    // 外部渠道会话名是「角色 · 平台 · 目标」，概括时必须使用角色本名，
+    // 否则概括模型会把渠道名 / 应用名（例如「念风」）当成对话人物。
+    const roleId = String(channel.roleId || conv.meta?.roleId || conv.id || '').trim()
+    const roleConv = roleId ? sessions.get(roleId) : null
+    const roleName = String(roleConv?.name || roleConv?.meta?.name || '').trim()
     const payload = {
-      roleId: channel.roleId || conv.meta?.roleId || conv.id,
+      roleId,
+      roleName,
+      mode: groupWindowSize > 0 ? 'window' : 'round',
+      windowSize: groupWindowSize,
+      minNewMessages: MIN_WINDOW_NEW_MESSAGES,
       memoryScope: resolveScope(channel),
       channelId: channel.channelId,
       conversationId,
@@ -177,6 +249,56 @@ export function apply(ctx) {
     }
   }
 
+  /** 记忆管理页：分页读取已有记忆条目（不含原文 messages）。 */
+  const listRecords = async (params = {}) => {
+    const client = api()
+    if (!client?.get) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用' }
+    const query = new URLSearchParams()
+    const put = (key, value) => {
+      const text = String(value ?? '').trim()
+      if (text) query.set(key, text)
+    }
+    put('roleId', params.roleId)
+    put('scope', params.memoryScope === 'privacy' ? 'privacy' : params.memoryScope === 'all' ? 'all' : '')
+    put('channelId', params.channelId)
+    put('q', params.q ?? params.query)
+    put('limit', params.limit)
+    put('offset', params.offset)
+    if (params.includeMessages === true) query.set('includeMessages', '1')
+    try {
+      return await client.get(`/memory/records${query.toString() ? `?${query.toString()}` : ''}`, { timeoutMs: 60000 })
+    } catch (err) {
+      ctx.logger?.debug?.(`[memory-store] 记忆条目读取失败：${err?.message || err}`)
+      return { ok: false, code: 'MEMORY_RECORDS_FAILED', error: String(err?.message || err), status: err?.status }
+    }
+  }
+
+  /** 记忆管理页：读取单条记忆的概括与消息原文快照。 */
+  const getRecord = async id => {
+    const client = api()
+    const recordId = String(id || '').trim()
+    if (!client?.get) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用' }
+    if (!recordId) return { ok: false, code: 'MISSING_ID', error: '缺少记忆条目 id' }
+    try {
+      return await client.get(`/memory/records/${encodeURIComponent(recordId)}`, { timeoutMs: 60000 })
+    } catch (err) {
+      ctx.logger?.debug?.(`[memory-store] 记忆条目详情读取失败：${err?.message || err}`)
+      return { ok: false, code: 'MEMORY_RECORD_FAILED', error: String(err?.message || err), status: err?.status }
+    }
+  }
+
+  /** 记忆管理页：筛选用角色 / 范围 / 渠道概况。 */
+  const listRoles = async () => {
+    const client = api()
+    if (!client?.get) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用' }
+    try {
+      return await client.get('/memory/roles', { timeoutMs: 30000 })
+    } catch (err) {
+      ctx.logger?.debug?.(`[memory-store] 记忆角色列表读取失败：${err?.message || err}`)
+      return { ok: false, code: 'MEMORY_ROLES_FAILED', error: String(err?.message || err), status: err?.status }
+    }
+  }
+
   const scheduleIngest = conversationId => {
     if (!conversationId || disposed) return
     if (config.get('memory.enabled', true) === false || config.get('memory.autoSummarize', true) === false) return
@@ -197,6 +319,9 @@ export function apply(ctx) {
     ingestConversation,
     search,
     status,
+    listRecords,
+    getRecord,
+    listRoles,
     available: () => {
       const client = api()
       return !!(client?.status?.().online && (client.supports?.('memory') || client.memorySearch))

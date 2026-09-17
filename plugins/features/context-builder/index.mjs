@@ -816,10 +816,31 @@ export function apply(ctx) {
             null
           : null
         const cutoffSeq = Number(currentMessage?.seq) || 0
+        const cutoffAt = Date.parse(currentMessage?.timestamp) || 0
+        const allChannelMessages = filterAutomaticHistory(store.messagesOf(useChannelId))
+        // 正常情况 seq 是权威顺序。但 compact 同步后如果 chat-store 没拿 lastSeq，
+        // 首条入站消息会被错误发到低位 seq；此时按 seq 截断会把今天真正的近期消息全丢掉，
+        // 模型只能看到很久以前的记录。检测到“seq 更靠后、时间却更早”的错位时改用时间截断。
+        const seqLooksStale =
+          cutoffSeq > 0 &&
+          cutoffAt > 0 &&
+          allChannelMessages.some(
+            message =>
+              String(message?.channel_id || '') === String(useChannelId) &&
+              (Number(message?.seq) || 0) > cutoffSeq &&
+              (Date.parse(message?.timestamp) || 0) > 0 &&
+              (Date.parse(message?.timestamp) || 0) < cutoffAt,
+          )
         // 当前渠道记忆只处理到当前这条，避免把渠道连发中尚未轮到的后续消息带入。
-        const channelMessages = filterAutomaticHistory(store.messagesOf(useChannelId)).filter(
-          message => !cutoffSeq || message.channel_id !== useChannelId || (Number(message.seq) || 0) <= cutoffSeq,
-        )
+        const channelMessages = allChannelMessages.filter(message => {
+          if (message.channel_id !== useChannelId) return true
+          if (String(message.message_id || message.id || '') === String(currentMessageId)) return true
+          if (seqLooksStale) {
+            const at = Date.parse(message.timestamp) || 0
+            return !cutoffAt || !at || at <= cutoffAt
+          }
+          return !cutoffSeq || (Number(message.seq) || 0) <= cutoffSeq
+        })
         if (messageBudget > 0) {
           // 群聊：直接取当前渠道最近 messageBudget 条消息，不按轮切分。
           for (const message of channelMessages.slice(-messageBudget)) {

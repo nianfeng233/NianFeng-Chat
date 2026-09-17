@@ -42,6 +42,10 @@ try {
 const DEFAULT_EVERY_ROUNDS = 10
 const MAX_EVERY_ROUNDS = 50
 const MAX_MESSAGES_PER_ROUND = 80
+/** 群聊窗口概括：窗口内至少要有这么多条新消息（未出现在历史概括里）才值得总结。 */
+const MIN_WINDOW_NEW_MESSAGES = 5
+/** 群聊窗口最大消息数，与 normalizeRounds 的单轮上限保持一致。 */
+const MAX_WINDOW_MESSAGES = 80
 const MAX_MESSAGE_CHARS = 4000
 const MAX_SUMMARY_CHARS = 600
 const MAX_SEARCH_TOP_K = 20
@@ -256,14 +260,24 @@ function normalizeRounds(input = []) {
   })
 }
 
-function roundsToPromptContent(rounds) {
+/** 说话人标签：助理固定用角色本名，用户用消息自带的发送者名；绝不使用应用名兜底。 */
+function speakerLabelOf(message, { roleName = '' } = {}) {
+  const clean = value =>
+    String(value ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/[：:]\s*$/, '')
+      .trim()
+  if (message.role === 'assistant') return clean(roleName) || clean(message.sender_name) || '角色'
+  if (message.role === 'user') return clean(message.sender_name) || '用户'
+  return '系统'
+}
+
+function roundsToPromptContent(rounds, context = {}) {
   const lines = []
   for (let i = 0; i < rounds.length; i += 1) {
-    lines.push(`【第 ${i + 1} 轮】`)
+    lines.push(context.mode === 'window' ? '【群聊消息窗口】' : `【第 ${i + 1} 轮】`)
     for (const message of rounds[i].messages || []) {
-      const roleLabel =
-        message.role === 'user' ? '用户' : message.role === 'assistant' ? '念风' : message.role === 'system' ? '系统' : message.role
-      const sender = message.sender_name ? `${message.sender_name}(${roleLabel})` : roleLabel
+      const sender = speakerLabelOf(message, context)
       const time = String(message.timestamp || '').replace('T', ' ').replace(/\.\d+(?:[+-]\d\d:\d\d)?$/, '')
       lines.push(`- ${time ? `[${time}] ` : ''}${sender}：${message.content}`)
     }
@@ -272,9 +286,14 @@ function roundsToPromptContent(rounds) {
 }
 
 function recordToDTO(record, extra = {}) {
+  const messages = (record.rounds || []).flatMap(round => round.messages || [])
   return {
     id: record.id,
+    role_id: record.role_id || '',
+    role_name: record.meta?.role_name || '',
+    memory_scope: record.memory_scope || '',
     summary: record.summary,
+    keywords: record.keywords || '',
     score: extra.score ?? null,
     keyword_score: extra.keyword_score ?? null,
     vector_score: extra.vector_score ?? null,
@@ -286,9 +305,12 @@ function recordToDTO(record, extra = {}) {
       ended_at: record.ended_at || '',
     },
     round_count: record.round_count || record.rounds?.length || 0,
-    message_ids: (record.rounds || []).flatMap(round => (round.messages || []).map(message => message.message_id).filter(Boolean)),
-    messages: record.rounds.flatMap(round => round.messages || []),
+    message_count: messages.length,
+    message_ids: messages.map(message => message.message_id).filter(Boolean),
+    // 列表接口默认不带 messages，详情接口才展开，避免一次返回过多原文。
+    ...(extra.includeMessages === false ? {} : { messages }),
     created_at: record.created_at,
+    updated_at: record.updated_at || record.created_at,
     embedding: {
       provider: record.embedding_provider || '',
       model: record.embedding_model || '',
@@ -523,7 +545,15 @@ class MemoryRepository {
   }
 
   list({ roleId, scope } = {}) {
+    // 保持原有严格语义：必须同时匹配 roleId + scope（search / summaries 依赖）。
     return this.records.filter(record => record.role_id === roleId && record.memory_scope === scope)
+  }
+
+  /** 管理页筛选：roleId / scope 都可选；不传时返回全部记忆。 */
+  find({ roleId, scope } = {}) {
+    return this.records.filter(
+      record => (!roleId || record.role_id === roleId) && (!scope || record.memory_scope === scope),
+    )
   }
 
   hasRound(roundId) {
@@ -649,18 +679,26 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  async function summarizeRounds(rounds, modelConfig, everyRounds) {
+  async function summarizeRounds(rounds, modelConfig, everyRounds, context = {}) {
+    const windowMode = context.mode === 'window'
+    const windowSize = Math.max(1, Number(context.windowSize) || 0)
+    const sizeHint = windowMode
+      ? `；这次概括的是群聊最近 ${windowSize} 条消息的窗口，窗口里可能同时有多个说话人。`
+      : `；这些对话每组固定是 ${everyRounds} 轮。`
     const systemPrompt = [
-      '你是念风聊天记忆库的压缩器。',
-      '你的任务是把连续几轮完整对话压缩成一段很短的概括，用于以后按语义找回这段记忆。',
+      '你是聊天记录压缩器，不是对话里的任何人物。',
+      '你的任务是把连续几轮完整对话或一段群聊消息窗口压缩成一段很短的概括，用于以后按语义找回这段记忆。',
       '概括只保留关键信息：聊了什么话题、发生了什么事件、得出了什么结论、有什么偏好或情绪/风格；不要逐条复述，不要编造，不要输出标题、编号或解释。',
-      `建议 1-3 句话、最多约 160 个汉字；这些对话每组固定是 ${everyRounds} 轮。`,
+      '概括里的说话人以每行开头标注的真实名字为准；不同名字是不同的人，不要把应用名、模型名、压缩器名称或聊天记录里的系统字段当成对话人物，也不要给对话里没有出现的人起名。',
+      `建议 1-3 句话、最多约 160 个汉字${sizeHint}`,
     ].join('\n')
     const userPrompt = [
-      `请把下面这 ${rounds.length} 轮完整对话压缩成一段简短概括。`,
+      windowMode
+        ? `请把下面这 ${windowSize} 条群聊消息压缩成一段简短概括。`
+        : `请把下面这 ${rounds.length} 轮完整对话压缩成一段简短概括。`,
       '只输出概括正文。',
       '',
-      roundsToPromptContent(rounds),
+      roundsToPromptContent(rounds, context),
     ].join('\n')
     const text = await models.complete({
       provider: modelConfig.provider,
@@ -680,10 +718,175 @@ export function apply(ctx, config = {}) {
     return summary
   }
 
+  /** 群聊窗口已概括的 message_id 集合，用于判断当前窗口有多少条新消息。 */
+  function summarizedMessageIds(roleId, scopeKey, channelId) {
+    const ids = new Set()
+    for (const record of repo.list({ roleId, scope: scopeKey })) {
+      if (String(record.source_channel_id || '') !== String(channelId || '')) continue
+      for (const round of record.rounds || []) {
+        for (const message of round.messages || []) {
+          const id = String(message?.message_id || '').trim()
+          if (id) ids.add(id)
+        }
+      }
+    }
+    return ids
+  }
+
+  /**
+   * 群聊窗口概括：每次模型轮结束后，以最近 N 条消息为一个窗口。
+   * - 窗口不足 N 条：先不总结；
+   * - 与历史概括重复的 message_id 超过 N-5 条：说明窗口基本没变化，跳过；
+   * - 至少 5 条新消息：把整个窗口交给概括模型，生成一条记忆。
+   */
+  async function ingestWindow(input, { roleId, roleName, memoryScope, scopeKey, channelId, windowSize, minNewMessages, messages }) {
+    const ids = [...new Set(messages.map(message => String(message?.message_id || '').trim()).filter(Boolean))]
+    if (ids.length < windowSize) {
+      return {
+        ok: true,
+        created: 0,
+        pending: 0,
+        ignored: 0,
+        skipped: true,
+        reason: 'window-not-full',
+        window_size: windowSize,
+        message_count: ids.length,
+      }
+    }
+    const summarizedIds = summarizedMessageIds(roleId, scopeKey, channelId)
+    const duplicateCount = ids.filter(id => summarizedIds.has(id)).length
+    const duplicateLimit = Math.max(0, windowSize - Math.max(1, Math.min(windowSize, minNewMessages)))
+    if (duplicateCount > duplicateLimit) {
+      return {
+        ok: true,
+        created: 0,
+        pending: 0,
+        ignored: 0,
+        skipped: true,
+        reason: 'duplicate-window',
+        window_size: windowSize,
+        duplicate_count: duplicateCount,
+        duplicate_limit: duplicateLimit,
+      }
+    }
+    const modelConfig = summaryConfig(input)
+    if (!modelConfig) {
+      return {
+        ok: false,
+        code: 'NO_SUMMARY_MODEL',
+        error: '尚未配置概括模型：请到「设置 → 模型 → 记忆模型」选择，或先选择可用的全局默认对话模型。',
+        pending: 0,
+        ignored: 0,
+      }
+    }
+    const windowId = `window:${channelId}:${ids.at(-1)}`
+    const lockKey = `${roleId}:${memoryScope}:${String(channelId || '')}`
+    const previous = ingestLocks.get(lockKey) || Promise.resolve()
+    const task = previous
+      .catch(() => {})
+      .then(async () => {
+        const times = messages.map(message => timeToMs(message.timestamp)).filter(Boolean)
+        const startedAt = times.length ? new Date(Math.min(...times)).toISOString() : ''
+        const endedAt = times.length ? new Date(Math.max(...times)).toISOString() : ''
+        const round = {
+          id: windowId,
+          channel_id: channelId,
+          conversation_id: String(input.conversationId || ''),
+          source_group: String(input.sourceGroup || 'group'),
+          started_at: startedAt,
+          ended_at: endedAt,
+          messages,
+        }
+        const summary = await summarizeRounds([round], modelConfig, windowSize, {
+          roleName,
+          mode: 'window',
+          windowSize,
+        })
+        const keywords = tokenize(summary).slice(0, 60).join(' ')
+        let embedding = null
+        try {
+          embedding = await embedText(summary)
+        } catch (err) {
+          ctx.logger?.warn?.(`[memories] 群聊窗口向量化失败，先以关键词模式保存：${err?.message || err}`)
+        }
+        const record = {
+          id: `mem_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`,
+          role_id: roleId,
+          memory_scope: scopeKey,
+          summary,
+          keywords,
+          source_channel_id: String(channelId || ''),
+          source_conversation_id: String(input.conversationId || ''),
+          source_group: String(input.sourceGroup || 'group'),
+          round_count: 1,
+          started_at: startedAt,
+          ended_at: endedAt,
+          embedding: embedding?.vector || [],
+          embedding_provider: embedding?.provider || '',
+          embedding_model: embedding?.model || '',
+          embedding_dim: embedding?.dimension || 0,
+          round_ids: [windowId],
+          rounds: [round],
+          created_at: nowIso(),
+          updated_at: nowIso(),
+          meta: {
+            mode: 'window',
+            window_size: windowSize,
+            duplicate_count: duplicateCount,
+            duplicate_limit: duplicateLimit,
+            new_message_count: Math.max(0, windowSize - duplicateCount),
+            summary_provider: modelConfig.provider,
+            summary_model: modelConfig.model,
+            role_name: roleName,
+            embedded: !!embedding,
+          },
+        }
+        repo.save(record)
+        hub?.broadcast?.('memory/updated', {
+          roleId,
+          memoryScope,
+          channelId: String(channelId || ''),
+          created: 1,
+        })
+        return {
+          ok: true,
+          created: 1,
+          pending: 0,
+          ignored: 0,
+          skipped: false,
+          mode: 'window',
+          window_size: windowSize,
+          duplicate_count: duplicateCount,
+          duplicate_limit: duplicateLimit,
+          new_message_count: Math.max(0, windowSize - duplicateCount),
+          summaries: [recordToDTO(record)],
+        }
+      })
+    ingestLocks.set(lockKey, task)
+    try {
+      return await task
+    } finally {
+      if (ingestLocks.get(lockKey) === task) ingestLocks.delete(lockKey)
+    }
+  }
+
   async function ingest(input = {}) {
     ensureRepository()
     const roleId = String(input.roleId || '').trim()
     if (!roleId) throw Object.assign(new Error('缺少 roleId'), { status: 400 })
+    // 概括时必须用角色本名区分说话人；渠道会话名带平台后缀，不能直接拿来当人名。
+    // 优先使用前端传入的名字，旧前端 / 直接 ingest 时回退到 sessions 里的角色名。
+    let roleName = String(input.roleName || input.role_name || '').trim()
+    if (!roleName) {
+      try {
+        const conv = sessions?.get?.(roleId)
+        const boundRoleId = String(conv?.meta?.roleId || '').trim()
+        const roleConv = boundRoleId && boundRoleId !== roleId ? sessions?.get?.(boundRoleId) : null
+        roleName = String(roleConv?.name || conv?.name || '').trim()
+      } catch (_) {
+        roleName = ''
+      }
+    }
     const memoryScope = input.memoryScope === 'privacy' ? 'privacy' : 'normal'
     const scopeKey = memoryScope === 'privacy' ? `privacy:${String(input.channelId || 'unknown')}` : 'normal'
     const rounds = normalizeRounds(input.rounds)
@@ -694,6 +897,18 @@ export function apply(ctx, config = {}) {
     const firstSeq = seqs.length ? Math.min(...seqs) : 0
     const latestSeq = seqs.length ? Math.max(...seqs) : 0
     const channelId = String(input.channelId || rounds.at(-1)?.channel_id || '')
+    const windowSize = clampNumber(input.windowSize ?? input.window_size, 2, MAX_WINDOW_MESSAGES, 0)
+    if (windowSize > 0) {
+      const minNewMessages = Math.min(
+        windowSize,
+        clampNumber(input.minNewMessages ?? input.min_new_messages, 1, windowSize, MIN_WINDOW_NEW_MESSAGES),
+      )
+      const messages = rounds
+        .flatMap(round => round.messages || [])
+        .sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0))
+        .slice(-windowSize)
+      return ingestWindow(input, { roleId, roleName, memoryScope, scopeKey, channelId, windowSize, minNewMessages, messages })
+    }
     const stateKey = memoryStateKey(roleId, scopeKey, channelId)
     let state = repo.getState(stateKey)
     if (!state) {
@@ -733,7 +948,7 @@ export function apply(ctx, config = {}) {
         const pending = [...fresh]
         while (pending.length >= everyRounds) {
           const chunk = pending.splice(0, everyRounds)
-          const summary = await summarizeRounds(chunk, modelConfig, everyRounds)
+          const summary = await summarizeRounds(chunk, modelConfig, everyRounds, { roleName })
           const keywords = tokenize(summary).slice(0, 60).join(' ')
           let embedding = null
           try {
@@ -775,6 +990,7 @@ export function apply(ctx, config = {}) {
               every_rounds: everyRounds,
               summary_provider: modelConfig.provider,
               summary_model: modelConfig.model,
+              role_name: roleName,
               embedded: !!embedding,
             },
           }
@@ -877,10 +1093,107 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 记忆管理页：列出记忆条目。默认只返回摘要元数据，不返回原文 messages；
+   * 详情接口 getRecord 才返回条目对应的消息原文快照。支持按角色 / 范围 /
+   * 渠道 / 关键词 / 时间过滤，limit + offset 分页。
+   */
+  function listRecords(input = {}) {
+    ensureRepository()
+    const roleId = String(input.roleId || '').trim()
+    const scopeRaw = String(input.memoryScope || input.scope || '').trim()
+    const memoryScope = scopeRaw === 'privacy' ? 'privacy' : scopeRaw === 'all' || !scopeRaw ? '' : 'normal'
+    const channelId = String(input.channelId || '').trim()
+    const query = String(input.q || input.query || '').trim().toLowerCase()
+    const timeStart = input.timeStart || input.time_start || ''
+    const timeEnd = input.timeEnd || input.time_end || ''
+    let records = repo.find({ roleId: roleId || undefined, scope: memoryScope === 'normal' ? 'normal' : undefined })
+    // 隐私记忆按 `privacy:<channel>` 存储：未指定渠道时展示全部隐私记忆，
+    // 指定渠道时只展示该渠道的隐私记忆。
+    if (memoryScope === 'privacy') {
+      records = records.filter(record => String(record.memory_scope || '').startsWith(channelId ? `privacy:${channelId}` : 'privacy:'))
+    }
+    if (channelId) records = records.filter(record => String(record.source_channel_id || '') === channelId)
+    if (query) records = records.filter(record => `${record.summary || ''} ${record.keywords || ''}`.toLowerCase().includes(query))
+    if (timeStart) {
+      const from = timeToMs(timeStart)
+      if (from) records = records.filter(record => timeToMs(record.ended_at) >= from || timeToMs(record.started_at) >= from)
+    }
+    if (timeEnd) {
+      const to = timeToMs(timeEnd)
+      if (to) records = records.filter(record => timeToMs(record.started_at) <= to || timeToMs(record.ended_at) <= to)
+    }
+    records = records.slice().sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    const total = records.length
+    const limit = clampNumber(Number(input.limit) || 30, 1, 200, 30)
+    const offset = clampNumber(Number(input.offset) || 0, 0, 1000000, 0)
+    const page = records.slice(offset, offset + limit)
+    return {
+      ok: true,
+      total,
+      offset,
+      limit,
+      returned: page.length,
+      records: page.map(record =>
+        recordToDTO(record, {
+          includeMessages: input.includeMessages === true || input.include_messages === true,
+        }),
+      ),
+    }
+  }
+
+  function getRecord(input = {}) {
+    ensureRepository()
+    const id = String(input.id || input.recordId || input.record_id || '').trim()
+    if (!id) return { ok: false, code: 'MISSING_ID', error: '缺少记忆条目 id。' }
+    const record = repo.records.find(item => String(item.id) === id)
+    if (!record) return { ok: false, code: 'NOT_FOUND', error: '记忆条目不存在。' }
+    return { ok: true, record: recordToDTO(record, { includeMessages: true }) }
+  }
+
+  /** 管理页筛选下拉：当前记忆库里出现过哪些角色 / 范围 / 渠道。 */
+  function listRoles() {
+    ensureRepository()
+    const groups = new Map()
+    for (const record of repo.records) {
+      const roleId = String(record.role_id || '').trim()
+      if (!roleId) continue
+      const memoryScope = String(record.memory_scope || 'normal')
+      const channelId = String(record.source_channel_id || '')
+      const key = `${roleId}\u0000${memoryScope}\u0000${channelId}`
+      let item = groups.get(key)
+      if (!item) {
+        item = { roleId, roleName: '', memoryScope, channelId, group: '', count: 0, lastAt: '' }
+        groups.set(key, item)
+      }
+      item.count += 1
+      const at = String(record.updated_at || record.created_at || '')
+      if (at && at > item.lastAt) item.lastAt = at
+      const group = String(record.source_group || '')
+      if (group && !item.group) item.group = group
+    }
+    const roles = [...groups.values()]
+      .map(item => {
+        let roleName = ''
+        try {
+          const conv = sessions?.get?.(item.roleId)
+          roleName = String(conv?.name || conv?.meta?.name || '')
+        } catch (_) {
+          /* 角色可能已被删除，保留 roleId 即可 */
+        }
+        return { ...item, roleName }
+      })
+      .sort((a, b) => String(b.lastAt).localeCompare(String(a.lastAt)))
+    return { ok: true, roles }
+  }
+
   const service = {
     name: 'memories',
     ingest,
     search,
+    listRecords,
+    getRecord,
+    listRoles,
     stats: () => {
       ensureRepository()
       return repo.stats()
@@ -956,6 +1269,47 @@ export function apply(ctx, config = {}) {
       httpApi.sendJson(res, 200, result)
     } catch (err) {
       httpApi.sendError(res, err?.status || 502, err?.message || '记忆检索失败')
+    }
+  })
+
+  /** 记忆管理页：条目列表（默认不含 messages，详情接口才展开原文快照）。 */
+  httpApi.route('GET', '/api/memory/records', async (req, res, params, url) => {
+    try {
+      const query = url?.searchParams
+      const result = service.listRecords({
+        roleId: query?.get('roleId') || query?.get('role_id') || '',
+        memoryScope: query?.get('scope') || query?.get('memoryScope') || '',
+        channelId: query?.get('channelId') || query?.get('channel_id') || '',
+        q: query?.get('q') || query?.get('query') || '',
+        timeStart: query?.get('timeStart') || query?.get('time_start') || '',
+        timeEnd: query?.get('timeEnd') || query?.get('time_end') || '',
+        limit: query?.get('limit'),
+        offset: query?.get('offset'),
+        includeMessages: query?.get('includeMessages') === '1' || query?.get('include_messages') === '1',
+      })
+      httpApi.sendJson(res, 200, result)
+    } catch (err) {
+      httpApi.sendError(res, err?.status || 500, err?.message || '记忆条目读取失败')
+    }
+  })
+
+  /** 记忆条目详情：包含该条目对应的消息原文快照。 */
+  httpApi.route('GET', '/api/memory/records/:id', async (req, res, params) => {
+    try {
+      const result = service.getRecord({ id: params.id })
+      if (result.ok === false) return httpApi.sendError(res, 404, result.error)
+      httpApi.sendJson(res, 200, result)
+    } catch (err) {
+      httpApi.sendError(res, err?.status || 500, err?.message || '记忆条目读取失败')
+    }
+  })
+
+  /** 记忆管理页筛选：有哪些角色 / 范围 / 渠道产生过记忆。 */
+  httpApi.route('GET', '/api/memory/roles', async (req, res) => {
+    try {
+      httpApi.sendJson(res, 200, service.listRoles())
+    } catch (err) {
+      httpApi.sendError(res, err?.status || 500, err?.message || '记忆角色列表读取失败')
     }
   })
 

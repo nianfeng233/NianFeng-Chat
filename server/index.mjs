@@ -57,11 +57,16 @@ async function collectBridgeFiles(root, depth = 0, out = []) {
   return out
 }
 
-async function loadBridgeFile(ctx, file) {
+async function loadBridgeModule(file) {
   const mod = await import(pathToFileURL(file).href + `?v=${Date.now()}`)
-  if (typeof mod.apply !== 'function') return null
+  return typeof mod.apply === 'function' ? mod : null
+}
+
+async function loadBridgeFile(ctx, file) {
+  const mod = await loadBridgeModule(file)
+  if (!mod) return null
   // 不 await fiber 本身：cordis 的 fiber 是 thenable，await 会改变启动时序。
-  return { fiber: ctx.plugin(mod, {}) }
+  return { mod, fiber: ctx.plugin(mod, {}) }
 }
 
 async function loadChannelBridges(roots, ctx, loaded = new Set()) {
@@ -105,8 +110,31 @@ function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
     return full.slice(root.length).replace(/^[\\/]+/, '').split(/[\\/]/)[0] || ''
   }
 
+  /**
+   * 同一外部插件目录里如果残留旧版本 / 备份副本（例如
+   * plugins/github-hub/bridge.mjs 与 plugins/backup/github-hub/bridge.mjs），
+   * 递归扫描会把两份后端桥都加载起来；两个实例各自轮询同一仓库、各自生成
+   * 通知，最终同一个 GitHub 事件会被推送两次。
+   *
+   * 这里做两层去重：
+   *   1) 按 bridge.mjs 所在的叶子目录名先挡掉典型备份目录；
+   *   2) 导入模块后按插件的 name 再去重，覆盖目录被改名的情况。
+   * 两层都只保留浅层 / 排序靠前的那一份，绝不让同一插件 apply 两次。
+   */
+  const bridgeLeafFolderOf = file => {
+    const parts = String(file || '').split(/[\\/]/).filter(Boolean)
+    return parts.length >= 2 ? parts[parts.length - 2].toLowerCase() : ''
+  }
+  const loadedLeaves = new Set()
+  const loadedNames = new Set()
+
   const load = async dir => {
-    const files = (await collectBridgeFiles(dir)).sort()
+    // 浅层目录优先：正常安装的 <插件目录>/<插件 id>/bridge.mjs 应当赢过
+    // 备份目录 / 嵌套副本里的同名 bridge.mjs。
+    const depthOf = file => String(file || '').split(/[\\/]/).filter(Boolean).length
+    const files = (await collectBridgeFiles(dir)).sort(
+      (a, b) => depthOf(a) - depthOf(b) || String(a).length - String(b).length || String(a).localeCompare(String(b)),
+    )
     const disabled = disabledExternalIds()
     for (const file of files) {
       if (exclude.has(file) || handles.has(file)) continue
@@ -115,12 +143,24 @@ function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
         console.info(`[channel-bridge] 跳过已卸载/已禁用的外部桥：${file}`)
         continue
       }
+      const leaf = bridgeLeafFolderOf(file)
+      if (leaf && loadedLeaves.has(leaf)) {
+        console.warn(`[channel-bridge] 跳过重复的插件桥副本（插件目录名 ${leaf}）：${file}`)
+        continue
+      }
       try {
-        const loaded = await loadBridgeFile(ctx, file)
-        if (loaded?.fiber) {
-          handles.set(file, loaded.fiber)
-          console.info(`[channel-bridge] 已热加载外部桥：${file}`)
+        const mod = await loadBridgeModule(file)
+        if (!mod) continue
+        const pluginName = String(mod.name || mod.displayName || '').trim().toLowerCase()
+        if (pluginName && loadedNames.has(pluginName)) {
+          console.warn(`[channel-bridge] 跳过重复的插件桥副本（插件 name=${pluginName}）：${file}`)
+          continue
         }
+        const fiber = ctx.plugin(mod, {})
+        handles.set(file, fiber)
+        if (leaf) loadedLeaves.add(leaf)
+        if (pluginName) loadedNames.add(pluginName)
+        console.info(`[channel-bridge] 已热加载外部桥：${file}`)
       } catch (err) {
         console.warn(`[channel-bridge] 热加载 ${file} 失败：${err?.message || err}`)
       }
@@ -128,9 +168,11 @@ function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
     return { loaded: handles.size, dir }
   }
 
-  const reload = async dir => {
+  const reloadNow = async dir => {
     const previous = [...handles.entries()]
     handles.clear()
+    loadedLeaves.clear()
+    loadedNames.clear()
     for (const [file, fiber] of previous) {
       try {
         await fiber?.dispose?.()
@@ -140,6 +182,14 @@ function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
       }
     }
     return load(dir)
+  }
+
+  /* 安装 / 删除 / 重扫可能几乎同时触发多次 reload；串行化避免并发 load 出双实例。 */
+  let reloadChain = Promise.resolve()
+  const reload = dir => {
+    const task = reloadChain.catch(() => {}).then(() => reloadNow(dir))
+    reloadChain = task
+    return task
   }
 
   return { load, reload, handles }

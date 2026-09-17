@@ -262,6 +262,8 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
 async function postChatWithParamFallbacks(ctx, url, provider, buildBody, flags, signal) {
   let current = { ...flags }
   let lastError = null
+  const providerLabel = provider?.name || provider?.id || '提供商'
+  const brief = value => String(value || '').replace(/\s+/g, ' ').slice(0, 140)
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       return await request(ctx, url, {
@@ -283,30 +285,37 @@ async function postChatWithParamFallbacks(ctx, url, provider, buildBody, flags, 
       if (/reasoning_content/i.test(message)) {
         if (!current.forceNoThinking) {
           current = { ...current, forceNoThinking: true, stripReasoning: true }
-          ctx.logger?.warn?.('[models] DeepSeek 拒绝了 reasoning_content，已关闭思考并清理历史推理字段后重试')
+          ctx.logger?.warn?.(
+            `[models] ${providerLabel} 拒绝了 reasoning_content，已关闭思考并清理历史推理字段后重试：${brief(message)}`,
+          )
           continue
         }
         throw err
       }
       if (current.toolChoice && /tool_choice/i.test(message)) {
         current = { ...current, toolChoice: false }
+        ctx.logger?.warn?.(`[models] ${providerLabel} 不支持当前 tool_choice，已移除该参数后重试：${brief(message)}`)
         continue
       }
       if (current.maxTokensField === 'max_tokens' && /max_completion_tokens/i.test(message)) {
         current = { ...current, maxTokensField: 'max_completion_tokens' }
+        ctx.logger?.warn?.(`[models] ${providerLabel} 要求 max_completion_tokens，已自动换用该字段重试：${brief(message)}`)
         continue
       }
       if (current.maxTokensField && /max_tokens/i.test(message)) {
         current = { ...current, maxTokensField: null }
+        ctx.logger?.warn?.(`[models] ${providerLabel} 不接受 max_tokens，已移除输出上限参数后重试：${brief(message)}`)
         continue
       }
       if (current.temperature && /temperature/i.test(message)) {
         current = { ...current, temperature: false }
+        ctx.logger?.warn?.(`[models] ${providerLabel} 不接受 temperature，已移除该参数后重试：${brief(message)}`)
         continue
       }
       // 部分 OpenAI 兼容网关不接受 stream_options；usage 是可选增强，去掉后重试一次。
       if (current.streamOptions) {
         current = { ...current, streamOptions: false }
+        ctx.logger?.warn?.(`[models] ${providerLabel} 不接受 stream_options，已移除 usage 统计参数后重试：${brief(message)}`)
         continue
       }
       throw err
@@ -1195,12 +1204,14 @@ export function apply(ctx) {
       const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
       signal?.addEventListener?.('abort', () => controller.abort(new Error('已取消')), { once: true })
 
+      const toolCount = Array.isArray(options?.tools) ? options.tools.length : 0
+      ctx.logger.info(`[models] 模型请求开始 · ${providerId} / ${useModel} · 超时 ${timeoutMs}ms · 工具 ${toolCount}`)
       hub.broadcast('chat/start', {
         provider: providerId,
         model: useModel,
         at: startedAt,
         timeoutMs,
-        toolCount: Array.isArray(options?.tools) ? options.tools.length : 0,
+        toolCount,
       })
       try {
         for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
@@ -1246,11 +1257,15 @@ export function apply(ctx) {
               for (const buffered of attemptChunks.splice(0)) onChunk?.(buffered)
             }
             for (const delta of reasoningBuffer) onReasoning?.(delta)
+            const elapsedMs = Date.now() - startedAt
+            ctx.logger.info(
+              `[models] 模型响应完成 · ${providerId} / ${useModel} · ${elapsedMs}ms · 输出 ${attemptText.length} 字 · 工具 ${toolCalls.length}`,
+            )
             hub.broadcast('chat/done', {
               provider: providerId,
               model: useModel,
               length: attemptText.length,
-              ms: Date.now() - startedAt,
+              ms: elapsedMs,
               toolCalls: toolCalls.length,
               finishReason: attemptSummary?.reason || null,
               attempts: attempt,
@@ -1272,7 +1287,7 @@ export function apply(ctx) {
               : '模型返回了空回复（既没有正文也没有工具调用）'
           if (attempt < totalAttempts) {
             ctx.logger?.warn?.(
-              `[models] ${useModel} 第 ${attempt}/${totalAttempts} 次返回为空，${Math.round(400 * attempt)}ms 后自动重试：${reasonText}`,
+              `[models] ${providerId} / ${useModel} 第 ${attempt}/${totalAttempts} 次返回为空（${reasonText}），${Math.round(400 * attempt)}ms 后自动重试`,
             )
             await abortableDelay(400 * attempt, controller.signal)
             continue
@@ -1282,14 +1297,16 @@ export function apply(ctx) {
           throw emptyError
         }
       } catch (err) {
+        const detail = normalizeError(err)
+        ctx.logger.error(`[models] 模型请求失败 · ${providerId} / ${useModel} · ${Date.now() - startedAt}ms：${detail}`)
         hub.broadcast('chat/error', {
           provider: providerId,
           model: useModel,
-          detail: normalizeError(err),
+          detail,
           ms: Date.now() - startedAt,
           timedOut: /timeout|超时|aborted/i.test(String(err?.message || err)),
         })
-        throw createError(502, normalizeError(err))
+        throw createError(502, detail)
       } finally {
         clearTimeout(timer)
       }

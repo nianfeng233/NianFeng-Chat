@@ -26,6 +26,8 @@ export const optionalDepends = {}
 export const inject = ['channel-registry', 'session-service', 'message-service', 'event-bus', 'toast']
 export const provides = [{ name: 'channel-base', type: 'singleton' }]
 
+import { describeIncomingMessage } from '../../../src/util/message-log.mjs'
+
 export function apply(ctx) {
   const registry = ctx.inject('channel-registry')
   const sessions = ctx.inject('session-service')
@@ -250,7 +252,33 @@ export function apply(ctx) {
     messages.add(convId, { role, content: text })
     sessions.activate(convId)
     toast.info(`收到来自「${target.name}」的消息`)
-    ctx.logger.info(`[channel] ${target.name}: ${text.slice(0, 40)}`)
+    ctx.logger.info(
+      describeIncomingMessage(
+        { ...(message || {}), role, content: text },
+        { channelName: target.name, channelType: target.type, scope: target.meta?.category },
+      ),
+    )
+  })
+
+  /**
+   * 内建渠道（NapCat / QQ 官方机器人 / 微信 Clawbot）不经过 channel:message，
+   * 而是由 chat-store.append / message-service 直接落库；这里统一把带
+   * direction=inbound 的用户消息记进 runtime.log，格式包含渠道、群 / 私聊、
+   * 用户与正文。挂在 message:added 上也能覆盖 chat-store 不可用时的降级路径。
+   */
+  const offInboundAdded = events.on('message:added', ({ conversationId, message } = {}) => {
+    if (!message || message.role !== 'user') return
+    const meta = message.meta || {}
+    if (meta.direction !== 'inbound') return
+    const channelId = meta.napcatChannelId || meta.qqbotChannelId || meta.clawbotChannelId || meta.channelId
+    const target = findChannel(registry, channelId) || channelForConversation(conversationId)?.channel || null
+    ctx.logger.info(
+      describeIncomingMessage(message, {
+        channelName: target?.name || meta.via || message.source,
+        channelType: target?.type || meta.via || message.source,
+        scope: target?.meta?.category || meta.sessionType || meta.messageType,
+      }),
+    )
   })
 
   // 助手消息一写入渠道会话就尝试外发：流式消息在 done 时触发，工具消息在 added 时触发。
@@ -260,6 +288,7 @@ export function apply(ctx) {
   ctx.provide('channel-base', service, { type: 'singleton' })
   ctx.effect(() => {
     offIncoming()
+    offInboundAdded()
     offOutboundAdded()
     offOutboundDone()
   })

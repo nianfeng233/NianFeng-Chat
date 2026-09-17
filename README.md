@@ -13,7 +13,7 @@
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
 > 项目状态：仍处于快速迭代期，`v1.x` 版本号只表示功能里程碑，不代表生产级成熟度或安全审计结论。默认仅监听本机；如需开放监听或部署到公网，请先阅读「安全与隐私」并设置访问令牌。
 
-- 当前版本：v1.1.8
+- 当前版本：v1.1.9
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 - 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
 - 官方 QQ 群：1109357470
@@ -33,7 +33,8 @@
   与 Web 会话窗口首屏只拉最近 20 条，向上翻 / 点击「加载更早」时再按 `beforeSeq` 拉下一页。
   后端启动时会自动合并历史上因竞态产生的同渠道重复会话容器，避免出现「渠道显示 0 条但旧记录在另一个
   `conv.id` 下」或群聊 / 私聊内容串位的问题。
-- 长期记忆库（`memory.db` / `memory.json`）按角色独立：每 10 轮完整对话压缩成一段短概括并向量化，
+- 长期记忆库（`memory.db` / `memory.json`）按角色独立：普通渠道每 10 轮完整对话压缩成一段短概括并向量化，
+  群聊则在每次模型轮结束后按最近 N 条消息窗口概括（默认 20 条；与已概括 message_id 重复超过 N-5 条时跳过），
   `search_memory` 可做「向量 + BM25 关键词 + 时间」混合召回，默认返回最相关的 1 条概括及其
   10 轮原文；跨渠道原文会按权限标记为隐私内容，未授权时只返回概括。隐私渠道单独计算，不与其它渠道互读。
   向量模型在「设置 → 模型 → 记忆模型」里选择，维度可自动检测。
@@ -90,7 +91,7 @@
   权限声明和设置面板，升级 exe 不会删除外部插件目录。
 
 **可验证指标**：`npm run sync-plugins` 会重新扫描并校验上述依赖数据；
-`npm run test:deps` 有 208 项依赖结构 / 版本 / 服务映射断言；`npm run test:smoke` 有 292 项端到端断言。
+`npm run test:deps` 有 208 项依赖结构 / 版本 / 服务映射断言；`npm run test:smoke` 有 313 项端到端断言。
 所有数字都来自当前仓库代码，而不是宣传文案。
 
 ## 功能与架构
@@ -126,7 +127,8 @@
 实现要点：
 
 - 角色级工作记忆与渠道级最近消息分层保存；
-- 角色级长期记忆库每 10 轮生成一条短概括并向量化，支持跨渠道语义召回；隐私渠道独立计算；
+- 角色级长期记忆库按渠道生成短概括并向量化：普通渠道每 10 轮一条，群聊按最近 N 条消息窗口去重后生成；
+  支持跨渠道语义召回，隐私渠道独立计算；
 - 模型可以一次调用发送多条消息，每条消息独立展示；工具调用过程本身不进入消息气泡；
 - 长资料保存在资料库，聊天记录只保留 `doc_id`、标题与摘要，需要时再按预算读取原文；
 - 消息包含 `message_id / seq / channel_id / timestamp / sender / visibility / source` 等字段；
@@ -155,6 +157,7 @@ Windows 用户也可以直接双击 `start.cmd`。
   `http://<主机>:<端口>/?token=你的令牌`，校验通过后会写入 HttpOnly Cookie 并自动把地址栏清理为无令牌 URL；后续 API 请求只认 Cookie 或 `X-NianFeng-Token` / `Authorization` 请求头，不再接受查询串令牌。
 - **通知**：角色消息通知、声音、后台活动、系统通知权限、提示音与测试按钮。
 - **运行日志**：侧栏独立日志视图（全宽主面板，不在设置页内）；级别为错误 / 警告 / 信息 / 调试图标的自由勾选，另可按分类 / 关键词筛选，支持暂停、清空、复制与导出；选择会自动记住，成功 HTTP 访问日志不再展示，并会标红超时和失败外发。
+- **记忆与知识库**：侧栏独立视图（全宽），「记忆库」标签页列出长期记忆概括，展开可查看该条目对应的消息原文快照；「知识库」标签页在安装 knowledge-base 扩展后浏览条目全文、标签、目录与历史版本。页面只读，不修改数据。
 - **语言**：简体中文由 `lang-zh-cn` 语言包插件提供；复制该插件即可制作其他语言包。
 
 ## 插件
@@ -273,12 +276,12 @@ npm run build:desktop   # 只构建桌面版
 npm test              # 模块检查 + 依赖标注 + 后端 API + 安全回归 + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
 npm run test:security # Origin / Host / CORS / health 脱敏 / SSRF / 令牌 / SSE 关闭（39 项）
 npm run test:deps     # 插件依赖字段 / 版本范围 / 无环 / inject 服务映射（208 项）
-npm run test:smoke    # 前端端到端（真实后端与 SSE，292 项）
+npm run test:smoke    # 前端端到端（真实后端与 SSE，313 项）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 ```
 
-当前 `npm test` 全部通过；`scripts/smoke.mjs` 共 292 项通过，`scripts/test-dependencies.mjs` 共 208 项通过，
+当前 `npm test` 全部通过；`scripts/smoke.mjs` 共 313 项通过，`scripts/test-dependencies.mjs` 共 208 项通过，
 `scripts/test-security.mjs` 共 39 项通过。
 
 ## 版本管理与发布

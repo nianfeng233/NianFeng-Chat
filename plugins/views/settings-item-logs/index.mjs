@@ -30,6 +30,7 @@ export const optionalDepends = {
 export const inject = ['view-router', 'logs?', 'api?', 'event-bus', 'config?', 'toast?']
 
 import { useStyle } from '../../../src/util/style.mjs'
+import { describeIncomingMessage } from '../../../src/util/message-log.mjs'
 import { LOGS_CSS } from './style.mjs'
 
 const LEVEL_LABEL = { error: '错误', warn: '警告', info: '信息', debug: '调试' }
@@ -191,6 +192,24 @@ export function apply(ctx) {
       let backendTotal = 0
       let streamOnline = false
       let active = true
+      // 本端落库产生的 message:added 与后端 sessions/changed 回放的是同一条消息；
+      // 用消息 id 去重，避免 WebUI 既处理渠道消息又收到 SSE 回放时出现两条“收到消息”。
+      const inboundLoggedKeys = new Set()
+      const inboundKeyOf = (conversationId, message) => {
+        if (!message) return ''
+        const id = message.message_id || message.id || message.seq || ''
+        const fallback = `${Number(message.createdAt) || 0}:${String(message.content || '').slice(0, 80)}`
+        return `${String(conversationId || '')}:${id ? String(id) : fallback}`
+      }
+      const markInboundLogged = (conversationId, message) => {
+        const key = inboundKeyOf(conversationId, message)
+        if (!key || inboundLoggedKeys.has(key)) return false
+        inboundLoggedKeys.add(key)
+        if (inboundLoggedKeys.size > 800) {
+          for (const value of [...inboundLoggedKeys].slice(0, 200)) inboundLoggedKeys.delete(value)
+        }
+        return true
+      }
 
       /** 日志按时间排序；同一毫秒内保持进入列表的先后顺序。 */
       const compareEntries = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || a.id - b.id
@@ -595,15 +614,16 @@ export function apply(ctx) {
           if (!message || message.role !== 'user') return
           const meta = message.meta || {}
           if (meta.direction !== 'inbound') return
-          const senderName = String(
-            meta.wxSenderName || meta.senderNickname || meta.senderCard || meta.senderName || message.sender_name || '用户',
-          ).slice(0, 40)
-          const content = String(message.content || '').replace(/\s+/g, ' ').slice(0, 140)
+          if (!markInboundLogged(conversationId, message)) return
           add({
             level: 'info',
             cat: '外发',
             source: message.source || meta.via || 'channel',
-            text: `收到「${resolveChannelName(conversationId, meta)}」${senderName} 的消息：${content || '[非文本消息]'}`,
+            text: describeIncomingMessage(message, {
+              channelName: resolveChannelName(conversationId, meta),
+              channelType: meta.via || message.source,
+              scope: meta.sessionType || meta.messageType,
+            }),
           })
         }),
         events.on('chat:status', payload => {
@@ -647,6 +667,16 @@ export function apply(ctx) {
             cat: '模型',
             source: 'model-service',
             text: `模型调用错误 · ${Number(payload?.elapsedMs) || 0}ms：${message}`,
+            timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(String(message)),
+          })
+        }),
+        events.on('model:fallback', payload => {
+          const message = payload?.error?.message || payload?.error || '未知错误'
+          add({
+            level: 'warn',
+            cat: '模型',
+            source: 'model-service',
+            text: `模型降级 · ${payload?.from || '当前模型'} → ${payload?.to || '备用模型'}（第 ${Number(payload?.attempt) || 1} 次）：${message}`,
             timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(String(message)),
           })
         }),
@@ -722,7 +752,26 @@ export function apply(ctx) {
             })
           } else if (event === 'log/line') {
             addRuntimeLine(data)
-          } else if (event === 'sessions/changed' || event === 'settings/updated') {
+          } else if (event === 'sessions/changed') {
+            const message = data?.message
+            const meta = message?.meta || {}
+            if (data?.action === 'message' && message?.role === 'user' && meta.direction === 'inbound') {
+              if (markInboundLogged(String(data.id || ''), message)) {
+                add({
+                  level: 'info',
+                  cat: '外发',
+                  source: message.source || meta.via || 'channel',
+                  text: describeIncomingMessage(message, {
+                    channelName: resolveChannelName(String(data.id || ''), meta),
+                    channelType: meta.via || message.source,
+                    scope: meta.sessionType || meta.messageType,
+                  }),
+                })
+              }
+            } else {
+              add({ level: 'debug', cat: '后端', source: 'backend', text: '后端事件：sessions/changed' })
+            }
+          } else if (event === 'settings/updated') {
             add({ level: 'debug', cat: '后端', source: 'backend', text: `后端事件：${event}` })
           }
         }),
