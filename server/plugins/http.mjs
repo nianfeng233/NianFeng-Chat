@@ -698,7 +698,11 @@ export function apply(ctx, config = {}) {
   route('POST', '/api/sessions', async (req, res) => {
     await sessions.ready()
     const body = await readBody(req)
-    sendJson(res, 201, sessions.create(body))
+    const conv = sessions.create(body)
+    // 会话元数据（角色人格 / 使用模型 / 名称）也是实时状态的一部分：
+    // 服务端代聊 Worker 必须收到通知才会刷新自己的会话缓存，否则会一直沿用旧模型。
+    if (conv?.id) broadcastSessionChange(req, 'create', conv.id, { metaUpdatedAt: conv.metaUpdatedAt })
+    sendJson(res, 201, conv)
   })
 
   route('PUT', '/api/sessions/:id', async (req, res, params) => {
@@ -706,6 +710,7 @@ export function apply(ctx, config = {}) {
     const body = await readBody(req)
     const conv = sessions.update(params.id, body)
     if (!conv) return sendError(res, 404, '会话不存在')
+    broadcastSessionChange(req, 'update', conv.id, { metaUpdatedAt: conv.metaUpdatedAt })
     sendJson(res, 200, conv)
   })
 
@@ -713,6 +718,7 @@ export function apply(ctx, config = {}) {
     await sessions.ready()
     const ok = sessions.remove(params.id)
     if (!ok) return sendError(res, 404, '会话不存在')
+    broadcastSessionChange(req, 'remove', params.id)
     sendJson(res, 200, { ok: true })
   })
 

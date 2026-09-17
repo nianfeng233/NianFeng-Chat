@@ -18,7 +18,7 @@ a Windows desktop application.
 > security audit. It listens on localhost by default; before exposing it beyond localhost, read
 > “Security and Privacy” and configure an access token.
 
-- Current version: v1.1.8
+- Current version: v1.1.9
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -39,8 +39,10 @@ built as cordis plugins. The points below are implemented today in code, with pa
   `beforeSeq` when the user scrolls up / clicks "load earlier". On startup the backend also merges historical
   duplicate conversation containers that share one channel id, so a channel can no longer show 0 records while
   its real history lives under another `conv.id`.
-- Long-term memory (`memory.db` / `memory.json`) is isolated per role: every 10 complete rounds are
-  compressed into a short summary and embedded. `search_memory` performs hybrid retrieval (vector + BM25
+- Long-term memory (`memory.db` / `memory.json`) is isolated per role: normal channels compress every
+  10 complete rounds into a short summary and embed it, while group chats summarize a recent N-message
+  window after each model turn (default N=20; skipped when more than N-5 message ids were already
+  summarized). `search_memory` performs hybrid retrieval (vector + BM25
   + time) and returns the most relevant summary plus its 10 source rounds by default. Cross-channel
   originals are treated as private and returned only after authorization; privacy channels are computed
   independently. The embedding model is configured under Settings → Model → Memory Model, and dimensions
@@ -105,7 +107,7 @@ built as cordis plugins. The points below are implemented today in code, with pa
 
 **Verifiable numbers**: `npm run sync-plugins` rescans and validates the dependency data;
 `npm run test:deps` contains 208 dependency / version / service-mapping assertions, and
-`npm run test:smoke` contains 292 end-to-end assertions. All numbers come from the current repository code.
+`npm run test:smoke` contains 313 end-to-end assertions. All numbers come from the current repository code.
 
 ## Features and Architecture
 
@@ -197,6 +199,10 @@ On Windows you can also double-click `start.cmd`.
 - **Runtime logs**: independent full-width sidebar view (not inside Settings); free level checkboxes (error / warn / info / debug, remembered),
   category / keyword filters, pause, clear, copy and export, with timeouts and failed outbound
   deliveries highlighted in red. Successful HTTP access lines are hidden.
+- **Memory & Knowledge**: independent full-width sidebar view. The Memory tab lists long-term memory
+  summaries and expands to show the original message snapshots for each entry. The Knowledge tab
+  browses knowledge-base entries, full text, tags, directories, and revision summaries when the
+  `knowledge-base` extension is installed. The page is read-only.
 - **Language**: Simplified Chinese comes from the `lang-zh-cn` plugin; copy it to create another
   language pack.
 
@@ -286,12 +292,12 @@ assets rather than committed to Git.
 ```bash
 npm test              # module checks + dependency validation + backend API + end-to-end + chat / tools / vendor protocols
 npm run test:deps     # plugin dependency fields / version ranges / cycle detection / inject mapping (208 checks)
-npm run test:smoke    # frontend end-to-end against the real backend and SSE (292 checks)
+npm run test:smoke    # frontend end-to-end against the real backend and SSE (313 checks)
 npm run test:clawbot  # WeChat Clawbot backend bridge (local mock iLink protocol)
 npm run test:napcat   # NapCat backend bridge (local reverse WebSocket mock)
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 292 checks and `scripts/test-dependencies.mjs` passes 208 checks.
+`npm test` currently passes; `scripts/smoke.mjs` passes 313 checks and `scripts/test-dependencies.mjs` passes 208 checks.
 
 ## Versioning and Releases
 

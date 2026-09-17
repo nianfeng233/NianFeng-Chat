@@ -109,6 +109,9 @@ export function apply(ctx) {
     return Number.isNaN(parsed) ? 0 : parsed
   }
 
+  const maxSeqOf = list =>
+    (Array.isArray(list) ? list : []).reduce((max, message) => Math.max(max, Number(message?.seq) || 0), 0)
+
   /** 渠道 seq 是权威顺序；没有 seq 的旧数据再按时间兜底。 */
   const sortConversationMessages = messages => {
     if (!Array.isArray(messages) || messages.length <= 1) return Array.isArray(messages) ? [...messages] : []
@@ -342,6 +345,7 @@ export function apply(ctx) {
         updatedAt: Math.max(...items.map(item => Number(item?.updatedAt || 0) || 0), Date.now()),
         messages,
         messageCount,
+        lastSeq: Math.max(...items.map(item => Number(item?.lastSeq) || 0), maxSeqOf(messages)),
         localTruncated: !complete,
         messagesComplete: complete,
         pendingMessageIds: [...new Set(items.flatMap(item => item?.pendingMessageIds || []))],
@@ -370,6 +374,13 @@ export function apply(ctx) {
         ...metaSource,
         messages: mergedMessages.messages,
         messageCount: mergedMessages.messageCount,
+        // compact 远端带回来的 lastSeq 不能被“本地元数据更新”覆盖掉，否则 chat-store
+        // 在消息未加载时会按 0 重新发号，导致新消息和旧记录撞 seq / 撞 id。
+        lastSeq: Math.max(
+          Number(localConv?.lastSeq) || 0,
+          Number(remote?.lastSeq) || 0,
+          maxSeqOf(mergedMessages.messages),
+        ),
         updatedAt: Math.max(Number(localConv.updatedAt || 0) || 0, Number(remote.updatedAt || 0) || 0) || metaSource.updatedAt,
         // 保留“本地缓存原本是否只有一部分”的标记，供写回时决定 replace 还是逐条 upsert；
         // withoutMessages / 写盘都会剥掉这些内部字段，不会污染后端。
@@ -387,6 +398,7 @@ export function apply(ctx) {
         ...remote,
         messages: remoteMessages,
         messageCount: remoteCount,
+        lastSeq: Math.max(Number(remote?.lastSeq) || 0, maxSeqOf(remoteMessages)),
         localTruncated: !complete,
         messagesComplete: complete,
         pendingMessageIds: [],
@@ -523,6 +535,7 @@ export function apply(ctx) {
         ...conversation,
         messages,
         messageCount: total,
+        lastSeq: Math.max(Number(conversation.lastSeq) || 0, maxSeqOf(messages)),
         localTruncated: messages.length < total,
         messagesComplete: messages.length >= total,
         pendingMessageIds: Array.isArray(conversation.pendingMessageIds) ? conversation.pendingMessageIds : [],
@@ -569,7 +582,11 @@ export function apply(ctx) {
               })(),
             )
           } else {
-            if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
+            // 本地元数据（角色模型 / 人格）比后端新时必须写回，不能只按 updatedAt 判断，
+            // 否则“离线改完角色后恢复联网，服务端还在用旧模型”这一路径仍会残留。
+            if (!shouldUseRemoteMeta(conv, remote) || isNewerConversation(conv, remote)) {
+              queue.push(api.saveSession(withoutMessages(conv)))
+            }
             // 只补真正待写回的消息；滚动缓存（可能是服务端旧页 / 假消息）绝不能 upload 回后端。
             queue.push(pushLocalMessages(conv, { all: false }).catch(() => {}))
           }
@@ -674,6 +691,7 @@ export function apply(ctx) {
         else conv.messages = mergeMessageLists(incoming, pending)
         const total = Math.max(Number(page?.messageCount) || 0, conv.messages.length)
         conv.messageCount = total
+        conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, maxSeqOf(conv.messages))
         conv.localTruncated = conv.messages.length < total
         conv.messagesComplete = page?.hasMoreBefore !== true && conv.messages.length >= total
         persistLocal()
@@ -707,6 +725,7 @@ export function apply(ctx) {
       const messages = Array.isArray(page?.messages) ? page.messages : []
       conv.messages = messages
       conv.messageCount = messages.length
+      conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, maxSeqOf(messages))
       conv.localTruncated = false
       conv.messagesComplete = true
       persistLocal()
@@ -796,7 +815,7 @@ export function apply(ctx) {
       return conv
     },
 
-    remove(id) {
+    remove(id, { remote = true } = {}) {
       const index = data.conversations.findIndex(c => c.id === id)
       if (index < 0) return false
       const [conv] = data.conversations.splice(index, 1)
@@ -807,7 +826,9 @@ export function apply(ctx) {
       flushMessagePush(id)
       data.removedIds = [...new Set([...(data.removedIds || []), id])].slice(-500)
       persistLocal()
-      if (source === 'server' && api) api.deleteSession(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`删除后端会话失败：${err.message}`) })
+      if (remote && source === 'server' && api) {
+        api.deleteSession(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`删除后端会话失败：${err.message}`) })
+      }
       ctx.emit('conversation:delete', { id, conversation: conv })
       return true
     },
@@ -861,6 +882,7 @@ export function apply(ctx) {
       conv.messages.push(message)
       // 分页加载后本地只有最近一页，计数必须用 max/总数，不能让 push 后的数组长度把 messageCount 改小。
       conv.messageCount = Math.max(total, conv.messages.length)
+      conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, Number(message?.seq) || 0)
       conv.messagesComplete = conv.messages.length >= conv.messageCount
       conv.localTruncated = conv.messages.length < conv.messageCount
       const messageId = String(message?.id || message?.message_id || '')
@@ -922,6 +944,7 @@ export function apply(ctx) {
       if (!conv) return null
       conv.messages = Array.isArray(messages) ? messages : []
       conv.messageCount = conv.messages.length
+      conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, maxSeqOf(conv.messages))
       conv.messagesComplete = true
       conv.localTruncated = false
       conv.pendingMessageIds = []
@@ -961,11 +984,35 @@ export function apply(ctx) {
         pending.timer = null
         const current = find(conv.id)
         if (!current || source !== 'server' || !api) return
-        api.saveSession(withoutMessages(current)).catch(err => {
-          lastSyncError = err.message
-          ctx.emit('sessions:source', service.status())
-          if (!isTransientSyncError(err)) ctx.logger.warn(`会话写回失败：${err.message}`)
-        })
+        api
+          .saveSession(withoutMessages(current))
+          .then(saved => {
+            // 服务端可能因 metaUpdatedAt 更旧而拒绝本次元数据写回（旧副本覆盖新模型），
+            // 但响应里会带当前正确的会话。这里立刻把本地元数据拉回服务端版本，
+            // 避免服务端代聊 Worker 错过 sessions/changed 时一直停留在旧模型。
+            const latest = find(conv.id)
+            if (!latest || !saved?.meta) return
+            const remoteMetaAt = Number(saved.metaUpdatedAt) || 0
+            const localMetaAt = Number(latest.metaUpdatedAt) || 0
+            if (!remoteMetaAt || remoteMetaAt < localMetaAt) return
+            const metaChanged = JSON.stringify(latest.meta || {}) !== JSON.stringify(saved.meta)
+            const changed = metaChanged || Number(latest.metaUpdatedAt) !== Number(saved.metaUpdatedAt)
+            latest.meta = saved.meta
+            latest.metaUpdatedAt = Number(saved.metaUpdatedAt) || saved.metaUpdatedAt
+            if (!changed) return
+            persistLocal()
+            ctx.emit('conversation:update', latest)
+            if (metaChanged) {
+              ctx.logger.info(
+                `[session-service] 已同步服务端会话元数据：${latest.id} · 模型 ${latest.meta?.model || '跟随全局'}`,
+              )
+            }
+          })
+          .catch(err => {
+            lastSyncError = err.message
+            ctx.emit('sessions:source', service.status())
+            if (!isTransientSyncError(err)) ctx.logger.warn(`会话写回失败：${err.message}`)
+          })
       }, 500)
       pushTimers.set(conv.id, pending)
     },
@@ -1055,6 +1102,20 @@ export function apply(ctx) {
       if (!isTransientSyncError(err)) ctx.logger.warn(`同步服务端代聊消息失败：${err.message}`)
     }
   }
+
+  /** 合并短时间内的同一会话刷新请求，避免连续 update 事件重复 GET 并互相覆盖。 */
+  const refreshRequests = new Map()
+  const refreshConversationSoon = conversationId => {
+    const key = String(conversationId || '')
+    if (!key) return Promise.resolve()
+    const pending = refreshRequests.get(key)
+    if (pending) return pending
+    const task = refreshConversationFromBackend(key)
+      .catch(() => {})
+      .finally(() => refreshRequests.delete(key))
+    refreshRequests.set(key, task)
+    return task
+  }
   if (events) {
     ctx.effect(
       events.on('backend:event', payload => {
@@ -1064,11 +1125,22 @@ export function apply(ctx) {
         // 只处理“另一边”的写入：浏览器处理服务端代聊的消息，代聊 runtime 处理浏览器写回的消息。
         const fromAgent = data.agent === true
         if (globalThis.__NIANFENG_SERVER_AGENT__ === true ? fromAgent : !fromAgent) return
+        // 另一侧删除了会话：本地同步删除即可，绝不能再调 DELETE API，否则两端会互相回环广播。
+        if (action === 'remove') {
+          service.remove(String(data.id), { remote: false })
+          return
+        }
         // 有增量消息体时直接合并，避免每写一条消息就 GET 整个会话 / 全部会话。
         if ((action === 'message' || action === 'message-update') && data.message) {
           if (applyRemoteMessageChange(String(data.id), data.message)) return
         } else if (action === 'message-remove' && data.messageId) {
           if (applyRemoteMessageRemove(String(data.id), data.messageId)) return
+        }
+        // 角色模型 / 人格属于低频但必须尽快生效的元数据：收到会话 update / create
+        // 立即刷新，不再等 350ms 批量窗口，避免下一条渠道消息仍用旧模型。
+        if (action === 'create' || action === 'update') {
+          refreshConversationSoon(String(data.id))
+          return
         }
         agentRefreshChannel = String(data.id)
         if (agentRefreshTimer) return
@@ -1076,7 +1148,7 @@ export function apply(ctx) {
           agentRefreshTimer = null
           const id = agentRefreshChannel
           agentRefreshChannel = ''
-          refreshConversationFromBackend(id).catch(() => {})
+          refreshConversationSoon(id)
         }, 350)
       }),
     )
@@ -1135,7 +1207,9 @@ export function apply(ctx) {
               })(),
             )
           } else {
-            if (isNewerConversation(conv, remote)) queue.push(api.saveSession(withoutMessages(conv)))
+            if (!shouldUseRemoteMeta(conv, remote) || isNewerConversation(conv, remote)) {
+              queue.push(api.saveSession(withoutMessages(conv)))
+            }
             queue.push(pushLocalMessages(conv, { all: false }).catch(() => {}))
           }
         }

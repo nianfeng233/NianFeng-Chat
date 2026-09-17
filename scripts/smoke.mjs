@@ -1509,6 +1509,207 @@ async function main() {
   logsRouter.switch('chat')
   await sleep(30)
 
+  section('⑩a-2 记忆与知识库页')
+  const libraryRouter = ctx.inject('view-router')
+  check('记忆与知识库是独立视图', libraryRouter.has('library') && libraryRouter.get('library')?.fullWidth === true && libraryRouter.get('library')?.lazy === true)
+  settingsView.close()
+  libraryRouter.switch('library')
+  await sleep(120)
+  check('记忆与知识库页已注册并可打开', !!document.querySelector('.lib-page') && !!document.querySelector('[data-lib-tab="memory"]'))
+  check('侧栏出现记忆与知识库入口', !!document.querySelector('.rail-btn[data-view="library"]'))
+  check('记忆库标签默认激活并渲染工具栏', !!document.querySelector('[data-lib-memory-role]') && !!document.querySelector('[data-lib-memory-list]'))
+  const libraryWrapper = document.querySelector('.main-view[data-view="library"]')
+  const nowIso = new Date().toISOString()
+  const smokeMemory = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-memory',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke',
+    conversationId: 'conv-smoke',
+    sourceGroup: 'group',
+    everyRounds: 2,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: [
+      {
+        id: 'round:smoke-1',
+        channel_id: 'napcat:smoke',
+        conversation_id: 'conv-smoke',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-m1', seq: 1, role: 'user', content: '冒烟记忆：我早上习惯喝咖啡', sender_name: '测试用户', timestamp: nowIso },
+          { message_id: 'smoke-m2', seq: 2, role: 'assistant', content: '好的，我记住了。', sender_name: '念风', timestamp: nowIso },
+        ],
+      },
+      {
+        id: 'round:smoke-2',
+        channel_id: 'napcat:smoke',
+        conversation_id: 'conv-smoke',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-m3', seq: 3, role: 'user', content: '再记一条：周末想去图书馆', sender_name: '测试用户', timestamp: nowIso },
+          { message_id: 'smoke-m4', seq: 4, role: 'assistant', content: '记下了。', sender_name: '念风', timestamp: nowIso },
+        ],
+      },
+    ],
+  })
+  check('记忆库后端能为冒烟数据生成概括条目', smokeMemory?.ok !== false && Number(smokeMemory?.created) >= 1, JSON.stringify(smokeMemory).slice(0, 240))
+  const smokeMemoryId = String(smokeMemory?.summaries?.[0]?.id || '')
+  const findSmokeMemoryCardById = () =>
+    [...document.querySelectorAll('[data-lib-memory-card]')].find(
+      card => !smokeMemoryId || card.getAttribute('data-lib-memory-card') === smokeMemoryId,
+    ) || null
+  const findSmokeMemoryCard = () => findSmokeMemoryCardById() || document.querySelector('[data-lib-memory-card]')
+  const memoryRefresh = document.querySelector('[data-lib-memory-refresh]')
+  libraryWrapper?.dispatchEvent({ type: 'click', target: memoryRefresh })
+  await waitFor(() => document.querySelectorAll('[data-lib-memory-card]').length > 0, { timeout: 4000 })
+  check('记忆库页面能列出已有记忆条目', document.querySelectorAll('[data-lib-memory-card]').length > 0)
+  // 刷新的列表接口是异步的：等目标记忆卡片真正出现，避免点到更早自动生成的其它卡片。
+  await waitFor(() => findSmokeMemoryCardById(), { timeout: 4000 })
+  const memoryToggle =
+    findSmokeMemoryCard()?.querySelector('[data-lib-memory-toggle]') || document.querySelector('[data-lib-memory-toggle]')
+  libraryWrapper?.dispatchEvent({ type: 'click', target: memoryToggle })
+  await waitFor(() => findSmokeMemoryCard()?.querySelector('.lib-message-body'), { timeout: 4000 })
+  check(
+    '展开记忆条目能看到条目对应的消息原文',
+    String(findSmokeMemoryCard()?.querySelector('.lib-message-body')?.textContent || '').includes('咖啡'),
+    String(findSmokeMemoryCard()?.querySelector('.lib-message-body')?.textContent || '').slice(0, 120),
+  )
+  const smokeWindowMessages = ids =>
+    ids.map((id, index) => ({
+      message_id: id,
+      seq: index + 1,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `群聊窗口消息 ${id}`,
+      sender_name: index % 2 === 0 ? '群成员' : '念风',
+      timestamp: nowIso,
+    }))
+  const baseWindowIds = Array.from({ length: 20 }, (_, index) => `smoke-window-${index + 1}`)
+  const ingestSmokeWindow = (ids, roundId) =>
+    backend.ctx.memories.ingest({
+      roleId: 'role-smoke-window',
+      roleName: '群聊测试角色',
+      memoryScope: 'normal',
+      channelId: 'napcat:smoke-window',
+      conversationId: 'conv-smoke-window',
+      sourceGroup: 'group',
+      mode: 'window',
+      windowSize: 20,
+      minNewMessages: 5,
+      summaryProvider: 'smoke',
+      summaryModel: 'smoke-1',
+      rounds: [
+        {
+          id: roundId,
+          channel_id: 'napcat:smoke-window',
+          source_group: 'group',
+          messages: smokeWindowMessages(ids),
+        },
+      ],
+    })
+  const windowFirst = await ingestSmokeWindow(baseWindowIds, 'window:smoke-window:20')
+  check(
+    '群聊窗口记忆：20 条全新消息会生成概括',
+    windowFirst?.ok !== false && windowFirst?.created === 1 && windowFirst?.mode === 'window',
+    JSON.stringify(windowFirst).slice(0, 240),
+  )
+  const shortWindow = await ingestSmokeWindow(baseWindowIds.slice(0, 19), 'window:smoke-window:19')
+  check(
+    '群聊窗口记忆：不足 20 条先等待',
+    shortWindow?.skipped === true && shortWindow?.reason === 'window-not-full',
+    JSON.stringify(shortWindow).slice(0, 240),
+  )
+  const windowRepeated = await ingestSmokeWindow(baseWindowIds, 'window:smoke-window:20')
+  check(
+    '群聊窗口记忆：重复 20 条会跳过',
+    windowRepeated?.skipped === true && windowRepeated?.duplicate_count === 20,
+    JSON.stringify(windowRepeated).slice(0, 240),
+  )
+  const shiftedWindowIds = [
+    ...baseWindowIds.slice(5),
+    'smoke-window-new-1',
+    'smoke-window-new-2',
+    'smoke-window-new-3',
+    'smoke-window-new-4',
+    'smoke-window-new-5',
+  ]
+  const windowShifted = await ingestSmokeWindow(shiftedWindowIds, 'window:smoke-window:25')
+  check(
+    '群聊窗口记忆：15 条重复 + 5 条新消息会总结',
+    windowShifted?.created === 1 && windowShifted?.duplicate_count === 15,
+    JSON.stringify(windowShifted).slice(0, 240),
+  )
+  const mostlyRepeatedWindowIds = [
+    ...baseWindowIds.slice(4),
+    'smoke-window-extra-1',
+    'smoke-window-extra-2',
+    'smoke-window-extra-3',
+    'smoke-window-extra-4',
+  ]
+  const windowMostlyRepeated = await ingestSmokeWindow(mostlyRepeatedWindowIds, 'window:smoke-window:24')
+  check(
+    '群聊窗口记忆：重复超过 15 条会跳过',
+    windowMostlyRepeated?.skipped === true && windowMostlyRepeated?.duplicate_count === 16,
+    JSON.stringify(windowMostlyRepeated).slice(0, 240),
+  )
+  // 知识库扩展不在内置插件里，冒烟通过替换 api.get 的 /knowledge 返回，
+  // 验证知识库标签页的列表 / 全文渲染逻辑；真实 bridge 路由由后端测试和
+  // 扩展自身测试覆盖。
+  const apiService = ctx.registry.get('api')
+  const originalGet = apiService.get.bind(apiService)
+  const smokeKnowledgeEntry = {
+    id: 'kb-smoke',
+    path: '冒烟/知识',
+    title: '冒烟知识条目',
+    tags: ['冒烟', '测试'],
+    revision: 2,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    content_length: 24,
+    preview: '这是知识库冒烟预览。',
+    embedded: false,
+  }
+  apiService.get = async (path, options) => {
+    if (path.startsWith('/knowledge/entries?')) {
+      return { ok: true, total: 1, offset: 0, limit: 20, returned: 1, entries: [smokeKnowledgeEntry] }
+    }
+    if (path === '/knowledge/entries/kb-smoke') {
+      return {
+        ok: true,
+        entry: {
+          ...smokeKnowledgeEntry,
+          content: '这是知识库冒烟全文，包含端到端关键词。',
+          history: [{ revision: 1, title: '冒烟知识条目', path: '冒烟/知识', content_length: 12, updated_at: new Date().toISOString(), reason: '首次写入' }],
+        },
+      }
+    }
+    return originalGet(path, options)
+  }
+  const knowledgeTab = document.querySelector('[data-lib-tab="knowledge"]')
+  libraryWrapper?.dispatchEvent({ type: 'click', target: knowledgeTab })
+  await waitFor(() => document.querySelectorAll('[data-lib-knowledge-card]').length > 0, { timeout: 4000 })
+  check('知识库标签页能渲染条目列表', document.querySelectorAll('[data-lib-knowledge-card]').length === 1)
+  const knowledgeToggle = document.querySelector('[data-lib-knowledge-toggle]')
+  libraryWrapper?.dispatchEvent({ type: 'click', target: knowledgeToggle })
+  await waitFor(() => document.querySelector('[data-lib-knowledge-card] .lib-content'), { timeout: 4000 })
+  check(
+    '展开知识条目能看到全文、标签与历史版本',
+    String(document.querySelector('[data-lib-knowledge-card] .lib-content')?.textContent || '').includes('端到端关键词') &&
+      String(document.querySelector('[data-lib-knowledge-card] .lib-card-detail')?.textContent || '').includes('冒烟') &&
+      String(document.querySelector('[data-lib-knowledge-card] .lib-history')?.textContent || '').includes('首次写入'),
+    String(document.querySelector('[data-lib-knowledge-card] .lib-card-detail')?.textContent || '').slice(0, 180),
+  )
+  apiService.get = originalGet
+  const memoryTab = document.querySelector('[data-lib-tab="memory"]')
+  libraryWrapper?.dispatchEvent({ type: 'click', target: memoryTab })
+  await sleep(120)
+  check(
+    '记忆库页面没有错误提示',
+    !!document.querySelector('[data-lib-memory-list]') && !document.querySelector('[data-lib-memory-list] .lib-error'),
+    String(document.querySelector('[data-lib-memory-list]')?.innerHTML || '').slice(0, 160),
+  )
+  libraryRouter.switch('chat')
+  await sleep(30)
+
   section('⑩b 捏人窗口与插件权限')
   const characterSessions = ctx.inject('session-service')
   const charCountBefore = characterSessions.count()
@@ -1579,10 +1780,18 @@ async function main() {
     }
   }
   messages.requestSend(characterConv.id, '测试停止生成')
-  const stopButton = document.getElementById('stopBtn')
-  const stopShown = !!stopButton && stopButton.classList.contains('show')
+  // requestSend 里的会话写入 / 事件派发现在是异步的：等 chat:request-start
+  // 真正到达 composer 后再点停止，避免测试抢先于产品事件。
+  const stopButton = await waitFor(
+    () => {
+      const button = document.getElementById('stopBtn')
+      return button?.classList.contains('show') ? button : null
+    },
+    { timeout: 3000 },
+  )
+  const stopShown = !!stopButton
   stopButton?.click()
-  await sleep(60)
+  await sleep(80)
   modelService.stream = originalStream
   const cancelledMessage = [...sessions.messages(characterConv.id)].reverse().find(item => item.role === 'assistant')
   check('生成过程中出现停止按钮', stopShown)

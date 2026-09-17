@@ -362,6 +362,28 @@ async function main() {
   const updated = await (await api(base, `/api/sessions/${created.id}`, { method: 'PUT', body: { name: '改名后的会话' } })).json()
   check('更新会话', updated.name === '改名后的会话')
 
+  // 角色模型切换后，服务端代聊 Worker / 旧页面可能拿着切换前的整包会话写回；
+  // metaUpdatedAt 更旧的副本不能把新模型覆盖掉，否则表现就是“改完模型必须重启才生效”。
+  const modelMetaAt = Date.now()
+  const modelSet = await (
+    await api(base, `/api/sessions/${created.id}`, {
+      method: 'PUT',
+      body: { meta: { model: 'provider/new-model' }, metaUpdatedAt: modelMetaAt },
+    })
+  ).json()
+  check('角色模型切换写入会话 meta', modelSet.meta?.model === 'provider/new-model', JSON.stringify(modelSet.meta))
+  const modelStale = await (
+    await api(base, `/api/sessions/${created.id}`, {
+      method: 'PUT',
+      body: { meta: { model: 'provider/old-model' }, metaUpdatedAt: modelMetaAt - 1000 },
+    })
+  ).json()
+  check(
+    '旧副本整包写回不会回退已切换的角色模型',
+    modelStale.meta?.model === 'provider/new-model' && Number(modelStale.metaUpdatedAt) === modelMetaAt,
+    JSON.stringify({ meta: modelStale.meta, metaUpdatedAt: modelStale.metaUpdatedAt }),
+  )
+
   console.log('\n⑥ 翻译 / 聊天在未配置模型时给出明确错误')
   const translate = await api(base, '/api/translate', { method: 'POST', body: { text: '你好' } })
   check('翻译接口返回 4xx/5xx 而非假数据', translate.status >= 400, `HTTP ${translate.status}`)
@@ -409,6 +431,35 @@ async function main() {
     sseText.includes('event: settings/updated') && sseText.includes('"reasoningEffort":"high"') && putOverSseBody.preferences?.chat?.reasoningEffort === 'high',
     sseText.slice(-240),
   )
+
+  // 真实链路：PUT /api/sessions/:id -> hub.broadcast('sessions/changed') -> SSE。
+  // 服务端常驻代聊 Worker 靠这条事件刷新自己的会话缓存，否则会一直沿用旧的角色模型。
+  const sseConversation = await (await api(base, '/api/sessions', { method: 'POST', body: { name: 'SSE 广播会话' } })).json()
+  const sseSessionMetaAt = Date.now() + 1000
+  const putSessionOverSse = api(base, `/api/sessions/${sseConversation.id}`, {
+    method: 'PUT',
+    body: { name: 'SSE 广播会话·已更新', meta: { model: 'openai/test-model' }, metaUpdatedAt: sseSessionMetaAt },
+  }).then(res => res.json())
+  let sseSessionText = ''
+  for (let i = 0; i < 8; i++) {
+    if (/event: sessions\/changed[\s\S]*?"action":"update"/.test(sseSessionText)) break
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise(resolve => setTimeout(() => resolve({ done: true, value: null }), 2000)),
+    ])
+    if (!chunk || chunk.done) break
+    sseSessionText += new TextDecoder().decode(chunk.value)
+  }
+  const putSessionBody = await putSessionOverSse
+  check(
+    'PUT /api/sessions/:id 会实时广播 sessions/changed（角色模型切换即时同步给代聊）',
+    /event: sessions\/changed[\s\S]*?"action":"update"/.test(sseSessionText) &&
+      sseSessionText.includes(sseConversation.id) &&
+      putSessionBody.meta?.model === 'openai/test-model',
+    sseSessionText.slice(-360),
+  )
+  // 删掉测试会话，不影响后续“数据目录切换”对会话数量的断言。
+  await api(base, `/api/sessions/${sseConversation.id}`, { method: 'DELETE' })
   controller.abort()
 
   console.log('\n⑨ 数据落盘')
@@ -531,6 +582,18 @@ async function main() {
     typeof restoredRuntime.instance === 'string' && restoredRuntime.instance !== runtime.instance,
     JSON.stringify({ before: runtime.instance, after: restoredRuntime.instance }),
   )
+
+  console.log('\n⑨b 记忆条目管理接口（记忆库页面读取）')
+  const memoryRecords = await (await api(backend.url, '/api/memory/records?limit=10')).json()
+  check(
+    '记忆条目列表接口可用且分页参数生效',
+    memoryRecords.ok === true && Array.isArray(memoryRecords.records) && memoryRecords.limit === 10 && memoryRecords.offset === 0,
+    JSON.stringify(memoryRecords).slice(0, 240),
+  )
+  const memoryRoles = await (await api(backend.url, '/api/memory/roles')).json()
+  check('记忆角色筛选接口可用', memoryRoles.ok === true && Array.isArray(memoryRoles.roles), JSON.stringify(memoryRoles).slice(0, 240))
+  const missingMemoryRes = await api(backend.url, '/api/memory/records/not-exist')
+  check('不存在的记忆条目返回 404', missingMemoryRes.status === 404, `HTTP ${missingMemoryRes.status}`)
 
   console.log('\n⑩ 关闭')
   await backend.close()

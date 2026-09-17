@@ -150,7 +150,7 @@ export function apply(ctx, config = {}) {
     if (!db) return []
     try {
       return db
-        .prepare('SELECT seq, data FROM messages WHERE conversation_id = ? ORDER BY seq ASC, created_at ASC')
+        .prepare('SELECT seq, data FROM messages WHERE conversation_id = ? ORDER BY seq ASC, created_at ASC, id ASC')
         .all(String(conversationId))
         .map(row => {
           try {
@@ -197,7 +197,9 @@ export function apply(ctx, config = {}) {
     const hasBefore = beforeSeq !== null && beforeSeq !== undefined && beforeSeq !== ''
     const hasAfter = afterSeq !== null && afterSeq !== undefined && afterSeq !== ''
     if (hasBefore) {
-      where = ' AND seq < ?'
+      // 用 <= 而不是 <：历史脏数据可能在同一 seq 上有多条消息，严格 < 会把
+      // 正好落在分页边界上的重复消息永久跳过；客户端按 message_id 合并，重复返回无害。
+      where = ' AND seq <= ?'
       params.push(Number(beforeSeq) || 0)
     } else if (hasAfter) {
       where = ' AND seq > ?'
@@ -207,8 +209,9 @@ export function apply(ctx, config = {}) {
     }
     let rows = []
     try {
+      const tieBreak = reverse ? 'created_at DESC, id DESC' : 'created_at ASC, id ASC'
       rows = db
-        .prepare(`SELECT seq, data FROM messages WHERE conversation_id = ?${where} ORDER BY seq ${order} LIMIT ?`)
+        .prepare(`SELECT seq, data FROM messages WHERE conversation_id = ?${where} ORDER BY seq ${order}, ${tieBreak} LIMIT ?`)
         .all(...params, size + 1)
     } catch (err) {
       ctx.logger.warn(`聊天记录分页读取失败：${err.message}`)
@@ -681,10 +684,21 @@ export function apply(ctx, config = {}) {
         else scheduleSave()
       }
       const metaPatch = { ...patch }
+      delete metaPatch.messages
+      // 元数据乐观并发：旧页面 / 服务端代聊 Worker 可能拿着切换模型之前的整包会话
+      // 写回来，如果直接 Object.assign 会把用户刚切换的角色模型 / 人格覆盖回旧值。
+      // 这里比较 metaUpdatedAt，旧副本的元数据整包丢弃，只保留消息写入与 updatedAt。
+      const incomingMetaAt = Number(metaPatch.metaUpdatedAt) || 0
+      const currentMetaAt = Number(conv.metaUpdatedAt) || 0
+      if (incomingMetaAt > 0 && currentMetaAt > 0 && incomingMetaAt < currentMetaAt) {
+        for (const key of Object.keys(metaPatch)) delete metaPatch[key]
+        ctx.logger.debug(
+          `[sessions] 已忽略旧元数据写回：${id}（收到 ${incomingMetaAt} < 当前 ${currentMetaAt}）`,
+        )
+      }
       const hasMetaChange = Object.keys(metaPatch).some(key => !['messages', 'updatedAt', 'metaUpdatedAt', 'messageCount'].includes(key))
       if (metaPatch.metaUpdatedAt === undefined && hasMetaChange) metaPatch.metaUpdatedAt = Date.now()
       else if (metaPatch.metaUpdatedAt !== undefined) metaPatch.metaUpdatedAt = Number(metaPatch.metaUpdatedAt) || Date.now()
-      delete metaPatch.messages
       Object.assign(conv, metaPatch, { id: conv.id, updatedAt: Date.now() })
       afterConversationChange(conv)
       ctx.emit('sessions/changed', { id, action: 'update' })

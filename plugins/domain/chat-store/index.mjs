@@ -136,6 +136,15 @@ export function apply(ctx) {
 
   const isDivider = message => message?.kind === 'divider' || message?.role === 'system'
 
+  /**
+   * 后端 compact 同步后 conv.messages 可能为空，但 compact 元数据仍带 lastSeq。
+   * 渠道 seq 必须以它作为下限：服务端代聊重启 / 分页懒加载时如果只从空数组推导，
+   * 第一条入站消息会从 seq=1、message_id=m_<conv>_1 开始，既会撞旧消息的序号，
+   * 也可能在 upsert 时覆盖同 id 的旧消息，导致网页记录缺失、模型上下文错位。
+   */
+  const seqFloorOf = conv =>
+    Math.max(0, Number(conv?.lastSeq) || 0, Number(conv?.meta?.lastSeq) || 0)
+
   /** 把一条旧消息补齐为结构化消息（只改内存，不触发写盘；下一次 append 会连带持久化） */
   const normalizeMessage = (conv, message, seq) => {
     if (!message || isDivider(message)) return message
@@ -183,13 +192,14 @@ export function apply(ctx) {
       changed = true
     }
     const list = conv.messages || []
-    let seq = data.channels[channelId]?.seq || 0
+    let seq = Math.max(data.channels[channelId]?.seq || 0, seqFloorOf(conv))
     for (const message of list) {
       if (isDivider(message) || (message.streaming && !message.message_id)) continue
       const before = message.seq
       normalizeMessage(conv, message, before && Number.isFinite(before) ? before : seq + 1)
       if (message.seq > seq) seq = message.seq
     }
+    seq = Math.max(seq, seqFloorOf(conv))
     // 修复历史脏时间戳：未来时间 / 与 seq 倒序的派生时间会让上下文排错
     const nowMs = Date.now()
     let previousAt = 0
@@ -238,7 +248,16 @@ export function apply(ctx) {
     const existing = data.channels[channelId]
     if (existing) {
       const bound = sessions.get(existing.conversationId)
-      if (bound) return existing
+      if (bound) {
+        // compact 同步 / 分页懒加载后 messages 可能为空，必须用会话元数据 lastSeq
+        // 兜住已被分页机制抬高过的渠道序号，避免下一条消息从低位重号。
+        const floor = seqFloorOf(bound)
+        if (floor > (Number(existing.seq) || 0)) {
+          existing.seq = floor
+          persist()
+        }
+        return existing
+      }
       // 后端数据修复 / 渠道会话去重后旧 conversationId 可能不存在：按稳定 channelId 重新绑定。
       const repaired = sessions
         .list()
@@ -355,7 +374,7 @@ export function apply(ctx) {
       const conv = sessions.get(conversationId)
       if (!conv) return null
       const record = ensureConversation(conv, { persistMeta: true })
-      const seq = (data.channels[record.channelId]?.seq || 0) + 1
+      const seq = Math.max(Number(data.channels[record.channelId]?.seq) || 0, seqFloorOf(conv)) + 1
       const now = new Date()
       const id = input.id || `m_${conv.id}_${seq}`
       const role = input.role === 'assistant' ? 'assistant' : input.role === 'system' ? 'system' : 'user'
@@ -411,7 +430,7 @@ export function apply(ctx) {
       const message = sessions.message(conversationId, messageId)
       if (!message) return null
       if (!message.message_id || !message.channel_id || !message.timestamp || !message.seq) {
-        const seq = (data.channels[record.channelId]?.seq || 0) + 1
+        const seq = Math.max(Number(data.channels[record.channelId]?.seq) || 0, seqFloorOf(conv)) + 1
         // 实时消息必须用“现在”，不能用 conv.createdAt + seq 的迁移启发式时间，否则会得到未来时间戳
         if (!message.timestamp) message.timestamp = toLocalIso(new Date())
         normalizeMessage(conv, message, seq)

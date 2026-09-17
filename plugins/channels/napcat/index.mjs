@@ -17,6 +17,7 @@
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { resolveUserNickname } from '../../../src/util/identity.mjs'
+import { describeIncomingMessage } from '../../../src/util/message-log.mjs'
 import { NAPCAT_CSS } from './style.mjs'
 import { createOutboundPlanner } from './outbound.mjs'
 
@@ -887,6 +888,36 @@ export function apply(ctx) {
     const decision = triggerDecision(channel, message)
     const permissions = permissionsOf(channel)
     const sender = senderIdentityFor(channel, message)
+    // 被规则忽略 / 仅用于敏感确认的入站消息不会进入 chat-store，也就不会走
+    // channel-base 的 message:added 统一日志。这里补一条 [收到消息]，
+    // 让日志页也能看到“消息收到了，但为什么没有触发回复”。
+    const logReceived = suffix => {
+      if (typeof ctx.logger?.info !== 'function') return
+      const text = String(message.text || '').trim() || (Array.isArray(message.images) && message.images.length ? '[图片]' : '')
+      ctx.logger.info(
+        `${describeIncomingMessage(
+          {
+            role: 'user',
+            content: text,
+            sender_name: sender.userName,
+            sender_id: sender.userId,
+            meta: {
+              direction: 'inbound',
+              via: TYPE_ID,
+              messageType: message.messageType,
+              groupId: message.groupId,
+              senderId: message.senderId,
+              senderNickname: message.senderNickname,
+              senderCard: message.senderCard,
+              images: Array.isArray(message.images) ? message.images : [],
+              forward: message.forward || null,
+              quote: message.quote || null,
+            },
+          },
+          { channelName: channel.name, channelType: TYPE_ID },
+        )}${suffix ? `（${suffix}）` : ''}`,
+      )
+    }
     // 启动前积压的消息：只写上下文，不触发模型回复（避免重启后批量刷屏）。
     const backlog = backlogOf(message)
     if (backlog && decision.trigger) {
@@ -895,6 +926,7 @@ export function apply(ctx) {
     }
 
     if (decision.ignore) {
+      logReceived(`已忽略：${decision.reason || '规则未触发'}`)
       await ackInbox(channel.id, [message.id])
       events.emit('napcat:ignored', { channel, message, reason: decision.reason })
       return
@@ -902,6 +934,7 @@ export function apply(ctx) {
 
     // 群聊黑名单由后端路由进来后在这里静默忽略；其它情况默认保留全部群消息形成最近 N 条上下文（N 可配置）。
     const shouldWrite = decision.trigger || decision.rules.silentContext !== false
+    if (!shouldWrite) logReceived(`未写入上下文：${decision.reason || '规则未触发'}`)
     const text = String(message.text || '').trim() || (Array.isArray(message.images) && message.images.length ? '[图片]' : '')
     const senderIds = Array.isArray(channel.meta?.trustedUserIds) ? channel.meta.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean) : []
     const trustedForSender = senderIds.map(id => (id.startsWith('qq:') ? id : `qq:${id}`))
@@ -914,6 +947,7 @@ export function apply(ctx) {
           : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean), owner: true }
     const pendingConfirm = chatPermissions?.resolvePending?.(conv.id, text, confirmContext)
     if (pendingConfirm?.handled) {
+      logReceived('已作为敏感操作确认消费')
       await ackInbox(channel.id, [message.id])
       return
     }
