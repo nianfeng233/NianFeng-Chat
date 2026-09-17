@@ -135,10 +135,10 @@ node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --
 
 ## 8. 热修复（Hotfix）
 
-1. 从最新发布 tag 创建 `hotfix/<version>` 分支；
+1. 从 `preview` 或对应的 `release/vX.Y` 拉出 `hotfix/<name>`；
 2. 只修问题，补测试；
-3. 走第 6 节流程，版本号递增 PATCH；
-4. 发布后把修复合回 `main`（避免丢失）；
+3. 打 `vX.Y.Z-preview.N` 并在 GitHub 发 pre-release；
+4. 验证通过后合入 `main`，打 `vX.Y.Z` 正式 tag，发正式 Release；
 5. 在 GitHub Release 说明中写明修复内容与影响范围。
 
 ## 9. 回滚
