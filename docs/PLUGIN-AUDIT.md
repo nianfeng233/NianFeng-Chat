@@ -68,30 +68,31 @@
 
 | 项目 | 版本 | 依赖 / 用途 | 备注 |
 |---|---|---|---|
-| `github-hub` | 1.1.4 | GitHub 仓库订阅、卡片预览、Issue 分析 | 前端 + bridge |
-| `group-chat-tools` | 1.0.2 | NapCat 群成员 / @ / 管理 / 公告工具 | 依赖内置 napcat |
-| `knowledge-base` | 1.1.x | 知识库条目存储与检索 | 前端 + bridge |
-| `media-post` | 1.0.0 | B站 / 抖音媒体点播 | 依赖 web-access |
-| `napcat-group-guard` | 1.1.9 | 入群审核、黑名单、不活跃清理、档案图 | 前端 + bridge |
-| `social-bridge` | 1.1.x | 邮箱等社交桥 | 前端 + bridge |
-| `web-access` | 1.1.x | 联网搜索 / 网页读取 / 站点解析 | media-post 的前置 |
+| `github-hub` | 2.0.0 | GitHub 仓库订阅、卡片预览、Issue 分析 | 前端 + bridge |
+| `group-chat-tools` | 2.0.0 | NapCat 群成员 / @ / 管理 / 公告工具 | 依赖内置 napcat |
+| `knowledge-base` | 2.0.0 | 知识库条目存储与检索 | 前端 + bridge |
+| `media-post` | 2.0.0 | B站 / 抖音媒体点播 | 依赖 web-access |
+| `napcat-group-guard` | 2.0.0 | 入群审核、黑名单、不活跃清理、档案图 | 前端 + bridge |
+| `social-bridge` | 2.0.0 | 邮箱等社交桥 | 前端 + bridge |
+| `web-access` | 2.0.0 | 联网搜索 / 网页读取 / 站点解析 | media-post 的前置 |
+
+所有独立扩展已声明 `scope = 'both'`，并适配新的 WebUI / 后端终端运行范围：
+界面依赖改为可选、工具注册与设置面板条件挂载，服务端 bridge 继续由后端加载。
 
 ### 3. 已安装副本（`user_data/plugins/`，运行数据目录）
 
-本机已安装：`github-hub`、`group-chat-tools`、`media-post`、`social-bridge`、`web-access`。
-需要注意：
+本机已安装副本已同步升级到 2.0.0：`github-hub`、`group-chat-tools`、
+`knowledge-base`、`media-post`、`social-bridge`、`web-access`。
 
-- 已安装副本不一定等于 `extensions/` 的最新版本。例如 `group-chat-tools` 在
-  `extensions/` 是 **1.0.2**，已安装副本是 **1.0.0**；`github-hub` 也经历过
-  多个小版本。建议在「设置 → 插件 → 添加插件」里重新上传对应版本的 zip，或
-  用目录对比后手工覆盖。
 - `user_data/` 属于本机数据目录，不随 git 发布；不要把它的内容当项目源码提交。
+- `extensions/` 在仓库里保持为独立源目录，运行中的副本以数据目录为准。
 
-### 4. 工作区中的测试 / 历史副本（`.tmp/`）
+### 4. 工作区清理
 
-`.tmp/` 下有大量历史打包、`github-hub` 多版本、MemMachine 与知识库测试副本。
-它们只是测试产物，不参与运行；建议在版本发布前清空，避免审计时误判“重复项目”。
-本轮未删除任何 `.tmp` 内容，以免影响既有测试快照。
+本轮已清理：
+- `.tmp/` 中的历史打包、MemMachine、多版本 github-hub 与测试快照；
+- `release/` 中旧预览版与旧版本产物，仅保留上一个稳定版 v1.1.9 与当前 v2.0.0；
+- `scripts/desktop-wrapper/target` 等本机构建缓存。
 
 ## 四、功能重叠 / 可优化项
 
