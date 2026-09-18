@@ -425,7 +425,7 @@ export function apply(ctx) {
             return `<article class="lib-card${open ? ' open' : ''}" data-lib-memory-card="${escapeHtml(id)}">
               <div class="lib-card-head">
                 <div class="lib-card-main">
-                  <div class="lib-card-title">${escapeHtml(shortText(record.summary) || '（空概括）')}</div>
+                  <div class="lib-card-title">${escapeHtml(record.summary || '（空概括）')}</div>
                   <div class="lib-card-meta">
                     角色 ${escapeHtml(record.role_id || '—')} · ${escapeHtml(scopeLabel(record.memory_scope))}
                     · 来源 ${escapeHtml([record.source?.group, record.source?.channel_id].filter(Boolean).join(' / ') || '—')}

@@ -824,7 +824,9 @@ export function apply(ctx) {
     text = normalizeEventText(d.content, botName)
     const attachmentImages = extractAttachments(d.attachments)
     const media = attachmentImages.length > 0 || (Array.isArray(d.attachments) && d.attachments.length > 0)
-    if (!text && images.length) text = '[图片]'
+    // QQ 官方图片消息的 content 可能是空串，真实图片在 d.attachments 里；
+    // 这里必须使用已抽取的 attachmentImages，不能引用未定义的 images（否则图片事件直接异常）。
+    if (!text && attachmentImages.length) text = '[图片]'
     else if (!text && media) text = '[QQ 媒体消息]'
     if (!peerId || (!text && !media)) return null
     const qqMessageId = String(d.id || '')
@@ -853,14 +855,19 @@ export function apply(ctx) {
     for (const item of list) {
       if (images.length >= MAX_IMAGES_PER_MESSAGE) break
       const contentType = String(item?.content_type || item?.contentType || '').toLowerCase()
+      const filename = String(item?.filename || item?.file_name || '').trim()
       const rawUrl = String(item?.url || item?.proxy_url || '').trim()
       if (!rawUrl) continue
       const looksImage =
-        contentType.startsWith('image') || (!contentType && /\.(png|jpe?g|gif|webp)(\?|#|$)/i.test(rawUrl))
+        contentType.startsWith('image') ||
+        (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif)(\?|#|$)/i.test(rawUrl)) ||
+        (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename))
       if (!looksImage) continue
       images.push({
         url: /^https?:/i.test(rawUrl) ? rawUrl : `https://${rawUrl}`,
-        mime: contentType.startsWith('image') ? contentType.split(';')[0] : 'image/*',
+        // 具体 MIME 直接使用；只有通配 / 缺失时留空，交给 image-service 按文件头识别，
+        // 避免存成 `image/*` 后拼出模型不接受的 data URL。
+        mime: contentType.startsWith('image/') && contentType !== 'image/*' ? contentType.split(';')[0] : '',
         width: Number(item?.width) || 0,
         height: Number(item?.height) || 0,
       })

@@ -6,6 +6,7 @@
  * 登录二维码 → 扫码确认 → getupdates 入站队列 → typing 开始/结束 → sendmessage。
  */
 import { createServer } from 'node:http'
+import { createCipheriv } from 'node:crypto'
 import { rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,10 +44,23 @@ async function main() {
   const calls = []
   let updatesServed = 0
   let qrSeq = 0
+  // 微信 CDN 图片是 AES-128-ECB 加密的：mock 一张 1x1 PNG，验证 clawbot 入站图片链路。
+  const imageAesKey = Buffer.alloc(16, 9)
+  const imagePlain = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  const imageCipher = createCipheriv('aes-128-ecb', imageAesKey, null)
+  const imageEncrypted = Buffer.concat([imageCipher.update(imagePlain), imageCipher.final()])
   const mock = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
     const body = req.method === 'POST' ? await readBody(req) : {}
     calls.push({ method: req.method, path: url.pathname, query: url.search, body })
+    if (url.pathname === '/wx-clawbot-image.png') {
+      res.writeHead(200, { 'Content-Type': 'image/png' })
+      res.end(imageEncrypted)
+      return
+    }
     const send = payload => {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(payload))
@@ -80,6 +94,21 @@ async function main() {
               context_token: 'ctx-1',
               create_time_ms: Date.now(),
               item_list: [{ type: 1, text_item: { text: '你好，Clawbot' } }],
+            },
+            {
+              message_id: 102,
+              from_user_id: 'mock-user-1',
+              message_type: 1,
+              context_token: 'ctx-1',
+              create_time_ms: Date.now(),
+              item_list: [
+                {
+                  type: 2,
+                  image_item: {
+                    media: { full_url: `${base}/wx-clawbot-image.png`, aes_key: imageAesKey.toString('base64') },
+                  },
+                },
+              ],
             },
           ],
         })
@@ -136,6 +165,16 @@ async function main() {
       await sleep(120)
     }
     check('入站消息进入待处理队列', inbox.messages?.[0]?.text === '你好，Clawbot', JSON.stringify(inbox))
+    const imageInboxMessage = (inbox.messages || []).find(item => item.id === 'wx-102')
+    check(
+      'clawbot 图片消息 content 为空也能入队并解密转存',
+      !!imageInboxMessage &&
+        imageInboxMessage.text === '[图片]' &&
+        Array.isArray(imageInboxMessage.images) &&
+        imageInboxMessage.images.length === 1 &&
+        !!imageInboxMessage.images[0]?.id,
+      JSON.stringify(inbox.messages),
+    )
     const msgId = inbox.messages?.[0]?.id
     const ack = await (await api(backend.url, '/api/clawbot/inbox/ack', { method: 'POST', body: { channelId: 'test-clawbot', ids: [msgId] } })).json()
     check('入站消息可确认消费', ack.ok === true && ack.removed === 1, JSON.stringify(ack))

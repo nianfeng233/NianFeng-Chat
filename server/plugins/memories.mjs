@@ -46,8 +46,14 @@ const MAX_MESSAGES_PER_ROUND = 80
 const MIN_WINDOW_NEW_MESSAGES = 5
 /** 群聊窗口最大消息数，与 normalizeRounds 的单轮上限保持一致。 */
 const MAX_WINDOW_MESSAGES = 80
-const MAX_MESSAGE_CHARS = 4000
-const MAX_SUMMARY_CHARS = 600
+/** 单条原文快照保留上限：调大后在记忆详情里能回看更完整的原始消息。 */
+const MAX_MESSAGE_CHARS = 12000
+/** 概括正文安全上限：模型有 SUMMARY_MAX_TOKENS 输出上限，这里只兜底忽略参数的异常端点。 */
+const MAX_SUMMARY_CHARS = 4000
+/** 概括请求最多携带的提示字符数；超长窗口按每条消息均匀压缩，而不是整段丢掉后面的消息。 */
+const MAX_PROMPT_CHARS = 32000
+const MAX_PROMPT_MESSAGE_CHARS = 4000
+const SUMMARY_MAX_TOKENS = 1200
 const MAX_SEARCH_TOP_K = 20
 const BM25_K1 = 1.5
 const BM25_B = 0.75
@@ -272,17 +278,64 @@ function speakerLabelOf(message, { roleName = '' } = {}) {
   return '系统'
 }
 
-function roundsToPromptContent(rounds, context = {}) {
+/**
+ * 单条消息进入概括 Prompt 前的压缩：把“超过预算的尾部”变成可解释的截断标记。
+ * 与直接 slice 整个 Prompt 不同，这样不会无声丢掉窗口里更靠后的消息。
+ */
+function clipPromptText(value, limit) {
+  const text = String(value ?? '')
+  if (text.length <= limit) return text
+  const keep = Math.max(0, Math.floor(limit) - 24)
+  return `${text.slice(0, keep)}…[原文过长，已截断 ${text.length - keep} 字]`
+}
+
+function buildPromptLines(rounds, context, perMessageLimit) {
   const lines = []
   for (let i = 0; i < rounds.length; i += 1) {
     lines.push(context.mode === 'window' ? '【群聊消息窗口】' : `【第 ${i + 1} 轮】`)
     for (const message of rounds[i].messages || []) {
       const sender = speakerLabelOf(message, context)
       const time = String(message.timestamp || '').replace('T', ' ').replace(/\.\d+(?:[+-]\d\d:\d\d)?$/, '')
-      lines.push(`- ${time ? `[${time}] ` : ''}${sender}：${message.content}`)
+      lines.push(`- ${time ? `[${time}] ` : ''}${sender}：${clipPromptText(message.content, perMessageLimit)}`)
     }
   }
-  return lines.join('\n').slice(0, 24000)
+  return lines
+}
+
+function roundsToPromptContent(rounds, context = {}) {
+  const messageCount = (rounds || []).reduce((sum, round) => sum + (round.messages || []).length, 0)
+  let perMessageLimit = MAX_PROMPT_MESSAGE_CHARS
+  let lines = buildPromptLines(rounds, context, perMessageLimit)
+  if (messageCount > 0 && lines.join('\n').length > MAX_PROMPT_CHARS) {
+    // 整段 Prompt 超预算时，仍保留全部消息，只按条数均匀降低每条消息的可见字数；
+    // 每条都带截断标记，概括模型至少知道该条被压缩过，而不是以为对话就到这里。
+    const overhead = messageCount * 64 + rounds.length * 4
+    const available = Math.max(messageCount * 160, MAX_PROMPT_CHARS - overhead)
+    perMessageLimit = Math.max(160, Math.floor(available / messageCount))
+    lines = buildPromptLines(rounds, context, perMessageLimit)
+  }
+  return lines.join('\n')
+}
+
+/** 概括正文清洗：优先在完整句末截断，避免从句子中间硬切造成明显截断。 */
+function normalizeSummaryText(raw) {
+  const text = String(raw ?? '')
+    .replace(/[\u200b-\u200d\ufeff]/gi, '')
+    .replace(/^[\s"'“”]+|[\s"'“”]+$/g, '')
+    .trim()
+  if (!text) return ''
+  if (text.length <= MAX_SUMMARY_CHARS) return text
+  const sliced = text.slice(0, MAX_SUMMARY_CHARS)
+  const boundary = Math.max(
+    sliced.lastIndexOf('。'),
+    sliced.lastIndexOf('！'),
+    sliced.lastIndexOf('？'),
+    sliced.lastIndexOf('!'),
+    sliced.lastIndexOf('?'),
+    sliced.lastIndexOf('\n'),
+  )
+  // 句末离安全上限太远时说明模型在单句里写了异常长的内容，退回字符截断。
+  return (boundary >= sliced.length * 0.6 ? sliced.slice(0, boundary + 1) : sliced).trim()
 }
 
 function recordToDTO(record, extra = {}) {
@@ -643,9 +696,26 @@ export function apply(ctx, config = {}) {
   const summaryConfig = override => {
     const prefs = memoryPreferences()
     const data = settings.get() || {}
-    const provider = String(override?.summaryProvider || prefs.summaryProvider || data.defaultProvider || '').trim()
-    const model = String(override?.summaryModel || prefs.summaryModel || data.defaultModel || data.providers?.[provider]?.defaultModel || '').trim()
+    const provider = String(prefs.summaryProvider || override?.summaryProvider || data.defaultProvider || '').trim()
+    // 只使用“同一个 provider”的全局默认模型兜底，避免把 A 提供商的默认模型发给 B 提供商。
+    const globalFallback = String(data.defaultProvider || '') === provider ? data.defaultModel : ''
+    const model = String(
+      prefs.summaryModel ||
+        override?.summaryModel ||
+        data.providers?.[provider]?.defaultModel ||
+        globalFallback ||
+        '',
+    ).trim()
     return provider && model ? { provider, model } : null
+  }
+  /** 群聊概括总开关 / 逐渠道关闭在服务端也做一次兜底，旧前端或其它调用方同样不可能绕过。 */
+  const groupSummaryDisabledByPreference = channelId => {
+    const prefs = memoryPreferences()
+    if (prefs.groupSummaryEnabled === false) return true
+    const disabled = prefs.groupSummaryDisabled
+    if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return false
+    const flag = disabled[String(channelId || '')]
+    return flag === true || flag === 'true'
   }
   const embeddingConfig = () => {
     const prefs = memoryPreferences()
@@ -700,20 +770,41 @@ export function apply(ctx, config = {}) {
       '',
       roundsToPromptContent(rounds, context),
     ].join('\n')
-    const text = await models.complete({
-      provider: modelConfig.provider,
-      model: modelConfig.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      options: { temperature: 0.2, maxTokens: 320 },
-    })
-    const summary = String(text || '')
-      .replace(/[\u200b-\u200d\ufeff]/gi, '')
-      .replace(/^[\s"'“”]+|[\s"'“”]+$/g, '')
-      .slice(0, MAX_SUMMARY_CHARS)
-      .trim()
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ]
+    // 概括任务不需要思考链：关闭推理既省 token，也避免思考内容挤占输出预算造成正文截断。
+    const options = { temperature: 0.2, maxTokens: SUMMARY_MAX_TOKENS, reasoningEffort: 'off' }
+    let text = ''
+    let finishReason = ''
+    if (typeof models.stream === 'function') {
+      const chunks = []
+      let doneInfo = null
+      const result = await models.stream({
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+        messages,
+        options,
+        onChunk: delta => {
+          if (delta) chunks.push(String(delta))
+        },
+        onDone: info => {
+          doneInfo = info || null
+        },
+      })
+      text = chunks.join('') || String(result?.text || '')
+      finishReason = String(doneInfo?.reason || result?.finishReason || '')
+    } else {
+      text = await models.complete({ provider: modelConfig.provider, model: modelConfig.model, messages, options })
+    }
+    if (finishReason === 'length') {
+      ctx.logger?.warn?.(
+        `[memories] 概括模型输出达到上限（${SUMMARY_MAX_TOKENS} tokens），本次概括可能不完整；` +
+          '可缩短群聊窗口 / 降低上下文条数，或在模型设置里提高该模型的输出上限。',
+      )
+    }
+    const summary = normalizeSummaryText(text)
     if (!summary) throw new Error('概括模型返回了空内容')
     return summary
   }
@@ -891,13 +982,28 @@ export function apply(ctx, config = {}) {
     const scopeKey = memoryScope === 'privacy' ? `privacy:${String(input.channelId || 'unknown')}` : 'normal'
     const rounds = normalizeRounds(input.rounds)
     if (!rounds.length) return { ok: true, created: 0, pending: 0, ignored: 0 }
-    const everyRounds = clampNumber(input.everyRounds, 2, MAX_EVERY_ROUNDS, DEFAULT_EVERY_ROUNDS)
     const roundSeq = round => Math.max(0, ...(Array.isArray(round?.messages) ? round.messages : []).map(message => Number(message.seq) || 0))
     const seqs = rounds.map(roundSeq).filter(seq => seq > 0)
     const firstSeq = seqs.length ? Math.min(...seqs) : 0
     const latestSeq = seqs.length ? Math.max(...seqs) : 0
     const channelId = String(input.channelId || rounds.at(-1)?.channel_id || '')
-    const windowSize = clampNumber(input.windowSize ?? input.window_size, 2, MAX_WINDOW_MESSAGES, 0)
+    const sourceGroup = String(input.sourceGroup || input.source_group || rounds.at(-1)?.source_group || '')
+    // 群聊关掉记忆总结的渠道，任何调用方都不再写入新概括；已存记忆仍可检索。
+    if (sourceGroup === 'group' && groupSummaryDisabledByPreference(channelId)) {
+      return { ok: true, created: 0, pending: 0, ignored: 0, skipped: true, reason: 'group-summary-disabled' }
+    }
+    // 私聊 / 隐私的总结轮次来自设置页「私聊总结轮次」；调用方显式传值时优先。
+    const rawEveryRounds =
+      input.everyRounds === undefined || input.everyRounds === null || input.everyRounds === ''
+        ? memoryPreferences().summaryRounds
+        : input.everyRounds
+    const everyRounds = clampNumber(rawEveryRounds, 2, MAX_EVERY_ROUNDS, DEFAULT_EVERY_ROUNDS)
+    // windowSize 只有 >0 才是群聊窗口模式；0 / 空 / 无效值必须保持“按轮次概括”，
+    // 否则私聊会被错误地当成 windowSize=2 的群聊窗口，导致一轮一条概括 + “群里”措辞。
+    const rawWindowSize = Number(input.windowSize ?? input.window_size ?? 0)
+    const windowSize = Number.isFinite(rawWindowSize) && rawWindowSize > 0
+      ? clampNumber(rawWindowSize, 2, MAX_WINDOW_MESSAGES, 0)
+      : 0
     if (windowSize > 0) {
       const minNewMessages = Math.min(
         windowSize,
@@ -914,7 +1020,17 @@ export function apply(ctx, config = {}) {
     if (!state) {
       // 历史上没有基线：如果这批 round 已经是“大历史”里的最后几十轮，就只从当前最新位置开始计数；
       // 如果只是新渠道刚开始的 1~3 轮，则把基线放到第一轮之前，让新渠道正常从第一轮开始积累。
-      const baselineSeq = rounds.length > 3 ? latestSeq : Math.max(0, firstSeq - 1)
+      // 升级前该渠道若已产生过群聊窗口概括，则从最新 seq 起算，避免旧的窗口内容被再次按轮概括。
+      const hasWindowHistory =
+        latestSeq > 0 &&
+        repo
+          .list({ roleId, scope: scopeKey })
+          .some(
+            record =>
+              String(record.source_channel_id || '') === channelId &&
+              (record.meta?.mode === 'window' || String(record.round_ids?.[0] || '').startsWith('window:')),
+          )
+      const baselineSeq = hasWindowHistory || rounds.length > 3 ? latestSeq : Math.max(0, firstSeq - 1)
       state = repo.setState({
         state_key: stateKey,
         role_id: roleId,

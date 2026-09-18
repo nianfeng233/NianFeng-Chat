@@ -710,11 +710,15 @@ export function apply(ctx) {
     markChanged()
   }
 
-  async function handleInbound(payload) {    const channelId = payload?.channelId
+  async function handleInbound(payload) {
+    const channelId = payload?.channelId
     // 服务端常驻代聊已接管时，WebUI 只负责展示，不再重复处理入站消息。
     if (api?.supports?.('server-agent') && globalThis.__NIANFENG_SERVER_AGENT__ !== true) return
     const message = payload?.message
-    if (!channelId || !message?.id || !message?.text) return
+    const hasImages = Array.isArray(message?.images) && message.images.length > 0
+    // 图片消息可能没有正文，桥会给 text 填 "[图片]"；这里仍保留 hasImages 兜底，
+    // 避免历史数据 / 上游字段差异导致纯图片消息被直接丢弃。
+    if (!channelId || !message?.id || (!message?.text && !hasImages)) return
     const channel = findChannel(channelId)
     if (!isQQChannel(channel)) return
 

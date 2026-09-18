@@ -55,8 +55,11 @@ async function startTestBackend() {
     async test() {
       return { detail: '测试通过' }
     },
-    async stream({ onChunk, onDone }) {
-      const text = '这是来自本地后端的真实流式回复，用于端到端验证。'
+    async stream({ messages, onChunk, onDone }) {
+      const promptText = JSON.stringify(messages || [])
+      const text = promptText.includes('LONG_SUMMARY_SMOKE_MARKER')
+        ? `${'这是一条用于验证记忆卡片完整展示的长概括。'.repeat(32)}LONG_SUMMARY_SMOKE_TAIL`
+        : '这是来自本地后端的真实流式回复，用于端到端验证。'
       for (const char of text) {
         onChunk(char)
         await sleep(1)
@@ -1178,6 +1181,11 @@ async function main() {
     settingsContainer.open('plugins')
     return document.querySelectorAll('#pluginListContainer .plugin-item').length >= 20
   })(), `实际 ${document.querySelectorAll('#pluginListContainer .plugin-item').length}`)
+  const chatChannels = ctx.inject('channel-registry')
+  const smokeGroup = chatChannels.groups('group')[0]
+  const smokeGroupChannel = smokeGroup
+    ? chatChannels.addChannel('group', smokeGroup.id, { type: 'custom', name: '群聊记忆开关冒烟', meta: { category: 'group' } })
+    : null
   settingsContainer.open('model')
   await sleep(80)
   const modelContent = document.querySelector('.settings-content')
@@ -1185,6 +1193,40 @@ async function main() {
   check('模型页默认展示自定义提供商面板', !!document.querySelector('.settings-content .model-provider-layout'))
   check('当前生效有模型选择按钮', !!document.querySelector('.settings-content [data-active-model]'))
   check('失败转移配置入口存在', (modelContent?.textContent || '').includes('失败自动切换模型'))
+  const memorySummaryToggle = document.querySelector('.settings-content [data-config-toggle="memory.groupSummaryEnabled"]')
+  const memoryRoundsInput = document.querySelector('.settings-content [data-config-input="memory.summaryRounds"]')
+  check(
+    '记忆模型分区包含私聊总结轮次与群聊记忆总开关',
+    !!memorySummaryToggle && !!memoryRoundsInput && !!(modelContent?.textContent || '').includes('群聊记忆总结'),
+    String(modelContent?.textContent || '').slice(0, 200),
+  )
+  if (memorySummaryToggle) {
+    memorySummaryToggle.click()
+    await sleep(20)
+    check('群聊记忆总开关可写回配置', ctx.inject('config').get('memory.groupSummaryEnabled') === false)
+    memorySummaryToggle.click()
+    await sleep(20)
+  }
+  const memoryGroupToggle = smokeGroupChannel
+    ? document.querySelector(`.settings-content [data-config-toggle="memory.groupSummaryDisabled.${smokeGroupChannel.id}"]`)
+    : null
+  check(
+    '群聊记忆分区能列出逐渠道关闭开关',
+    !smokeGroupChannel || !!memoryGroupToggle,
+    String(modelContent?.querySelector('.setting-row')?.textContent || '').slice(0, 160),
+  )
+  if (memoryGroupToggle) {
+    memoryGroupToggle.click()
+    await sleep(20)
+    check(
+      '逐渠道关闭开关可写回配置',
+      ctx.inject('config').get(`memory.groupSummaryDisabled.${smokeGroupChannel.id}`) === true &&
+        ctx.inject('config').get('memory.groupSummaryDisabled')?.[smokeGroupChannel.id] === true,
+    )
+    memoryGroupToggle.click()
+    await sleep(20)
+  }
+  if (smokeGroupChannel) chatChannels.removeChannel('group', smokeGroupChannel.id)
   const reasoningSlider = document.querySelector('.settings-content [data-slider="reasoning"]')
   const temperatureSlider = document.querySelector('.settings-content [data-slider="temperature"]')
   check('推理等级是独立滑块', !!reasoningSlider && !!reasoningSlider.querySelector('input[type="range"]'))
@@ -1574,6 +1616,71 @@ async function main() {
     String(findSmokeMemoryCard()?.querySelector('.lib-message-body')?.textContent || '').includes('咖啡'),
     String(findSmokeMemoryCard()?.querySelector('.lib-message-body')?.textContent || '').slice(0, 120),
   )
+  // 回归 bug3：记忆库卡片曾用 shortText 截断到 220 字，导致长概括在列表里只剩前半段。
+  const longSummaryTail = 'LONG_SUMMARY_SMOKE_TAIL'
+  const longMemoryRounds = [
+    {
+      id: 'round:smoke-long-1',
+      channel_id: 'napcat:smoke-long-summary',
+      conversation_id: 'conv-smoke-long-summary',
+      source_group: 'private',
+      messages: [
+        {
+          message_id: 'smoke-long-m1',
+          seq: 1,
+          role: 'user',
+          content: `LONG_SUMMARY_SMOKE_MARKER 请生成一条长概括`,
+          sender_name: '测试用户',
+          timestamp: nowIso,
+        },
+        { message_id: 'smoke-long-m2', seq: 2, role: 'assistant', content: '好的。', sender_name: '长概括测试角色', timestamp: nowIso },
+      ],
+    },
+    {
+      id: 'round:smoke-long-2',
+      channel_id: 'napcat:smoke-long-summary',
+      conversation_id: 'conv-smoke-long-summary',
+      source_group: 'private',
+      messages: [
+        { message_id: 'smoke-long-m3', seq: 3, role: 'user', content: '继续。', sender_name: '测试用户', timestamp: nowIso },
+        { message_id: 'smoke-long-m4', seq: 4, role: 'assistant', content: '好的。', sender_name: '长概括测试角色', timestamp: nowIso },
+      ],
+    },
+  ]
+  const longMemory = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-long-summary',
+    roleName: '长概括测试角色',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke-long-summary',
+    conversationId: 'conv-smoke-long-summary',
+    sourceGroup: 'private',
+    mode: 'round',
+    windowSize: 0,
+    everyRounds: 2,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: longMemoryRounds,
+  })
+  check(
+    '后端完整保存长概括（不按 600 字硬切）',
+    longMemory?.created === 1 &&
+      String(longMemory?.summaries?.[0]?.summary || '').includes(longSummaryTail) &&
+      String(longMemory?.summaries?.[0]?.summary || '').length > 220,
+    JSON.stringify(longMemory).slice(0, 240),
+  )
+  libraryWrapper?.dispatchEvent({ type: 'click', target: memoryRefresh })
+  const longMemoryCard = await waitFor(
+    () =>
+      [...document.querySelectorAll('[data-lib-memory-card]')].find(card =>
+        String(card.querySelector('.lib-card-title')?.textContent || '').includes(longSummaryTail),
+      ) || null,
+    { timeout: 4000 },
+  )
+  check(
+    '记忆库卡片完整展示长概括，不再截断成半截',
+    !!longMemoryCard && String(longMemoryCard.querySelector('.lib-card-title')?.textContent || '').length > 220,
+    String(longMemoryCard?.querySelector('.lib-card-title')?.textContent || '').slice(-80),
+  )
   const smokeWindowMessages = ids =>
     ids.map((id, index) => ({
       message_id: id,
@@ -1651,6 +1758,90 @@ async function main() {
     windowMostlyRepeated?.skipped === true && windowMostlyRepeated?.duplicate_count === 16,
     JSON.stringify(windowMostlyRepeated).slice(0, 240),
   )
+  // 回归：私聊 / 隐私的 windowSize=0 曾被 clamp 成最小 2，错误进入群聊窗口模式，
+  // 结果每 1 轮（2 条消息）就生成一条“群里”措辞的概括。这里锁死按轮次概括路径。
+  const privateRounds = [
+    {
+      id: 'round:smoke-private-1',
+      channel_id: 'napcat:smoke-private',
+      conversation_id: 'conv-smoke-private',
+      source_group: 'private',
+      messages: [
+        { message_id: 'smoke-private-m1', seq: 1, role: 'user', content: '私聊冒烟：明天要去看牙医', sender_name: '测试用户', timestamp: nowIso },
+        { message_id: 'smoke-private-m2', seq: 2, role: 'assistant', content: '好的，我记下了。', sender_name: '私聊测试角色', timestamp: nowIso },
+      ],
+    },
+    {
+      id: 'round:smoke-private-2',
+      channel_id: 'napcat:smoke-private',
+      conversation_id: 'conv-smoke-private',
+      source_group: 'private',
+      messages: [
+        { message_id: 'smoke-private-m3', seq: 3, role: 'user', content: '私聊冒烟：记得提醒我带医保卡', sender_name: '测试用户', timestamp: nowIso },
+        { message_id: 'smoke-private-m4', seq: 4, role: 'assistant', content: '没问题。', sender_name: '私聊测试角色', timestamp: nowIso },
+      ],
+    },
+  ]
+  const privateIngest = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-private',
+    roleName: '私聊测试角色',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke-private',
+    conversationId: 'conv-smoke-private',
+    sourceGroup: 'private',
+    mode: 'round',
+    windowSize: 0,
+    everyRounds: 2,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: privateRounds,
+  })
+  check(
+    '私聊记忆 windowSize=0 不会误入群聊窗口模式',
+    privateIngest?.ok === true && privateIngest?.mode === undefined && privateIngest?.summaries?.[0]?.source?.group === 'private',
+    JSON.stringify(privateIngest).slice(0, 240),
+  )
+  check(
+    '私聊记忆按 everyRounds=2 合并为一条 2 轮 / 4 条',
+    privateIngest?.created === 1 &&
+      privateIngest?.summaries?.[0]?.round_count === 2 &&
+      privateIngest?.summaries?.[0]?.message_count === 4,
+    JSON.stringify(privateIngest).slice(0, 240),
+  )
+  // 逐渠道关闭后，服务端也必须兜底拒绝写入（旧前端 / 其它调用方同样不能绕过）。
+  await backend.ctx.settings.update({
+    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': true } } },
+  })
+  const disabledGroupIngest = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-group-off',
+    roleName: '群聊关闭测试角色',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke-group-off',
+    conversationId: 'conv-smoke-group-off',
+    sourceGroup: 'group',
+    windowSize: 20,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: [
+      {
+        id: 'round:smoke-group-off-1',
+        channel_id: 'napcat:smoke-group-off',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-group-off-m1', seq: 1, role: 'user', content: '这个群的记忆应该被关闭', sender_name: '群成员', timestamp: nowIso },
+          { message_id: 'smoke-group-off-m2', seq: 2, role: 'assistant', content: '不会写入。', sender_name: '群聊关闭测试角色', timestamp: nowIso },
+        ],
+      },
+    ],
+  })
+  check(
+    '群聊渠道关闭记忆总结后绝不生成新记忆',
+    disabledGroupIngest?.ok === true && disabledGroupIngest?.skipped === true && disabledGroupIngest?.reason === 'group-summary-disabled',
+    JSON.stringify(disabledGroupIngest).slice(0, 240),
+  )
+  await backend.ctx.settings.update({
+    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': false } } },
+  })
   // 知识库扩展不在内置插件里，冒烟通过替换 api.get 的 /knowledge 返回，
   // 验证知识库标签页的列表 / 全文渲染逻辑；真实 bridge 路由由后端测试和
   // 扩展自身测试覆盖。

@@ -94,6 +94,10 @@ async function main() {
     } else if (/^\/v2\/groups\/[^/]+\/messages$/.test(path)) {
       sentMessages.push({ target: 'group', path, body })
       send({ id: `sent-group-${sentMessages.length}`, timestamp: new Date().toISOString() })
+    } else if (path === '/qq-image.png') {
+      // 模拟 QQ 附件 HTTPS URL：桥会下载并转存到 image-service。
+      res.writeHead(200, { 'Content-Type': 'image/png' })
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==', 'base64'))
     } else if (path === '/lite/create_bind_task') {
       lastBindKey = String(body.key || '')
       send({ retcode: 0, data: { task_id: 'task-qr-1' } })
@@ -214,6 +218,47 @@ async function main() {
     await sleep(60)
     const inbox3 = await (await api(base, '/api/qqbot/inbox?channelId=ch-manual')).json()
     check('群聊消息不会被私聊渠道接收（分类隔离）', inbox3.messages?.length === 1, JSON.stringify(inbox3.messages))
+
+    console.log('\n④a QQ 官方图片消息入站')
+    const imageEvent = {
+      id: 'event-image',
+      op: 0,
+      s: 4,
+      t: 'C2C_MESSAGE_CREATE',
+      d: {
+        id: 'msg-image-1',
+        content: '',
+        timestamp: new Date().toISOString(),
+        author: { id: 'openid-user-1', user_openid: 'openid-user-1' },
+        attachments: [
+          {
+            content_type: 'image/png',
+            filename: 'image.png',
+            width: 1,
+            height: 1,
+            url: `${mockBase}/qq-image.png`,
+          },
+        ],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', {
+      method: 'POST',
+      headers: { 'X-Bot-Appid': 'mock-app-1' },
+      body: imageEvent,
+    })
+    await sleep(400)
+    const inboxImage = await (await api(base, '/api/qqbot/inbox?channelId=ch-manual')).json()
+    const imageMessage = (inboxImage.messages || []).find(item => item.id === 'qq-c2c-openid-user-1-msg-image-1')
+    check(
+      'QQ 图片消息 content 为空也能进入渠道队列',
+      !!imageMessage && imageMessage.text === '[图片]',
+      JSON.stringify(inboxImage.messages),
+    )
+    check(
+      'QQ 图片附件会下载并转存为 imageId',
+      Array.isArray(imageMessage?.images) && imageMessage.images.length === 1 && !!imageMessage.images[0]?.id,
+      JSON.stringify(imageMessage),
+    )
 
     console.log('\n④b 未绑定私聊自动回复绑定提示')
     await api(base, '/api/qqbot/login/start', {

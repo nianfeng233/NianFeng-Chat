@@ -275,6 +275,17 @@ async function main() {
 
   check('模型请求带上了工具定义', Array.isArray(captured?.options?.tools) && captured.options.tools.some(tool => tool.function?.name === 'chat_send'), JSON.stringify(captured?.options?.tools?.map(tool => tool.function?.name)))
   check('system 段落包含人设与工具规则', captured?.messages?.[0]?.role === 'system' && captured.messages[0].content.includes('冒烟测试角色') && captured.messages[0].content.includes('chat_send'), captured?.messages?.[0]?.content?.slice(0, 80))
+  check(
+    'system 段落鼓励主动调用 search_memory',
+    captured?.messages?.[0]?.content?.includes('允许并鼓励主动检索长期记忆') &&
+      captured.messages[0].content.includes('search_memory'),
+    captured?.messages?.[0]?.content?.slice(0, 120),
+  )
+  check(
+    'system 段落禁止 chat_send 单条消息换行',
+    captured?.messages?.[0]?.content?.includes('禁止在单条消息正文里使用换行符'),
+    captured?.messages?.[0]?.content?.slice(0, 120),
+  )
   check('全局输出 token 上限已传入模型请求', Number(captured?.options?.maxTokens) === 8192, JSON.stringify({ maxTokens: captured?.options?.maxTokens }))
   const wrappedUser = captured?.messages?.find(message => message.role === 'user')
   check('用户内容按 untrusted 紧凑 JSON 包装', typeof wrappedUser?.content === 'string' && wrappedUser.content.includes('"trust":"untrusted"'), String(wrappedUser?.content || '').slice(0, 120))
@@ -416,6 +427,29 @@ async function main() {
     return last?.role === 'assistant' && last.content.includes('那个渠道我暂时访问不了') ? last : null
   })
   check('模型收到拒绝结果后改用当前渠道回复', !!boundaryReply, JSON.stringify(sessions.messages(conv1.id).slice(-2)))
+
+  console.log('\n⑥b chat_send 单条消息换行拆分成多条')
+  const lineConv = sessions.create({ name: '换行拆分测试', meta: { roleId: 'role-test' } })
+  const lineChannel = store.channelForConversation(lineConv.id)
+  const lineSend = await tools.execute(
+    'chat_send',
+    { messages: ['第一句\n第二句', '第三句'], end: false },
+    {
+      conversationId: lineConv.id,
+      channelId: lineChannel.channelId,
+      roleId: 'role-test',
+      userId: 'web-user',
+      sentContents: new Map(),
+    },
+  )
+  const lineMessages = sessions.messages(lineConv.id).filter(message => message.role === 'assistant').slice(-3)
+  check(
+    'chat_send 运行期把单条消息里的换行拆成独立气泡',
+    lineSend?.ok === true &&
+      lineMessages.length === 3 &&
+      lineMessages.map(message => message.content).join('|') === '第一句|第二句|第三句',
+    JSON.stringify(lineMessages.map(message => message.content)),
+  )
 
   console.log('\n⑦ 工作记忆 + 渠道记忆合并')
   const conv2 = sessions.create({ name: '另一个 Nova 渠道', meta: { roleId: 'role-test' } })

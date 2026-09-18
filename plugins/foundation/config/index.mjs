@@ -129,11 +129,14 @@ const DEFAULTS = {
   // 群聊不适合按“轮”推算，统一按逐条消息数量控制。
   'chat.groupMessages': 20,
   'chat.readTokens': 1500,
-  // 长期记忆（参考 MemMachine）：每 summaryRounds 轮完整对话压缩成一段短概括并向量化。
-  // 存储与检索都在后端完成，设置页「模型 → 记忆模型」选择向量 / 概括模型。
+  // 长期记忆（参考 MemMachine）：私聊 / 隐私每 summaryRounds 轮完整对话压缩成一段短概括并向量化；
+  // 群聊默认按最近 N 条消息窗口概括，可用 groupSummaryEnabled 总开关或
+  // groupSummaryDisabled.<channelId> 逐群关闭。存储与检索都在后端完成，
+  // 设置页「模型 → 记忆模型」选择向量 / 概括模型。
   'memory.enabled': true,
   'memory.autoSummarize': true,
   'memory.summaryRounds': 10,
+  'memory.groupSummaryEnabled': true,
   'memory.embeddingProvider': '',
   'memory.embeddingModel': '',
   'memory.embeddingDimension': 0,

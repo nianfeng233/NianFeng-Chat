@@ -587,6 +587,19 @@ export function apply(ctx) {
 
     const messageInput = args.messages ?? args.message ?? args.content
     const rawList = Array.isArray(messageInput) ? messageInput : messageInput === undefined || messageInput === null ? [] : [messageInput]
+    // 运行期兜底：chat_send 禁止在单条消息里用换行拆句，模型偶尔不遵守时
+    // 直接按换行拆成多条独立消息，避免 QQ / 微信用一个气泡显示奇怪折行。
+    const expandedList = []
+    for (const raw of rawList) {
+      if (typeof raw !== 'string') {
+        expandedList.push(raw)
+        continue
+      }
+      for (const part of raw.split(/\r?\n+/)) {
+        const text = part.trim()
+        if (text) expandedList.push(text)
+      }
+    }
     const sent = []
     const duplicates = []
     let reasoningAttached = false
@@ -596,7 +609,7 @@ export function apply(ctx) {
     const emitTyping = typing => {
       if (simulate) events.emit('chat:typing', { conversationId, channelId, typing })
     }
-    for (const raw of rawList) {
+    for (const raw of expandedList) {
         if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         const item = typeof raw === 'string' ? { content: raw } : raw || {}
         const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
@@ -1066,7 +1079,7 @@ export function apply(ctx) {
       'search_memory',
       {
         description:
-          '长期记忆语义检索：先用一段语义描述在角色的记忆库里查找相关的概括（每条约 10 轮对话压缩而成），再按需展开概括底下的原文。默认只返回最相关的 1 条概括；top_summaries 可指定返回几条供模型比对；同一渠道的概括会附带原文，跨渠道 / 群聊场景默认只返回概括，并把原文标记为隐私内容，只有显式传 include_messages=true 才会请求授权并展开。可用 keywords 叠加关键词精筛、time_start / time_end 限定时间。用户问“我们之前聊过什么 / 你还记得吗 / 找以前某段对话”时优先用本工具，而不是反复调用 read_messages。',
+          '长期记忆语义检索：先用一段语义描述在角色的记忆库里查找相关的概括（每条约 10 轮对话压缩而成），再按需展开概括底下的原文。默认只返回最相关的 1 条概括；top_summaries 可指定返回几条供模型比对；同一渠道的概括会附带原文，跨渠道 / 群聊场景默认只返回概括，并把原文标记为隐私内容，只有显式传 include_messages=true 才会请求授权并展开。可用 keywords 叠加关键词精筛、time_start / time_end 限定时间。用户问“我们之前聊过什么 / 你还记得吗 / 找以前某段对话”时优先用本工具；日常聊天里只要你怀疑自己应该记得用户说过的习惯 / 日常 / 人物 / 事件，也可以主动调用一次，不要反复调用 read_messages。搜不到结果就按当前上下文正常回复，不要为了“确认一下”连续重复调用。',
         parameters: {
           type: 'object',
           properties: {
@@ -1086,7 +1099,7 @@ export function apply(ctx) {
       'chat_send',
       {
         description:
-          '发送一条或多条短聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，不要把多句话用换行符拼成一条大消息；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发大段长文 / 资料 / 文献时改用 send_document。',
+          '发送一条或多条短聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，单条消息正文不要包含换行符（\\n），想发两句就传两个数组项，否则同一气泡里会出现奇怪的折行；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发大段长文 / 资料 / 文献时改用 send_document。',
         parameters: {
           type: 'object',
           properties: {
@@ -1094,7 +1107,7 @@ export function apply(ctx) {
             messages: {
               type: 'array',
               items: { type: 'string' },
-              description: '短聊天消息列表，每个数组项会作为独立消息发出。多条消息请拆开，例如 ["你好","有什么事？"]；不要用换行符把多句话塞进一条。日常聊天一般不需要句尾句号，更像 QQ / 微信真人输入；不要加编号、前缀或解释。',
+              description: '短聊天消息列表，每个数组项会作为独立消息发出。多条消息请拆开，例如 ["你好","有什么事？"]；单条消息正文禁止使用换行符（\\n），不要用换行把多句话塞进一条。日常聊天一般不需要句尾句号，更像 QQ / 微信真人输入；不要加编号、前缀或解释。',
             },
             images: {
               type: 'array',

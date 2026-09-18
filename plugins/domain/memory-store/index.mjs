@@ -38,6 +38,8 @@ export const provides = [{ name: 'memory-store', type: 'singleton' }]
 
 const MAX_ROUNDS_PER_INGEST = 30
 const AUTO_INGEST_DELAY_MS = 800
+/** 后端 memory 快照的单条正文上限，与 server/plugins/memories.mjs 的 MAX_MESSAGE_CHARS 对齐。 */
+const MAX_SNAPSHOT_CHARS = 12000
 /** 群聊窗口概括：窗口内至少要有这么多条“从未概括过”的消息，才值得再调一次概括模型。 */
 const MIN_WINDOW_NEW_MESSAGES = 5
 /** 单次窗口概括最多携带的消息数，与后端 MAX_MESSAGES_PER_ROUND 对齐。 */
@@ -97,7 +99,7 @@ function compactMessage(message, index) {
     message_id: String(message?.message_id || message?.id || ''),
     seq: Number(message?.seq) || index + 1,
     role: message?.role === 'assistant' ? 'assistant' : message?.role === 'system' ? 'system' : 'user',
-    content: messageText(message).slice(0, 4000),
+    content: messageText(message).slice(0, MAX_SNAPSHOT_CHARS),
     sender_name: String(message?.sender_name || ''),
     timestamp: String(message?.timestamp || ''),
     content_type: String(message?.content_type || 'text'),
@@ -147,6 +149,20 @@ export function apply(ctx) {
     return Math.max(2, Math.min(MAX_WINDOW_MESSAGES, Math.floor(raw) || 20))
   }
 
+  /**
+   * 群聊记忆总开关 + 逐渠道开关。
+   * - memory.groupSummaryEnabled=false：所有群聊都不再生成新记忆；
+   * - memory.groupSummaryDisabled.<channelId>=true：对应的那个群聊绝不总结（已存记忆仍可检索）。
+   */
+  const groupSummaryAllowed = channel => {
+    if (!channel || channel.group !== 'group') return true
+    if (config.get('memory.groupSummaryEnabled', true) === false) return false
+    const disabled = config.get('memory.groupSummaryDisabled', {})
+    if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return true
+    const flag = disabled[String(channel.channelId || '')]
+    return !(flag === true || flag === 'true')
+  }
+
   /** 群聊窗口按“最近 N 条消息”取值，包含未触发模型的静默上下文，和模型实际看到的一致。 */
   const collectWindowMessages = (channelId, limit) => {
     const messages = store.messagesOf(channelId)
@@ -160,12 +176,17 @@ export function apply(ctx) {
     if (!conv) return { ok: false, code: 'CONVERSATION_NOT_FOUND', error: '会话不存在' }
     const channel = store.channelForConversation(conversationId)
     if (!channel) return { ok: false, code: 'CHANNEL_NOT_FOUND', error: '渠道不存在' }
+    // 群聊记忆开关：总开关 / 逐渠道关闭后，这个渠道绝不提交新概括。
+    if (!groupSummaryAllowed(channel)) {
+      return { ok: true, created: 0, pending: 0, ignored: 0, skipped: true, reason: 'group-summary-disabled' }
+    }
     // 长期概括需要覆盖最近若干完整轮次；聊天窗口分页后主动补拉最近一段原文。
     if (typeof sessions.ensureMessages === 'function') {
       await sessions.ensureMessages(conversationId, { limit: 80 }).catch(() => null)
     }
     // 群聊按“最近 N 条消息窗口”概括：每次模型轮结束后由后端对照已概括过的 message id，
-    // 重复 > N-5 条时跳过，避免同一段群聊被反复概括。其他渠道继续走完整轮次概括。
+    // 重复 > N-5 条时跳过，避免同一段群聊被反复概括。私聊 / 隐私则继续按完整轮次概括，
+    // 完全由 memory.summaryRounds 控制，不允许再复用群聊窗口（windowSize=0）。
     const groupWindowSize = channel.group === 'group' ? groupWindowSizeOf(channel) : 0
     let rounds = []
     if (groupWindowSize > 0) {
@@ -189,6 +210,14 @@ export function apply(ctx) {
     const client = api()
     if (!client?.memoryIngest && !client?.post) return { ok: false, code: 'NO_BACKEND', error: '后端连接不可用' }
     const active = ctx.registry.get('model-registry')?.active?.() || null
+    // 「设置 → 模型 → 记忆模型」里选择的概括模型优先；没有单独配置时才回落到当前对话模型，
+    // 避免用户为了省 token 选了便宜模型但仍被显式覆盖成贵的对话模型。
+    const preferredSummaryProvider = String(config.get('memory.summaryProvider', '') || '').trim()
+    const preferredSummaryModel = String(config.get('memory.summaryModel', '') || '').trim()
+    const summaryProvider = preferredSummaryProvider || active?.provider || ''
+    const summaryModel = preferredSummaryProvider
+      ? preferredSummaryModel
+      : preferredSummaryModel || active?.model?.id || ''
     // 外部渠道会话名是「角色 · 平台 · 目标」，概括时必须使用角色本名，
     // 否则概括模型会把渠道名 / 应用名（例如「念风」）当成对话人物。
     const roleId = String(channel.roleId || conv.meta?.roleId || conv.id || '').trim()
@@ -205,8 +234,8 @@ export function apply(ctx) {
       conversationId,
       sourceGroup: channel.group || 'private',
       everyRounds: Math.max(2, Number(config.get('memory.summaryRounds', 10)) || 10),
-      summaryProvider: active?.provider || '',
-      summaryModel: active?.model?.id || '',
+      summaryProvider,
+      summaryModel,
       rounds,
     }
     try {
@@ -302,6 +331,12 @@ export function apply(ctx) {
   const scheduleIngest = conversationId => {
     if (!conversationId || disposed) return
     if (config.get('memory.enabled', true) === false || config.get('memory.autoSummarize', true) === false) return
+    try {
+      const channel = store.channelForConversation(conversationId)
+      if (channel && !groupSummaryAllowed(channel)) return
+    } catch (_) {
+      /* 会话 / 渠道暂时不可用时仍按原逻辑延后处理 */
+    }
     const previous = timers.get(conversationId)
     if (previous) clearTimeout(previous)
     const timer = setTimeout(() => {

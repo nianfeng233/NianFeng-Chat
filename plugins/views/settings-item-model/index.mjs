@@ -37,8 +37,18 @@ export const depends = {
 }
 export const optionalDepends = {
   'model-adapter-backend': '>=2.0.0',
+  'channel-registry': '>=1.0.0',
 }
-export const inject = ['settings-container', 'api', 'model-registry', 'model-adapter?', 'config', 'toast', 'modal']
+export const inject = [
+  'settings-container',
+  'api',
+  'model-registry',
+  'model-adapter?',
+  'config',
+  'toast',
+  'modal',
+  'channel-registry?',
+]
 export const permissions = ["network"]
 export const provides = []
 
@@ -106,6 +116,14 @@ export function apply(ctx) {
   const config = ctx.inject('config')
   const toast = ctx.inject('toast')
   const modal = ctx.inject('modal')
+  // 可选依赖：旧数据目录 / 独立测试环境没有渠道插件时也要能正常渲染模型页。
+  const channelRegistry = (() => {
+    try {
+      return ctx.inject('channel-registry') || ctx.registry.get('channel-registry') || null
+    } catch (_) {
+      return ctx.registry.get?.('channel-registry') || null
+    }
+  })()
 
   useStyle(ctx, MODEL_PAGE_CSS)
 
@@ -143,6 +161,25 @@ export function apply(ctx) {
     const summaryProvider = config.get('memory.summaryProvider', '')
     const summaryModel = config.get('memory.summaryModel', '')
     const summaryRounds = config.get('memory.summaryRounds', 10)
+    // 群聊逐渠道开关：渠道注册中心可用时列出当前所有群聊渠道。
+    const groupChannels = (() => {
+      try {
+        const registry = channelRegistry || ctx.registry.get('channel-registry') || null
+        return (registry?.channels?.('group') || []).filter(channel => channel && channel.id)
+      } catch (_) {
+        return []
+      }
+    })()
+    const groupChannelRows = groupChannels
+      .map(channel => {
+        const channelId = String(channel.id || '')
+        return row(
+          `群聊渠道 · ${escapeHtml(channel.name || channelId)}`,
+          `只控制这个群聊渠道（${escapeHtml(channelId)}）：关闭后它绝不生成新记忆；已存记忆仍可检索。`,
+          switchBtn(`memory.groupSummaryDisabled.${channelId}`, false),
+        )
+      })
+      .join('')
     return section(
       '记忆模型',
       card(
@@ -168,12 +205,12 @@ export function apply(ctx) {
           ) +
           row(
             '自动概括',
-            '每累计 summaryRounds 轮完整对话时自动生成一条记忆；关闭后不会写入新概括，但已存记忆仍可检索。',
+            '控制私聊 / 隐私与群聊的自动写入；关闭后不会生成新概括，但已存记忆仍可检索。',
             switchBtn('memory.autoSummarize', true),
           ) +
           row(
             '概括模型提供商',
-            '每 N 轮完整对话用它生成短概括；留空跟随全局默认模型。',
+            '用它生成短概括；留空跟随全局默认模型。',
             `<select class="setting-select" style="min-width:230px" data-memory-field="summaryProvider">${providerOptions(
               summaryProvider,
               { followDefault: true },
@@ -188,12 +225,18 @@ export function apply(ctx) {
             )}</select>`,
           ) +
           row(
-            '概括轮数',
-            '每累计多少轮完整对话生成一条概括，默认 10；范围 2-50。',
+            '私聊总结轮次',
+            '普通私聊 / 隐私渠道每累计多少轮完整对话生成一条概括，默认 10；范围 2-50。群聊走下面的消息窗口，不受此项控制。',
             `<input class="setting-input" type="number" min="2" max="50" style="width:90px" data-config-input="memory.summaryRounds" value="${escapeHtml(
               String(summaryRounds ?? 10),
             )}" />`,
-          ),
+          ) +
+          row(
+            '群聊记忆总结',
+            '群聊默认不按轮次，而是按最近 N 条消息组成窗口来总结；总开关关闭后所有群聊都不再生成新记忆，逐渠道开关仍保留。',
+            switchBtn('memory.groupSummaryEnabled', true),
+          ) +
+          groupChannelRows,
       ),
     )
   }
