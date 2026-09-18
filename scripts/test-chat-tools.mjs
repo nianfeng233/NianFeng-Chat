@@ -1053,6 +1053,91 @@ async function main() {
     }
   }
 
+
+  console.log('\n⑩h4 群聊发言人身份标识：不同成员不能混成同一个人')
+  {
+    const previousGroupOwnerId = config.get('chat.userId', '')
+    config.set('chat.userId', '10001')
+    const roleId = 'role-group-identity'
+    const convGroupIdentity = sessions.create({
+      name: '群聊身份标识测试',
+      meta: { roleId, channelType: 'napcat', channelGroup: 'group', contextMode: 'channel-only', contextMessages: 10 },
+    })
+    sessions.activate(convGroupIdentity.id)
+    const channelGroupIdentity = store.channelForConversation(convGroupIdentity.id)
+    const appendGroupUser = (nickname, card, qq, text) =>
+      store.append(convGroupIdentity.id, {
+        role: 'user',
+        content: text,
+        source: 'napcat',
+        sender_id: `qq:${qq}`,
+        sender_name: `群123 · ${card} · ${nickname} · QQ${qq}`,
+        meta: {
+          messageType: 'group',
+          groupId: '123',
+          senderId: qq,
+          senderNickname: nickname,
+          senderCard: card,
+          senderRole: 'member',
+        },
+      })
+    appendGroupUser('甲甲', '甲', '10001', '甲说的话')
+    appendGroupUser('乙乙', '乙', '10002', '乙说的话')
+    const currentGroupMessage = appendGroupUser('丙丙', '丙', '10003', '丙说的话')
+    const builtGroupIdentity = builder.build({
+      conversationId: convGroupIdentity.id,
+      roleId,
+      persona: '',
+      channelId: channelGroupIdentity.channelId,
+      currentMessageId: currentGroupMessage.message_id,
+    })
+    const groupPayloads = builtGroupIdentity.messages
+      .filter(message => message.role === 'user')
+      .map(message => JSON.parse(String(message.content)))
+    const payloadWithText = text => groupPayloads.find(payload => payload?.content?.text?.includes(text))
+    const firstGroupPayload = payloadWithText('甲说的话')
+    const secondGroupPayload = payloadWithText('乙说的话')
+    const currentGroupPayload = groupPayloads.find(payload => payload?.meta?.is_current_request === true)
+    check(
+      '群聊每条 user 消息正文前置【发言人：昵称（QQ号）】',
+      firstGroupPayload?.content?.text?.startsWith('【发言人：甲（QQ10001），主人本人】') &&
+        secondGroupPayload?.content?.text?.startsWith('【发言人：乙（QQ10002）】'),
+      JSON.stringify([firstGroupPayload?.content?.text, secondGroupPayload?.content?.text]),
+    )
+    check(
+      '群聊发言人元数据使用简洁昵称而不是整段渠道 sender_name',
+      firstGroupPayload?.meta?.user_name === '甲' &&
+        firstGroupPayload?.meta?.user_id === '10001' &&
+        firstGroupPayload?.meta?.speaker_label === '甲（QQ10001）' &&
+        firstGroupPayload?.meta?.group_id === '123',
+      JSON.stringify(firstGroupPayload?.meta),
+    )
+    check(
+      '当前请求标为【本轮发言人】',
+      currentGroupPayload?.meta?.is_current_request === true &&
+        currentGroupPayload?.content?.text?.startsWith('【本轮发言人：丙（QQ10003）】'),
+      JSON.stringify({ meta: currentGroupPayload?.meta, text: currentGroupPayload?.content?.text }),
+    )
+    check(
+      'content.speaker 保留可核对的独立身份',
+      firstGroupPayload?.content?.speaker?.id === '10001' && secondGroupPayload?.content?.speaker?.id === '10002',
+      JSON.stringify([firstGroupPayload?.content?.speaker, secondGroupPayload?.content?.speaker]),
+    )
+    check(
+      '只有与主人标识匹配的发言人才标 is_owner',
+      firstGroupPayload?.meta?.is_owner === true &&
+        firstGroupPayload?.content?.speaker?.is_owner === true &&
+        secondGroupPayload?.meta?.is_owner === undefined &&
+        currentGroupPayload?.meta?.is_owner === undefined,
+      JSON.stringify({
+        first: firstGroupPayload?.meta,
+        second: secondGroupPayload?.meta,
+        current: currentGroupPayload?.meta,
+      }),
+    )
+    config.set('chat.userId', previousGroupOwnerId)
+  }
+
   console.log('\n⑩h2 入站 imageId 在无 FileReader 的代聊环境也要能进入模型上下文')
   const hydrationPng =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
