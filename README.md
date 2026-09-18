@@ -13,7 +13,7 @@
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
 > 项目状态：仍处于快速迭代期，`v1.x` 版本号只表示功能里程碑，不代表生产级成熟度或安全审计结论。默认仅监听本机；如需开放监听或部署到公网，请先阅读「安全与隐私」并设置访问令牌。
 
-- 当前版本：v2.0.1
+- 当前版本：v2.0.2
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 - 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
 - 官方 QQ 群：1109357470

@@ -38,6 +38,12 @@ export function apply(ctx, config = {}) {
   const instance = ctx.instance
   const hub = ctx.hub
   const builtinDir = resolve(config.builtinDir || join(process.cwd(), 'plugins'))
+  const appVersion = String(config.appVersion || '').trim()
+  const appMajor = (() => {
+    const parsed = Number.parseInt(String(appVersion).split('.')[0], 10)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 2
+  })()
+  const legacyReasonFor = version => `插件版本 ${version} 未适配念风 ${appMajor}.x，需升级到 ${appMajor}.x 兼容版本`
 
   let builtinEntries = null
   let snapshot = null
@@ -124,11 +130,16 @@ export function apply(ctx, config = {}) {
     const base = { external: true, source: 'external', path: urlPath, dir: folder, __file: file }
     try {
       const mod = await import(pathToFileURL(file).href + '?v=' + revision)
+      const pluginVersion = mod.version || '0.0.0'
+      const pluginMajor = Number.parseInt(String(pluginVersion).split('.')[0], 10)
+      const legacy = !Number.isFinite(pluginMajor) || pluginMajor < appMajor
       return {
         ...base,
         id: mod.name || folder || relFile,
         name: mod.name || folder || relFile,
-        version: mod.version || '0.0.0',
+        version: pluginVersion,
+        legacy,
+        legacyReason: legacy ? legacyReasonFor(pluginVersion) : '',
         displayName: mod.displayName || mod.name || folder || relFile,
         description: mod.description || '',
         author: mod.author || '',

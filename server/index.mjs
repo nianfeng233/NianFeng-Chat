@@ -265,7 +265,7 @@ export async function startBackend({
     [hubPlugin, {}],
     [modelsPlugin, {}],
     [instancePlugin, paths],
-    [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins') }],
+    [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins'), appVersion: pkg.version }],
     [
       httpPlugin,
       {

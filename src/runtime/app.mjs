@@ -20,7 +20,7 @@ import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.0.1'
+export const VERSION = '2.0.2'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -418,6 +418,7 @@ export class App {
         continue
       }
       const previousPath = record.path
+      const wasLegacy = !!record.manifest?.legacy
       record.entry = entry
       record.path = entry.path
       record.external = !!entry.external
@@ -425,6 +426,7 @@ export class App {
       const preservedRemoved = !!record.manifest.removed
       record.manifest = this.manifestFromEntry(entry, record.manifest)
       record.manifest.removed = preservedRemoved || this.removedIds.has(id)
+      const becameLegacy = !wasLegacy && !!record.manifest.legacy
       if (entry.error) {
         await this.disposeRecord(record)
         record.module = null
@@ -433,7 +435,9 @@ export class App {
         record.reason = `模块导入失败：${entry.error}`
         continue
       }
-      if (previousPath && previousPath !== entry.path) {
+      // 代码文件变化（外部插件 path 带 mtime）或清单从兼容变为旧版不兼容时，
+      // 都先释放旧实例再重新判定，避免旧版插件继续以“正常”状态运行。
+      if (previousPath && (previousPath !== entry.path || becameLegacy)) {
         await this.disposeRecord(record)
         record.module = null
         record.status = STATUS.PENDING
@@ -563,6 +567,8 @@ export class App {
       ...base,
       name: id || base.name,
       version: pick(entry.version, base.version) || '0.0.0',
+      legacy: entry.legacy !== undefined ? !!entry.legacy : !!base.legacy,
+      legacyReason: pick(entry.legacyReason, base.legacyReason) || '',
       displayName: pick(entry.displayName, base.displayName) || id,
       description: pick(entry.description, base.description) || '',
       author: pick(entry.author, base.author) || '',
@@ -675,6 +681,13 @@ export class App {
         record.reloadPending = false
       }
       if (record.status !== STATUS.PENDING) continue
+      const compatibilityIssues = this.compatibilityIssues(record)
+      if (compatibilityIssues.length) {
+        record.status = STATUS.INACTIVE
+        record.reason = `不兼容：${compatibilityIssues.join('、')}`
+        this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: compatibilityIssues })
+        continue
+      }
       const hardIssues = this.hardDependsIssues(record)
       if (hardIssues.length) {
         record.status = STATUS.INACTIVE
@@ -895,6 +908,13 @@ export class App {
     return this.dependsIssuesFor(record, record.manifest.optionalDepends || {})
   }
 
+  /** 运行环境兼容性：外部插件主版本必须与当前内核主版本一致。 */
+  compatibilityIssues(record) {
+    if (!record?.manifest?.legacy) return []
+    const reason = record.manifest.legacyReason || `外部插件版本 ${record.manifest.version || '0.0.0'} 未适配当前内核`
+    return [reason]
+  }
+
   /** 硬依赖问题：缺失 / 加载失败 / 未激活 / 版本不匹配；后几类都会阻止插件激活。 */
   hardDependsIssues(record) {
     const issues = []
@@ -1076,6 +1096,14 @@ export class App {
         return false
       }
 
+      const compatibilityIssues = this.compatibilityIssues(record)
+      if (compatibilityIssues.length) {
+        record.status = STATUS.INACTIVE
+        record.reason = `不兼容：${compatibilityIssues.join('、')}`
+        this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: compatibilityIssues })
+        this.emit('plugin:enabled', { id })
+        return false
+      }
       const depIssues = this.hardDependsIssues(record)
       if (depIssues.length) {
         record.status = STATUS.INACTIVE
@@ -1169,6 +1197,9 @@ export class App {
         path: record.path,
         status: record.status,
         reason: record.reason,
+        legacy: !!record.manifest.legacy,
+        legacyReason: record.manifest.legacyReason || '',
+        compatibilityIssues: this.compatibilityIssues(record),
         error: record.error ? String(record.error.message || record.error) : null,
         conflict: !!record.conflict,
         started: record.started,
@@ -1259,17 +1290,22 @@ export class App {
         push(id, 'error', `服务冲突：${record.reason}`, '另一个插件已经注册了同名 singleton 服务')
       }
       if (record.status === STATUS.INACTIVE) {
-        const hasHardDependencyIssue = dependencyReport.some(
-          item => item.required && item.status !== 'ok' && item.status !== 'pending',
-        )
-        if (!hasHardDependencyIssue) {
-          const missing = this.missingDeps(record)
-          push(
-            id,
-            'error',
-            `缺少依赖：${missing.join('、') || record.reason || '依赖未就绪'}`,
-            '检查依赖插件是否安装、启用或加载成功，或服务注入名是否正确',
+        const compatibilityIssues = this.compatibilityIssues(record)
+        if (compatibilityIssues.length) {
+          push(id, 'error', compatibilityIssues.join('、'), '请把外部插件升级到当前内核主版本对应的 2.x 版本')
+        } else {
+          const hasHardDependencyIssue = dependencyReport.some(
+            item => item.required && item.status !== 'ok' && item.status !== 'pending',
           )
+          if (!hasHardDependencyIssue) {
+            const missing = this.missingDeps(record)
+            push(
+              id,
+              'error',
+              `缺少依赖：${missing.join('、') || record.reason || '依赖未就绪'}`,
+              '检查依赖插件是否安装、启用或加载成功，或服务注入名是否正确',
+            )
+          }
         }
       }
       if (record.status !== STATUS.ACTIVE) continue
@@ -1438,6 +1474,8 @@ function collectManifest(mod, entry) {
   return {
     name: mod.name || entry.id || entry.dir || 'unknown',
     version: mod.version || entry.version || '0.0.0',
+    legacy: entry.legacy !== undefined ? !!entry.legacy : false,
+    legacyReason: entry.legacyReason || '',
     displayName: mod.displayName || mod.name || entry.id,
     description: mod.description || entry.description || '',
     author: mod.author || entry.author || '',

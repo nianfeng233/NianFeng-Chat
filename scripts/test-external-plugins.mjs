@@ -63,6 +63,23 @@ for (const entry of external) {
   check(`扩展「${entry.id}」在 WebUI scope 激活`, record?.status === 'active', record?.reason || '未加载')
 }
 
+// 外部插件热更新回归：旧实例的工具 / 事件 / 面板注册必须随 fiber 释放，
+// 否则新实例 apply 时会命中“工具已注册”而整批变红。
+const toolsService = app.services.get('tool-registry')?.value
+const toolCountBefore = toolsService?.names?.().length || 0
+const updated = external.map(entry => ({ ...entry, path: `${entry.path}?__hot_test=2` }))
+await app.syncEntries([...builtin, ...updated], { scope: 'webui', reason: 'external-hot-update-test' })
+for (const entry of external) {
+  const record = app.get(entry.id)
+  check(`扩展「${entry.id}」热更新后仍激活`, record?.status === 'active', record?.reason || '未加载')
+}
+const toolCountAfter = toolsService?.names?.().length || 0
+check(
+  '热更新后工具注册数量没有重复膨胀',
+  toolCountBefore > 0 && toolCountAfter === toolCountBefore,
+  `${toolCountBefore} -> ${toolCountAfter}`,
+)
+
 try {
   await app.cordis.stop?.()
 } catch (_) {

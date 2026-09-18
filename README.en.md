@@ -18,7 +18,7 @@ a Windows desktop application.
 > security audit. It listens on localhost by default; before exposing it beyond localhost, read
 > “Security and Privacy” and configure an access token.
 
-- Current version: v2.0.1
+- Current version: v2.0.2
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470

@@ -114,6 +114,8 @@ export function apply(ctx) {
         const own = issuesOf(plugin.id, list)
         const ownWarning = own.some(i => i.severity === 'warning' || i.severity === 'error')
         const recordWarning = (plugin.warnings || []).some(item => item?.severity && item.severity !== 'info')
+        // 旧版外部插件主版本与内核不一致：明确标红，不再伪装成“正常”。
+        if (plugin.legacy) return 'error'
         if (plugin.status === 'error' || plugin.conflict || own.some(i => i.severity === 'error')) return 'error'
         // 用户主动禁用的插件保持灰色，不因为它的依赖当前未启用而虚报红/黄。
         if (plugin.status === 'disabled') return 'disabled'
@@ -132,6 +134,7 @@ export function apply(ctx) {
       }
 
       const tagOf = (plugin, severity) => {
+        if (plugin.legacy) return '<span class="plugin-tag error">旧版不兼容</span>'
         if (plugin.conflict) return '<span class="plugin-tag error">服务冲突</span>'
         if (plugin.status === 'disabled') {
           const tag = STATUS_TAG.disabled
@@ -164,7 +167,8 @@ export function apply(ctx) {
         const own = issuesOf(plugin.id, list)
         const depIssues = plugin.status === 'disabled' ? [] : dependencyIssuesOf(plugin)
         const lines = []
-        if (plugin.status === 'error') lines.push(`<div class="plugin-issue error">✕ 运行失败：${escapeHtml(plugin.error || plugin.reason || '未知错误')}</div>`)
+        if (plugin.legacy) lines.push(`<div class="plugin-issue error">✕ ${escapeHtml(plugin.legacyReason || '旧版插件未适配当前内核，请升级到 2.x 兼容版本')}</div>`)
+        else if (plugin.status === 'error') lines.push(`<div class="plugin-issue error">✕ 运行失败：${escapeHtml(plugin.error || plugin.reason || '未知错误')}</div>`)
         else if (plugin.conflict) lines.push(`<div class="plugin-issue error">✕ 冲突：${escapeHtml(plugin.reason || '服务被占用')}</div>`)
         else if (plugin.status === 'inactive') {
           const cls = hasRequiredDependencyIssue(plugin) ? 'error' : 'warning'
@@ -271,7 +275,7 @@ export function apply(ctx) {
         const third = sortList(list.filter(p => !p.core && !p.external && !p.removed), issueList)
         const core = sortList(list.filter(p => p.core), issueList)
         const errorCount = list.filter(
-          p => p.status === 'error' || p.conflict || (p.status !== 'disabled' && p.dependencyHealth === 'error'),
+          p => p.legacy || p.status === 'error' || p.conflict || (p.status !== 'disabled' && p.dependencyHealth === 'error'),
         ).length
 
         summaryEl.innerHTML = `

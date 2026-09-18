@@ -319,7 +319,7 @@ async function main() {
     join(externalRoot, 'views', 'smoke-external', 'index.mjs'),
     [
       "export const name = 'smoke-external'",
-      "export const version = '1.0.0'",
+      "export const version = '2.0.0'",
       "export const displayName = '冒烟外部插件'",
       "export const description = '验证外部插件目录'",
       'export const core = false',
@@ -365,7 +365,7 @@ async function main() {
     providerFile,
     [
       "export const name = 'smoke-dep-provider'",
-      "export const version = '1.0.0'",
+      "export const version = '2.0.0'",
       "export const displayName = '版本依赖提供者'",
       "export const provides = [{ name: 'bubble-default', type: 'singleton' }]",
       'export function apply(ctx) { ctx.provide("bubble-default", { name: "smoke-dep-provider" }) }',
@@ -377,7 +377,7 @@ async function main() {
     versionFile,
     [
       "export const name = 'smoke-version'",
-      "export const version = '1.0.0'",
+      "export const version = '2.0.0'",
       "export const displayName = '版本不匹配插件'",
       "export const depends = { 'smoke-dep-provider': '^99.0.0' }",
       'export function apply() {}',
@@ -388,8 +388,8 @@ async function main() {
   const versionApp = new App({ baseUrl: new URL('../', import.meta.url) })
   await versionApp.loadAll(
     [
-      { id: 'smoke-dep-provider', version: '1.0.0', displayName: '版本依赖提供者', path: pathToFileURL(providerFile).href, external: true },
-      { id: 'smoke-version', version: '1.0.0', displayName: '版本不匹配插件', path: pathToFileURL(versionFile).href, external: true },
+      { id: 'smoke-dep-provider', version: '2.0.0', displayName: '版本依赖提供者', path: pathToFileURL(providerFile).href, external: true },
+      { id: 'smoke-version', version: '2.0.0', displayName: '版本不匹配插件', path: pathToFileURL(versionFile).href, external: true },
     ],
     {},
   )
@@ -413,7 +413,7 @@ async function main() {
     softFile,
     [
       "export const name = 'smoke-soft'",
-      "export const version = '1.0.0'",
+      "export const version = '2.0.0'",
       "export const displayName = '可选依赖插件'",
       "export const optionalDepends = { 'smoke-soft-missing': '^1.0.0' }",
       'export function apply() {}',
@@ -425,7 +425,7 @@ async function main() {
     hardFile,
     [
       "export const name = 'smoke-hard'",
-      "export const version = '1.0.0'",
+      "export const version = '2.0.0'",
       "export const displayName = '缺失必须依赖插件'",
       "export const depends = { 'smoke-hard-missing': '^1.0.0' }",
       'export function apply() {}',
@@ -436,8 +436,8 @@ async function main() {
   const depApp = new App({ baseUrl: new URL('../', import.meta.url) })
   await depApp.loadAll(
     [
-      { id: 'smoke-soft', version: '1.0.0', displayName: '可选依赖插件', path: pathToFileURL(softFile).href, external: true },
-      { id: 'smoke-hard', version: '1.0.0', displayName: '缺失必须依赖插件', path: pathToFileURL(hardFile).href, external: true },
+      { id: 'smoke-soft', version: '2.0.0', displayName: '可选依赖插件', path: pathToFileURL(softFile).href, external: true },
+      { id: 'smoke-hard', version: '2.0.0', displayName: '缺失必须依赖插件', path: pathToFileURL(hardFile).href, external: true },
     ],
     {},
   )

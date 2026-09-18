@@ -455,6 +455,18 @@ async function main() {
     const installedFile = await readFile(join(externalRoot, 'demo-plugin', 'index.mjs'), 'utf8').catch(() => '')
     check('插件文件写入外部插件目录', installedFile.includes("name = 'demo-plugin'"), installedFile.slice(0, 60))
 
+    const legacyZip = makeZip([
+      { name: 'legacy-plugin/index.mjs', data: "export const name = 'legacy-plugin'\nexport const version = '1.0.0'\nexport function apply() {}\n" },
+      { name: 'legacy-plugin/manifest.json', data: '{"id":"legacy-plugin","name":"legacy-plugin","version":"1.0.0"}' },
+    ])
+    const legacyInstall = await uploadJsonRequest({ filename: 'legacy-plugin.zip', data: legacyZip.toString('base64') })
+    const legacyEntry = (legacyInstall.data?.plugins || []).find(item => item.id === 'legacy-plugin')
+    check(
+      '旧版外部插件被登记为 legacy（主版本低于内核）',
+      legacyInstall.status === 200 && legacyEntry?.legacy === true && /1\.0\.0/.test(legacyEntry?.legacyReason || ''),
+      JSON.stringify(legacyEntry),
+    )
+
     const again = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64') })
     check('同名插件默认拒绝覆盖（409）', again.status === 409, JSON.stringify(again.data))
     const overwrite = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64'), overwrite: true })

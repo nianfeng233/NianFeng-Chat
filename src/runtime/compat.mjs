@@ -273,15 +273,27 @@ export function createCompat(app, ctx, { id, meta = {} } = {}) {
 
     /* -------------------- 生命周期 -------------------- */
     /**
-     * 念风的语义：ctx.effect(fn) 表示"把 fn 注册为卸载时的清理函数"。
-     * cordis 原生语义是 effect(execute)：立即执行 execute 并注册其返回值。
-     * 这里统一成念风的语义，并包一层错误兜底。
+     * 念风插件里同时存在两种清理写法：
+     *   1. ctx.effect(cleanup)                     // 直接传清理函数
+     *   2. ctx.effect(() => cleanup)               // cordis 原生 execute 写法
+     * 旧实现只调用 `fn()`，写法 2 返回的 cleanup 永远不会被执行，导致热更新时
+     * 工具 / 设置页 / 事件监听残留，出现“工具已注册”等重复注册错误。
+     * 这里在卸载时调用 fn，并把 fn 返回的函数 / Promise<函数> 也继续执行。
      */
     effect(fn) {
       if (typeof fn !== 'function') return () => {}
+      const runCleanup = result => {
+        if (typeof result === 'function') return result()
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).then(disposer => {
+            if (typeof disposer === 'function') return disposer()
+          })
+        }
+        return undefined
+      }
       return ctx.effect(() => () => {
         try {
-          fn()
+          return runCleanup(fn())
         } catch (err) {
           app.reportError(err, { plugin: overrides.id, event: 'effect' })
         }

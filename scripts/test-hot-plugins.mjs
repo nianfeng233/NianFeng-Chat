@@ -172,6 +172,39 @@ async function main() {
         optionalRecord?.dependencyIssues?.every(item => !item.required || item.severity !== 'error'),
       JSON.stringify({ status: optionalRecord?.status, health: optionalRecord?.dependencyHealth }),
     )
+
+    console.log('\n⑧ ctx.effect(() => () => cleanup) 在热更新时必须执行旧实例清理')
+    globalThis.__nfHotEffectCleanup = 0
+    const effectPlugin = (version) =>
+      writePlugin(root, {
+        id: 'hot-effect',
+        version,
+        source: 'ctx.effect(() => () => { globalThis.__nfHotEffectCleanup += 1 })',
+      })
+    await app.syncEntries([await effectPlugin('2.0.0')], state())
+    check('带 effect 清理的插件首次激活', app.get('hot-effect')?.status === 'active', app.get('hot-effect')?.reason || '')
+    check('首次加载不会误执行清理', globalThis.__nfHotEffectCleanup === 0, String(globalThis.__nfHotEffectCleanup))
+    await app.syncEntries([await effectPlugin('2.1.0')], state())
+    check('热更新后旧实例清理函数被执行', globalThis.__nfHotEffectCleanup === 1, String(globalThis.__nfHotEffectCleanup))
+    check('热更新后插件仍 active', app.get('hot-effect')?.status === 'active', app.get('hot-effect')?.reason || '')
+
+    console.log('\n⑨ 外部插件主版本低于内核时必须标红且不激活')
+    const oldUi = await writePlugin(root, { id: 'hot-old-ui', version: '1.0.0' })
+    oldUi.legacy = true
+    oldUi.legacyReason = '插件版本 1.0.0 未适配念风 2.x，需升级到 2.x 兼容版本'
+    await app.syncEntries([oldUi], state())
+    await wait(100)
+    const oldRecord = app.list().find(record => record.id === 'hot-old-ui')
+    check(
+      '旧版外部插件不会激活',
+      oldRecord?.status === 'inactive' && oldRecord?.legacy === true && /1\.0\.0/.test(oldRecord?.reason || ''),
+      JSON.stringify({ status: oldRecord?.status, reason: oldRecord?.reason }),
+    )
+    check(
+      '旧版外部插件在自检中标记为 error',
+      app.selfCheck().some(issue => issue.id === 'hot-old-ui' && issue.severity === 'error'),
+      JSON.stringify(app.selfCheck().filter(issue => issue.id === 'hot-old-ui')),
+    )
   } finally {
     try {
       await app.cordis.stop?.()
