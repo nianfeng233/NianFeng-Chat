@@ -41,7 +41,7 @@ export function apply(ctx) {
     render(container) {
       const render = () => {
         const stats = manager.stats()
-        const appVersion = ctx.registry.get('app')?.version || '0.42.0'
+        const appVersion = ctx.registry.get('app')?.version || '2.0.0'
         const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
         container.innerHTML = page('关于', '念风：本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）。', `
           ${section('', `<div class="settings-card" style="padding:22px">
@@ -50,6 +50,7 @@ export function apply(ctx) {
                 <div>
                   <div class="setting-name" style="font-size:15px">念风chat</div>
                   <div class="about-version">NianFeng-Chat · Version ${escapeHtml(appVersion)} · 插件化架构</div>
+                    <div class="about-version">后端终端为业务本体；WebUI 加载视觉与操作插件，业务执行由后端常驻代聊处理。</div>
                     <div class="about-version">本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）</div>
                 </div>
               </div>

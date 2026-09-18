@@ -1323,7 +1323,9 @@ async function main() {
   // 模型设置页反复刷新回归：select 同一个模型不应该反复写 selectable 配置。
   const modelRegistry = ctx.inject('model-registry')
   const eventBusForModel = ctx.inject('event-bus')
-  const activeModelKey = modelRegistry?.activeKey?.()
+  // UI 点击处理是异步的：等 provider/enabled 写回后的 adapter.sync 完成，
+  // 再断言“重复选择当前模型不会反复写配置”，避免与后端事件赛跑。
+  const activeModelKey = await waitFor(() => modelRegistry?.activeKey?.(), { timeout: 5000 })
   if (activeModelKey) {
     let modelPrefWrites = 0
     const offConfigWatch = eventBusForModel.on('config:changed', payload => {

@@ -143,6 +143,9 @@ export function apply(ctx, config = {}) {
         provides: mod.provides || [],
         permissions: mod.permissions || [],
         slots: mod.slots || [],
+        // 运行范围：external 插件可通过 export const scope = 'server'|'webui'|'both'
+        // 声明；默认 both，保持旧插件兼容。
+        scope: mod.scope || mod.runtime || 'both',
         error: '',
       }
     } catch (err) {

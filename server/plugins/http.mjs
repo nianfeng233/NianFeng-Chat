@@ -9,11 +9,12 @@
  * 路由全部显式声明，不依赖任何 Web 框架。
  */
 import { createServer } from 'node:http'
-import { readFile, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { extname, join, resolve } from 'node:path'
 import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { timingSafeStringEqual, isInsideDir, isSensitiveStaticPath } from '../security-utils.mjs'
 import { fetchPublicText } from '../net-guard.mjs'
+import { serveStaticFile, isVersionedRequest } from '../static-cache.mjs'
 
 export const name = 'http'
 export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry']
@@ -322,6 +323,15 @@ export function apply(ctx, config = {}) {
 
   const routes = []
   const route = (method, pattern, handler) => {
+    // 热重载同一插件的 bridge 时会重新注册相同 method + pattern：
+    // 直接替换旧 entry 的 handler，避免旧 handler（已 close 的数据库等）
+    // 继续命中请求，出现“读取正常、写入 database is not open”这类问题。
+    const existing = routes.find(item => item.method === method && item.pattern === pattern)
+    if (existing) {
+      existing.handler = handler
+      existing.version = (Number(existing.version) || 0) + 1
+      return existing
+    }
     const keys = []
     const regex = new RegExp(
       '^' +
@@ -333,7 +343,7 @@ export function apply(ctx, config = {}) {
           .replace(/\//g, '\\/') +
         '$',
     )
-    const entry = { method, regex, keys, handler }
+    const entry = { method, pattern, regex, keys, handler, version: 1 }
     routes.push(entry)
     return entry
   }
@@ -369,7 +379,11 @@ export function apply(ctx, config = {}) {
   const httpApi = {
     route: (method, pattern, handler) => {
       const entry = register(method, pattern, handler)
+      const version = entry.version
       return () => {
+        // 只有当前 entry 仍然是本次注册的 handler 时才移除；
+        // 已被热重载新 bridge 替换过的旧 route，dispose 不能误删新 handler。
+        if (!routes.includes(entry) || entry.handler !== handler || entry.version !== version) return
         const index = routes.indexOf(entry)
         if (index >= 0) routes.splice(index, 1)
       }
@@ -659,6 +673,66 @@ export function apply(ctx, config = {}) {
     })
   })
 
+  /* ---------------- 服务端代聊：WebUI ↔ 后端终端 ---------------- */
+
+  /**
+   * WebUI 不再在浏览器里执行 chat-flow / 工具 / 记忆 / 上下文；
+   * 所有消息统一通过这里交给后端常驻代聊 Worker 处理。
+   */
+  route('POST', '/api/agent/send', async (req, res) => {
+    const body = await readBody(req, 256 * 1024)
+    const conversationId = String(body?.conversationId || '').trim()
+    const text = String(body?.text || '')
+    const images = Array.isArray(body?.images)
+      ? body.images
+          .map(item => (typeof item === 'string' ? item : item?.id || item?.imageId || ''))
+          .map(id => String(id || '').trim())
+          .filter(Boolean)
+          .slice(0, 4)
+      : []
+    if (!conversationId || (!text.trim() && !images.length)) {
+      return sendError(res, 400, '缺少 conversationId 或消息内容')
+    }
+    const payload = {
+      id: `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      conversationId,
+      clientId: String(body?.clientId || '').slice(0, 120),
+      text: text.slice(0, 200000),
+      images,
+      userId: String(body?.userId || 'web-user').slice(0, 120),
+      userName: String(body?.userName || '用户').slice(0, 120),
+      at: Date.now(),
+    }
+    hub.broadcast('agent/send', payload)
+    sendJson(res, 200, { ok: true, id: payload.id, queued: true })
+  })
+
+  /** 代聊 Worker 上报轮次状态，WebUI 据此同步输入框的“生成中 / 结束”。 */
+  route('POST', '/api/agent/status', async (req, res) => {
+    const body = await readBody(req, 64 * 1024)
+    const conversationId = String(body?.conversationId || '').trim()
+    if (!conversationId) return sendError(res, 400, '缺少 conversationId')
+    const rawStatus = String(body?.status || 'done')
+    const status = ['start', 'done', 'error'].includes(rawStatus) ? rawStatus : 'done'
+    hub.broadcast('agent/status', {
+      conversationId,
+      clientId: String(body?.clientId || '').slice(0, 120),
+      status,
+      detail: String(body?.detail || '').slice(0, 500),
+      at: Date.now(),
+    })
+    sendJson(res, 200, { ok: true })
+  })
+
+  /** WebUI 停止生成：转成 agent/cancel，由 Worker 终止对应会话。 */
+  route('POST', '/api/agent/cancel', async (req, res) => {
+    const body = await readBody(req, 16 * 1024)
+    const conversationId = String(body?.conversationId || '').trim()
+    if (!conversationId) return sendError(res, 400, '缺少 conversationId')
+    hub.broadcast('agent/cancel', { conversationId, clientId: String(body?.clientId || '').slice(0, 120), at: Date.now() })
+    sendJson(res, 200, { ok: true })
+  })
+
   /* ---------------- 会话 ---------------- */
 
   route('GET', '/api/sessions', async (req, res, params, url) => {
@@ -827,13 +901,14 @@ export function apply(ctx, config = {}) {
       }
       const fileInfo = await stat(target)
       if (!fileInfo.isFile()) return false
-      const body = await readFile(target)
-      res.writeHead(200, {
-        'Content-Type': MIME[extname(target).toLowerCase()] || 'application/octet-stream',
-        'Cache-Control': 'no-store',
+      // index.html 永远 no-cache；带 ?v= 的插件 / 资源用 immutable；
+      // 其它源码走 no-cache + ETag，命中 304 后不再重新传输整包。
+      const html = extname(target).toLowerCase() === '.html'
+      return await serveStaticFile(req, res, target, {
+        mime: MIME,
+        immutable: !html && isVersionedRequest(req),
+        cacheControl: html ? 'no-cache, no-store, must-revalidate' : undefined,
       })
-      res.end(body)
-      return true
     } catch (_) {
       return false
     }
@@ -923,12 +998,12 @@ export function apply(ctx, config = {}) {
       if (rawPathname.startsWith('/user-plugins/')) {
         const hit = await ctx.pluginRegistry.readExternalFile(rawPathname.slice('/user-plugins/'.length))
         if (!hit) return sendError(res, 404, '插件资源不存在')
-        const body = await readFile(hit.file)
-        res.writeHead(200, {
-          'Content-Type': MIME[hit.ext] || 'application/octet-stream',
-          'Cache-Control': 'no-store',
+        // 外部插件 URL 本身带 ?v=mtime，可以长期强缓存；换版本时 URL 会变化。
+        await serveStaticFile(req, res, hit.file, {
+          mime: MIME,
+          immutable: true,
+          headers: { 'Cross-Origin-Resource-Policy': 'same-origin' },
         })
-        res.end(body)
         return
       }
 

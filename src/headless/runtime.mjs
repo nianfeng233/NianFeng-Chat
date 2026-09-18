@@ -67,12 +67,81 @@ export async function startHeadlessRuntime(options = {}) {
     }
   }
 
-  const { app, ctx } = await import('../main.mjs').then(module => module.boot())
+  const mainModule = await import('../main.mjs')
+  const { app, ctx } = await mainModule.boot({ awaitRemote: true })
   appRef = app
+  // 父进程（start.mjs）在插件清单变化时只发消息，不再重启 Worker：
+  // 这里直接走运行期热同步，QQ / NapCat 代聊不中断。
+  parentPort?.on('message', message => {
+    if (message?.type !== 'plugins-changed') return
+    Promise.resolve(mainModule.scheduleRemotePluginSync(app, { delay: 60, reason: message.payload?.action || 'parent' })).catch(err =>
+      console.warn('[headless] 插件热同步失败：', err?.message || err),
+    )
+  })
   const api = ctx.inject('api')
   if (api?.health) await api.health().catch(() => {})
   const flow = ctx.inject('chat-flow')
   const flowMode = flow?.mode?.() || 'unknown'
+
+  /**
+   * WebUI → 后端终端代聊的桥：
+   *   - 浏览器 POST /api/agent/send 后，后端广播 agent/send；
+   *   - 这里把它转成 Worker 内部的 message:send，由 chat-flow 正常执行；
+   *   - chat-flow 的 request-start / request-done 再上报 /agent/status，
+   *     让浏览器输入框同步“生成中 / 完成”。
+   */
+  const agentEvents = ctx.inject('event-bus')
+  const pendingClientIds = new Map()
+  const reportAgentStatus = (conversationId, status, detail = '') => {
+    const id = String(conversationId || '')
+    if (!id) return
+    const clientId = pendingClientIds.get(id) || ''
+    fetch(`${backendUrl}/agent/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: id, clientId, status, detail }),
+    })
+      .then(() => {
+        if (status === 'done' || status === 'error') pendingClientIds.delete(id)
+      })
+      .catch(() => {})
+  }
+  if (agentEvents?.on) {
+    agentEvents.on('backend:event', payload => {
+      const { event, data } = payload || {}
+      if (event === 'agent/send' && data?.conversationId) {
+        const conversationId = String(data.conversationId)
+        if (data.clientId) pendingClientIds.set(conversationId, String(data.clientId))
+        agentEvents.emit('message:send', {
+          conversationId,
+          text: String(data.text || ''),
+          images: (Array.isArray(data.images) ? data.images : []).map(id => ({ id: String(id || '') })).filter(item => item.id),
+          senderId: data.userId || 'web-user',
+          senderName: data.userName || '用户',
+          remoteHandled: true,
+        })
+        return
+      }
+      if (event === 'agent/cancel' && data?.conversationId) {
+        const conversationId = String(data.conversationId)
+        try {
+          flow?.abort?.(conversationId)
+        } catch (_) {
+          /* ignore */
+        }
+        reportAgentStatus(conversationId, 'done', '用户已停止生成')
+        return
+      }
+      if (event === 'chat/error' && pendingClientIds.size) {
+        for (const conversationId of [...pendingClientIds.keys()]) {
+          reportAgentStatus(conversationId, 'error', String(data?.detail || '模型调用失败').slice(0, 300))
+        }
+      }
+    })
+    agentEvents.on('chat:request-start', payload => reportAgentStatus(payload?.conversationId, 'start'))
+    agentEvents.on('chat:request-done', payload => reportAgentStatus(payload?.conversationId, 'done'))
+  }
+
   let sessionStatus = ctx.inject('session-service')?.status?.() || null
   // 后台代聊 Worker 的会话同步如果第一次没成功，这里在 ready 前再补一次；
   // 避免代聊运行在本地空会话上，导致 NapCat 新消息没有写进后端聊天记录。

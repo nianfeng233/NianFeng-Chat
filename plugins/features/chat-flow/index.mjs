@@ -394,7 +394,7 @@ export function apply(ctx) {
       if (entry.cancelled) throw err
       // 后端空回复重试已耗尽：不要再当致命错误，交给下面的空回复纠正循环。
       if (isEmptyResponseError(err)) {
-        ctx.logger.warn(`[chat-flow] 后端重试后仍为空回复，转入前端纠正：${err?.message || err}`)
+        ctx.logger.warn(`后端重试后仍为空回复，转入前端纠正：${err?.message || err}`)
         return { text: '', toolCalls: [], reasoning: '', finishReason: 'empty_response' }
       }
       const toolsPresent = Array.isArray(options.tools) && options.tools.length > 0
@@ -508,7 +508,7 @@ export function apply(ctx) {
       const message = error?.message || String(error)
       const timedOut = /timeout|超时|aborted.*timeout|ETIMEDOUT/i.test(message)
       ctx.inject('toast')?.error?.(`模型调用失败${timedOut ? '（请求超时）' : ''}：${message}`)
-      ctx.logger.error(`[chat-flow] 模型调用失败${timedOut ? '（请求超时，可在设置 → 网络调整超时时间）' : ''}`, error)
+      ctx.logger.error(`模型调用失败${timedOut ? '（请求超时，可在设置 → 网络调整超时时间）' : ''}`, error)
       // 外部渠道看不到网页 toast：把原始错误内容作为一条助手消息写回来源渠道。
       try {
         const channel = store?.channelForConversation?.(conversationId)
@@ -527,7 +527,7 @@ export function apply(ctx) {
           })
         }
       } catch (writeErr) {
-        ctx.logger?.warn?.(`[chat-flow] 写入渠道错误提示失败：${writeErr?.message || writeErr}`)
+        ctx.logger?.warn?.(`写入渠道错误提示失败：${writeErr?.message || writeErr}`)
       }
     }
   }
@@ -562,7 +562,7 @@ export function apply(ctx) {
     try {
       channel = store.channelForConversation(conversationId)
     } catch (err) {
-      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+      ctx.logger?.warn?.(`准备渠道记录失败，将继续本轮：${err?.message || err}`)
     }
     const channelId = channel?.channelId || store?.novaChannelId?.(conversationId) || `nova:web:${conversationId}`
     entry.channelId = channelId
@@ -581,7 +581,7 @@ export function apply(ctx) {
         identitySource: identity.source || 'local',
       }
     } catch (err) {
-      ctx.logger?.warn?.(`[chat-flow] 读取用户身份失败，将使用默认身份：${err?.message || err}`)
+      ctx.logger?.warn?.(`读取用户身份失败，将使用默认身份：${err?.message || err}`)
       who = {
         userId: config.get('chat.userId', 'web-user'),
         userName: resolveUserNickname(config),
@@ -668,11 +668,23 @@ export function apply(ctx) {
       entry.draftId = thinking?.id || null
 
       const persona = String(conv.meta?.persona || '').trim()
-      const base = builder.build({ conversationId, roleId, persona, channelId, currentMessageId: userMessage?.message_id || userMessage?.id || null })
+      const roleConv = sessions.get(roleId)
+      const personaName = String(roleConv?.name || roleConv?.meta?.roleName || conv.meta?.roleName || '').trim()
+      const channelRecord = store.channelRecord?.(channelId) || store.channelForConversation?.(conversationId)
+      const isGroup = channelRecord?.group === 'group'
+      const base = builder.build({
+        conversationId,
+        roleId,
+        persona,
+        personaName,
+        isGroup,
+        channelId,
+        currentMessageId: userMessage?.message_id || userMessage?.id || null,
+      })
       const options = toolOptions(conv)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
         warnedLegacyBackend = true
-        ctx.logger.warn('[chat-flow] 后端未上报 tools 能力（可能是未重启的旧进程），将按文本工具协议兼容运行')
+        ctx.logger.warn('后端未上报 tools 能力（可能是未重启的旧进程），将按文本工具协议兼容运行')
         ctx.inject('toast')?.warn?.('后端版本较旧，未包含工具调用支持：请用 stop / start 重启念风。当前会尝试文本协议兼容。')
       }
       const roundMessages = []
@@ -741,7 +753,7 @@ export function apply(ctx) {
           round,
         }
         ctx.logger.info(
-          `[chat-flow] 第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
+          `第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
             `工具 ${(result.toolCalls || []).length} 个 · 正文 ${String(result.text || '').length} 字 · 推理 ${String(result.reasoning || '').length} 字` +
             `${result.reason ? ` · finish=${result.reason}` : ''}`,
         )
@@ -755,12 +767,12 @@ export function apply(ctx) {
             roundTextual = true
             textualMode = true
             toolCalls = normalizeToolCalls(parsed)
-            ctx.logger.warn(`[chat-flow] 模型返回文本形式的工具调用，已兼容解析：${toolCalls.map(call => call.function.name).join(', ')}`)
+            ctx.logger.warn(`模型返回文本形式的工具调用，已兼容解析：${toolCalls.map(call => call.function.name).join(', ')}`)
             if (entry.draftId) removeDraft(entry, conversationId)
           } else if (tools.looksLikeToolMarkup?.(result.text)) {
             // 绝不把模型自创的工具标记展示给用户
             if (entry.draftId) removeDraft(entry, conversationId)
-            ctx.logger.warn('[chat-flow] 模型返回无法解析的工具标记，已拦截，不展示给用户')
+            ctx.logger.warn('模型返回无法解析的工具标记，已拦截，不展示给用户')
             ctx.inject('toast')?.warn?.('模型返回了无法解析的工具调用格式，已拦截。请确认模型支持 function calling，并重启后端后再试。')
             const notice = '（模型返回了无法解析的工具调用格式，已停止本轮。）'
             entry.finalWire = { role: 'assistant', content: notice }
@@ -793,10 +805,10 @@ export function apply(ctx) {
                   '不要只输出思考 / 解释 / 计划，也不要直接输出 assistant 正文。\n' +
                   '如果接口不支持原生 function calling，chat_send 请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
               })
-              ctx.logger.warn(`[chat-flow] 第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
+              ctx.logger.warn(`第 ${round} 轮为空回复，已发起第 ${emptyRetries}/${emptyRetryLimit} 次纠正`)
               continue
             }
-            ctx.logger.warn('[chat-flow] 模型连续返回空回复，本轮终止')
+            ctx.logger.warn('模型连续返回空回复，本轮终止')
             ctx.inject('toast')?.warn?.('模型连续返回空回复，本轮已停止。可重试、更换模型或查看运行日志。')
             const notice = '（模型连续返回空回复，本轮已停止。可重试、更换模型或查看运行日志。）'
             entry.finalWire = { role: 'assistant', content: notice }
@@ -840,7 +852,7 @@ export function apply(ctx) {
                 '这是强制工具回合：本轮工具列表只保留回复工具（或只接受文本工具协议），不要再尝试解释原因。\n' +
                 replyInstruction,
             })
-            ctx.logger.warn(`[chat-flow] 严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
+            ctx.logger.warn(`严格工具模式：第 ${toolRetries} 次纠正模型直接输出正文（已回传驳回原因与原文）`)
             continue
           }
           if (strict && toolRetries >= toolRetryLimit) {
@@ -860,7 +872,7 @@ export function apply(ctx) {
               entry,
             })
             if (fallbackOutput?.ok) {
-              ctx.logger.warn(`[chat-flow] 严格工具模式：模型未调用工具，已通过 chat_send 发送链兜底（已纠正 ${toolRetries} 次）`)
+              ctx.logger.warn(`严格工具模式：模型未调用工具，已通过 chat_send 发送链兜底（已纠正 ${toolRetries} 次）`)
               ctx.inject('toast')?.warn?.('模型未按工具协议返回，已按普通正文兜底发送。')
               entry.finalWire = {
                 role: 'assistant',
@@ -871,7 +883,7 @@ export function apply(ctx) {
               break
             }
             // chat_send 服务 / 权限异常时，退回 finalizeFallback，至少保证普通正文能发出。
-            ctx.logger.warn(`[chat-flow] 严格工具模式：chat_send 兜底失败，退回普通正文（${fallbackOutput?.error || '未知错误'}）`)
+            ctx.logger.warn(`严格工具模式：chat_send 兜底失败，退回普通正文（${fallbackOutput?.error || '未知错误'}）`)
             ctx.inject('toast')?.warn?.(`模型未按工具协议返回，兜底发送失败：${fallbackOutput?.error || '未知错误'}`)
             if (fallbackText) {
               entry.finalWire = {
@@ -915,7 +927,7 @@ export function apply(ctx) {
           const args = parseArgs(call.function.arguments)
           emitToolStatus(conversationId, call.function.name)
           const toolStartedAt = Date.now()
-          ctx.logger.info(`[chat-flow] 调用工具 ${call.function.name}：${JSON.stringify(args).slice(0, 300)}`)
+          ctx.logger.info(`调用工具 ${call.function.name}：${JSON.stringify(args).slice(0, 300)}`)
           const output = await Promise.race([
             tools.execute(call.function.name, args, {
               conversationId,
@@ -935,7 +947,7 @@ export function apply(ctx) {
           ])
           if (entry.cancelled) throw abortError()
           ctx.logger.info(
-            `[chat-flow] 工具 ${call.function.name} 完成：${Date.now() - toolStartedAt}ms · ${output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'}` +
+            `工具 ${call.function.name} 完成：${Date.now() - toolStartedAt}ms · ${output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'}` +
               `${Array.isArray(output?.message_ids) && output.message_ids.length ? ` · 消息 ${output.message_ids.length} 条` : ''}`,
           )
           attachCallInfo(conversationId, output?.message_ids, entry.lastRound)
@@ -976,7 +988,7 @@ export function apply(ctx) {
 
       if (!ended && !entry.cancelled) {
         ctx.inject('toast')?.warn?.(`工具调用达到 ${maxRounds} 轮上限，已停止本轮`)
-        ctx.logger.warn(`[chat-flow] 工具调用达到上限（${maxRounds} 轮），强制结束`)
+        ctx.logger.warn(`工具调用达到上限（${maxRounds} 轮），强制结束`)
         entry.finalWire = { role: 'assistant', content: '（工具调用次数达到上限，本轮已停止。）' }
         store.append(conversationId, {
           role: 'assistant',
@@ -995,7 +1007,7 @@ export function apply(ctx) {
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
       const totalMs = Date.now() - startedAt
-      ctx.logger.info(`[chat-flow] 本轮结束：总耗时 ${totalMs}ms · 模型思考 ${entry.thinkingMs || 0}ms`)
+      ctx.logger.info(`本轮结束：总耗时 ${totalMs}ms · 模型思考 ${entry.thinkingMs || 0}ms`)
       events.emit('chat:request-done', {
         conversationId,
         elapsed: totalMs,
@@ -1018,7 +1030,7 @@ export function apply(ctx) {
     try {
       entry.channelId = store?.channelForConversation?.(conversationId)?.channelId || null
     } catch (err) {
-      ctx.logger?.warn?.(`[chat-flow] 准备渠道记录失败，将继续本轮：${err?.message || err}`)
+      ctx.logger?.warn?.(`准备渠道记录失败，将继续本轮：${err?.message || err}`)
       entry.channelId = null
     }
     entry.protocol = []
@@ -1108,7 +1120,7 @@ export function apply(ctx) {
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
       const totalMs = Date.now() - startedAt
-      ctx.logger.info(`[chat-flow] 旧版链路结束：总耗时 ${totalMs}ms`)
+      ctx.logger.info(`旧版链路结束：总耗时 ${totalMs}ms`)
       events.emit('chat:request-done', {
         conversationId,
         elapsed: totalMs,
@@ -1142,10 +1154,10 @@ export function apply(ctx) {
     if (queue) {
       queue.enqueue(roleId, task).catch(error => {
         if (error?.code === 'CHAT_ABORTED') return
-        ctx.logger.error('[chat-flow] 队列任务失败', error)
+        ctx.logger.error('队列任务失败', error)
       })
     } else {
-      task().catch(error => ctx.logger.error('[chat-flow] 任务失败', error))
+      task().catch(error => ctx.logger.error('任务失败', error))
     }
   }
 
@@ -1191,7 +1203,7 @@ export function apply(ctx) {
       const run = () => (queue ? queue.enqueue(roleId, task) : task())
       Promise.resolve(run()).catch(error => {
         if (error?.code === 'CHAT_ABORTED') return
-        ctx.logger.error('[chat-flow] 重新生成失败', error)
+        ctx.logger.error('重新生成失败', error)
       })
       return { ok: true }
     },

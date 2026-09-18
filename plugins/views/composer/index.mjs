@@ -184,11 +184,12 @@ export function apply(ctx) {
     }
     const onClickSend = () => send()
     const showStop = on => stopBtn?.classList.toggle('show', !!on)
-    const syncStop = () => showStop(!!ctx.registry.get('chat-flow')?.isRunning(sessions.activeId()))
+    const flowService = () => ctx.registry.get('chat-flow') || ctx.registry.get('agent-client')
+    const syncStop = () => showStop(!!flowService()?.isRunning?.(sessions.activeId()))
     const onStopClick = () => {
       const convId = sessions.activeId()
       if (!convId) return
-      if (ctx.registry.get('chat-flow')?.abort(convId)) showStop(false)
+      if (flowService()?.abort?.(convId)) showStop(false)
     }
     const onComposerClick = e => {
       const btn = e.target.closest('[data-tool]')

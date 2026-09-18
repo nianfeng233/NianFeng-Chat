@@ -68,7 +68,7 @@ function cloneMetaEntry(entry) {
 
 const DEFAULTS = {
   'app.name': '念风',
-  'app.version': '0.42.0',
+  'app.version': '2.0.0',
   'ui.compact': false,
   'ui.animation': true,
   'ui.signature': '',
@@ -125,6 +125,9 @@ const DEFAULTS = {
   'chat.maxOutputTokens': 8192,
   'chat.memoryRounds': 5,
   'chat.channelRounds': 5,
+  // 跨渠道工作记忆最多带几轮（来自同一角色的其它普通私聊渠道）。
+  // 默认只取 2 轮，避免旧渠道话题污染当前对话；填 0 彻底关闭跨渠道工作记忆。
+  'chat.crossChannelMemoryRounds': 2,
   // NapCat 群聊默认保留的最近消息“条数”；渠道里的 groupRules.contextMessages > 0 时单独覆盖。
   // 群聊不适合按“轮”推算，统一按逐条消息数量控制。
   'chat.groupMessages': 20,

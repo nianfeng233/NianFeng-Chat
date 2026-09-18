@@ -920,10 +920,43 @@ export function apply(ctx) {
         }
       }
 
-      const loadProviders = async ({ notify = false } = {}) => {
+      let providerLoadSeq = 0
+      let providerRetryTimer = null
+      let providerRetryDelay = 0
+      const scheduleProviderRetry = () => {
+        if (disposed || providerRetryTimer) return
+        providerRetryDelay = providerRetryDelay ? Math.min(15000, providerRetryDelay * 2) : 1500
+        providerRetryTimer = ctx.setTimeout(() => {
+          providerRetryTimer = null
+          loadProviders({ silent: true })
+        }, providerRetryDelay)
+      }
+      const isEditing = () => {
         try {
-          health = await api.health()
-          providerPayload = await api.providers()
+          const el = typeof document !== 'undefined' ? document.activeElement : null
+          return !!(el && container.contains?.(el) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))
+        } catch (_) {
+          return false
+        }
+      }
+      const loadProviders = async ({ notify = false, silent = false } = {}) => {
+        const seq = ++providerLoadSeq
+        // 先用 backend-client 最近一次健康检查结果，避免首屏闪“后端未连接”。
+        health = health || api.status?.().health || null
+        // 健康检查只影响状态徽标，不阻塞提供商列表渲染；失败也不把列表清空。
+        api
+          .health()
+          .then(value => {
+            if (disposed || seq !== providerLoadSeq || !value) return
+            health = value
+            render()
+          })
+          .catch(() => {})
+        try {
+          // /health 只用于状态徽标，不阻塞 providers；providers 成功即可渲染。
+          const payload = await api.providers()
+          if (disposed || seq !== providerLoadSeq) return
+          providerPayload = payload || providerPayload
           const list = providerPayload.providers || []
           // 只有拿到最新列表后才校正选中项；新建表单打开期间保持当前选择
           if (!creatingProvider && (!selectedId || !list.some(p => p.id === selectedId))) {
@@ -933,14 +966,26 @@ export function apply(ctx) {
             discoveredProviderId = ''
             discoveredModels = []
           }
+          providerRetryDelay = 0
+          if (providerRetryTimer) {
+            ctx.clearTimeout(providerRetryTimer)
+            providerRetryTimer = null
+          }
           await adapter?.sync?.({ silent: true })
+          if (disposed || seq !== providerLoadSeq) return
           render()
           if (notify) toast.success('提供商列表已刷新')
         } catch (err) {
-          health = null
-          providerPayload = { providers: [], adapters: [], defaultProvider: '', defaultModel: '' }
+          if (disposed || seq !== providerLoadSeq) return
+          // 关键：保留上一次成功的数据，不再清空成空列表。
+          // 远程部署网络偶尔抖动时，页面不会变成“加载失败”，切出再切入也不是必要条件。
+          if (!providerPayload.providers?.length) {
+            health = null
+          }
           render()
           if (notify) toast.error(`后端不可用：${err.message}`)
+          else if (!silent) ctx.logger.debug(`模型提供商读取失败，将自动重试：${err.message}`)
+          scheduleProviderRetry()
         }
       }
 
@@ -1475,24 +1520,33 @@ export function apply(ctx) {
       }
 
       /* ---------------- 启动 ---------------- */
+      const safeRender = () => {
+        if (disposed || isEditing()) return
+        render()
+      }
       const offs = [
-        ctx.on('models:synced', render),
-        ctx.on('model:models-updated', render),
-        ctx.on('backend:status', () => loadProviders()),
-        // 该开关不是 data-config-* 常规控件；电脑端修改后同样实时刷新手机上的模型页。
-        config.watch('model.useBuiltin', () => {
-          if (!disposed) render()
+        ctx.on('models:synced', () => {
+          if (disposed || isEditing()) return
+          loadProviders({ silent: true })
         }),
+        ctx.on('model:models-updated', safeRender),
+        // 只在真正从离线恢复到在线时刷新；后端抖动不会把正在编辑的表单重置。
+        ctx.on('backend:status', payload => {
+          if (payload?.online === false) return
+          loadProviders({ silent: true })
+        }),
+        // 该开关不是 data-config-* 常规控件；电脑端修改后同样实时刷新手机上的模型页。
+        config.watch('model.useBuiltin', safeRender),
         ctx.on('plugin:enabled', payload => {
           if (payload?.id !== 'official-service') return
-          render()
+          safeRender()
           if (config.get('model.useBuiltin', true) !== false) loadBuiltin()
         }),
         ctx.on('plugin:disabled', payload => {
           if (payload?.id !== 'official-service') return
           builtin = null
           builtinLoading = false
-          render()
+          safeRender()
         }),
       ]
 
@@ -1504,6 +1558,10 @@ export function apply(ctx) {
 
       return () => {
         disposed = true
+        if (providerRetryTimer) {
+          ctx.clearTimeout(providerRetryTimer)
+          providerRetryTimer = null
+        }
         offs.forEach(off => off?.())
         unbindConfig?.()
         unbindSliderConfig?.()

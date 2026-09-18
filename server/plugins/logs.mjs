@@ -142,6 +142,8 @@ const makeLine = (entry = {}) => {
     name,
     origin,
     text,
+    // 前端日志的客户端唯一 ID：日志页据此精确去重；后端日志 / 旧日志为空串。
+    clientId: String(entry.clientId || entry.client_id || ''),
     line: '',
   }
 }
@@ -248,6 +250,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
           name: item.name,
           origin: item.origin,
           text: item.text,
+          clientId: item.clientId || '',
         })}\n`
         await appendFile(logFile, lineChunk, 'utf8')
         await appendFile(indexFile, indexChunk, 'utf8')
@@ -310,6 +313,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
                 name: entry.name,
                 origin: entry.origin,
                 text: entry.text,
+                  clientId: entry.clientId,
               })
               if (item) loaded.push(item)
             } catch (_) {
@@ -413,6 +417,8 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
       let count = 0
       for (const raw of batch) {
         if (!raw || typeof raw !== 'object') continue
+        const clientId = String(raw.clientId || raw.client_id || '').trim();
+        if (clientId && lines.some(item => item.clientId && item.clientId === clientId)) continue;
         const item = record({
           at: raw.at ?? raw.ts ?? Date.now(),
           level: raw.level ?? raw.type,
@@ -420,6 +426,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
           text: raw.text ?? raw.data ?? '',
           origin: 'web',
           tag: raw.tag || 'Web',
+          clientId,
         })
         if (item) count += 1
       }

@@ -39,8 +39,14 @@ export function apply(ctx) {
     enable: id => loader.enable(id),
     disable: id => loader.disable(id),
     isEnabled: id => loader.get(id)?.status === 'active',
-    /** reload 交给外壳插件：浏览器环境直接刷新即可 */
+    /** 运行期热同步：新增 / 更新 / 删除 / 启停，不刷新页面、不重启进程。 */
+    sync: (entries, options) => loader.syncEntries(entries, options),
+    reloadPlugin: (id, options) => loader.reloadPlugin(id, options),
+    removePlugin: (id, options) => loader.removeRuntimeRecord(id, options),
+    /** 兼容旧调用：浏览器环境下彻底刷新页面。 */
     reload: () => location.reload(),
+    /** 与 reload 等价，名字更明确。 */
+    hardReload: () => location.reload(),
     stats() {
       const list = loader.list()
       const by = status => list.filter(r => r.status === status).length

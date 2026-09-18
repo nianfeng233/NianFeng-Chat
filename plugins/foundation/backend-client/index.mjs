@@ -44,7 +44,41 @@ export function apply(ctx) {
 
   const baseUrl = () => String(config.get('backend.url', '/api') || '/api').replace(/\/+$/, '')
 
-  async function request(path, { method = 'GET', body, signal, timeoutMs = 20000 } = {}) {
+  /**
+   * 带自动重试的 REST 请求。
+   * 说明：
+   *   - GET / 只读请求默认重试 2 次（网络错误、超时、429、5xx），
+   *     解决“停留在设置页一段时间后偶发加载失败，切出再切入又好了”的问题；
+   *   - POST / PUT / DELETE 默认不重试，避免重复提交（调用方可显式传 retries）。
+   */
+  async function request(path, { method = 'GET', body, signal, timeoutMs = 20000, retries } = {}) {
+    const safeMethod = String(method || 'GET').toUpperCase()
+    const maxRetries = retries !== undefined ? Math.max(0, Number(retries) || 0) : safeMethod === 'GET' ? 2 : 0
+    let lastError = null
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        return await requestOnce(path, { method: safeMethod, body, signal, timeoutMs })
+      } catch (err) {
+        lastError = err
+        if (signal?.aborted || attempt >= maxRetries || !isRetryableRequestError(err)) throw err
+        const wait = Math.min(4000, 300 * 2 ** attempt)
+        await new Promise(resolve => setTimeout(resolve, wait))
+      }
+    }
+    throw lastError || new Error('请求失败')
+  }
+
+  function isRetryableRequestError(err) {
+    if (!err) return false
+    if (err.name === 'AbortError' && err.message && !/超时|timeout/i.test(err.message)) return false
+    const status = Number(err.status) || 0
+    if (status >= 500 || status === 429 || status === 408) return true
+    if (status >= 400) return false
+    // fetch 网络错误：TypeError / FetchError / 超时 abort 都允许重试。
+    return true
+  }
+
+  async function requestOnce(path, { method = 'GET', body, signal, timeoutMs = 20000 } = {}) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
     const onAbort = () => controller.abort(signal?.reason)
@@ -316,8 +350,12 @@ export function apply(ctx) {
             data = e.data
           }
           ctx.emit('backend:event', { event: type, data })
+          // 插件目录 / 清单变化：单独发一个语义事件，主入口据此热同步，不需要刷新页面。
+          if (type === 'plugins/changed') {
+            ctx.emit('plugins:changed', { event: type, data, action: data?.action || 'changed' })
+          }
         }
-        for (const type of ['hello', 'channel:message', 'clawbot:message', 'clawbot:status', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'sessions/changed', 'settings/updated', 'log/line']) {
+        for (const type of ['hello', 'channel:message', 'clawbot:message', 'clawbot:status', 'provider/status', 'chat/start', 'chat/done', 'chat/error', 'agent/send', 'agent/status', 'agent/cancel', 'sessions/changed', 'settings/updated', 'plugins/changed', 'log/line']) {
           eventSource.addEventListener(type, forward(type))
         }
         eventSource.onerror = () => {

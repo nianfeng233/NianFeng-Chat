@@ -458,6 +458,52 @@ async function main() {
       putSessionBody.meta?.model === 'openai/test-model',
     sseSessionText.slice(-360),
   )
+
+  // WebUI → 后端终端代聊桥：浏览器不再本地执行 chat-flow，只通过这两个接口驱动 Worker。
+  const agentSendBody = await (await api(base, '/api/agent/send', {
+    method: 'POST',
+    body: { conversationId: sseConversation.id, clientId: 'agent-test-1', text: '来自 WebUI 的远程消息' },
+  })).json()
+  let agentSseText = ''
+  for (let i = 0; i < 8; i++) {
+    if (/event: agent\/send[\s\S]*?"text":"来自 WebUI 的远程消息"/.test(agentSseText)) break
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise(resolve => setTimeout(() => resolve({ done: true, value: null }), 2000)),
+    ])
+    if (!chunk || chunk.done) break
+    agentSseText += new TextDecoder().decode(chunk.value)
+  }
+  check(
+    'POST /api/agent/send 会广播 agent/send（WebUI 消息交给后端终端）',
+    agentSendBody?.ok === true &&
+      /event: agent\/send[\s\S]*?"text":"来自 WebUI 的远程消息"/.test(agentSseText) &&
+      agentSseText.includes(sseConversation.id),
+    agentSseText.slice(-360),
+  )
+
+  const agentStatusBody = await (await api(base, '/api/agent/status', {
+    method: 'POST',
+    body: { conversationId: sseConversation.id, clientId: 'agent-test-1', status: 'done' },
+  })).json()
+  let agentStatusText = ''
+  for (let i = 0; i < 8; i++) {
+    if (/event: agent\/status[\s\S]*?"status":"done"/.test(agentStatusText)) break
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise(resolve => setTimeout(() => resolve({ done: true, value: null }), 2000)),
+    ])
+    if (!chunk || chunk.done) break
+    agentStatusText += new TextDecoder().decode(chunk.value)
+  }
+  check(
+    'POST /api/agent/status 会广播轮次结束（WebUI 输入框同步解锁）',
+    agentStatusBody?.ok === true &&
+      /event: agent\/status[\s\S]*?"status":"done"/.test(agentStatusText) &&
+      agentStatusText.includes('agent-test-1'),
+    agentStatusText.slice(-360),
+  )
+
   // 删掉测试会话，不影响后续“数据目录切换”对会话数量的断言。
   await api(base, `/api/sessions/${sseConversation.id}`, { method: 'DELETE' })
   controller.abort()

@@ -74,13 +74,13 @@ export function apply(ctx) {
             error,
             attempt: attemptIndex,
           })
-          ctx.logger.warn(`[model-service] 模型 ${currentKey} 失败，自动切换备用模型 ${nextKey}：${error?.message || error}`)
+          ctx.logger.warn(`模型 ${currentKey} 失败，自动切换备用模型 ${nextKey}：${error?.message || error}`)
           startAttempt(nextKey)
           return
         }
         finished = true
         ctx.logger.error(
-          `[model-service] 模型 ${currentKey || '未选择'} 调用失败（${elapsed()}ms）：${error?.message || error}`,
+          `模型 ${currentKey || '未选择'} 调用失败（${elapsed()}ms）：${error?.message || error}`,
         )
         callbacks.onError?.(error)
         events.emit('model:error', { key: currentKey, error, elapsedMs: elapsed() })

@@ -128,9 +128,9 @@ export function apply(ctx) {
 
   let runtimeSyncTimer = null
   /**
-   * 本页改了启停 / 卸载状态后：先把 preferences 立即写回后端，再触发
-   * 插件目录重扫。重扫会重启服务端代聊 Worker，并让其按最新偏好加载，
-   * 避免“插件已卸载、QQ 代聊还在调用旧工具”的残留。
+   * 本页改了启停 / 卸载状态后：先把 preferences 写回后端，再让后端重扫插件目录。
+   * 重扫只做两件事：外部插件 bridge 按最新启停偏好热加载 / 卸载 + 广播
+   * plugins/changed；服务端代聊收到广播后走运行期热同步，不会再整体重启。
    */
   const scheduleRuntimePluginSync = () => {
     if (runtimeSyncTimer) ctx.clearTimeout(runtimeSyncTimer)
@@ -140,8 +140,9 @@ export function apply(ctx) {
         .then(() => config.flush?.())
         .then(() => ctx.registry.get('api')?.rescanPlugins?.())
         .catch(err => ctx.logger.debug(`[plugin-manager] 通知运行时刷新插件失败：${err?.message || err}`))
-    }, 450)
+    }, 300)
   }
+  const schedulePreferencePush = scheduleRuntimePluginSync
 
   const service = {
     name: 'plugin-manager',
@@ -285,7 +286,7 @@ export function apply(ctx) {
         config.set('plugins.enabled', [...enabled])
         toast.success(`已启用插件「${record.manifest.displayName}」`)
         events.emit('plugin:enabled', { id })
-        scheduleRuntimePluginSync()
+        schedulePreferencePush()
       } else {
         toast.error(`插件「${record.manifest.displayName}」启用失败：${record.reason || '依赖未满足'}`)
       }
@@ -307,7 +308,7 @@ export function apply(ctx) {
       config.set('plugins.enabled', [...enabled])
       toast.info(`已禁用插件「${record.manifest.displayName}」`)
       events.emit('plugin:disabled', { id })
-      scheduleRuntimePluginSync()
+      schedulePreferencePush()
       return true
     },
 
@@ -315,6 +316,24 @@ export function apply(ctx) {
       const record = loader.get(id)
       if (!record) return false
       return record.status === 'active' ? service.disable(id) : service.enable(id)
+    },
+
+    /**
+     * 从后端 /api/plugins 热同步插件清单。
+     * 安装 / 删除 / 目录切换后由设置页调用；webhook / 手机端变更也可直接调用。
+     */
+    async sync({ reason = 'manual', snapshot = null } = {}) {
+      const api = ctx.registry.get('api')
+      const data = snapshot || (api?.plugins ? await api.plugins() : null)
+      if (!data || !Array.isArray(data.plugins)) return false
+      const result = await loader.sync(data.plugins, {
+        disabled: data.disabled || [],
+        removed: data.removed || [],
+        enabled: data.enabled || [],
+        reason,
+      })
+      events.emit('plugin:list-changed', { reason, changed: result?.changed || [], result })
+      return result
     },
 
     /** 卸载：标记 removed 并禁用；用户数据按文档 §10.7 保留 */
@@ -337,7 +356,12 @@ export function apply(ctx) {
       config.set('plugins.disabled', [...disabled])
       toast.warn(`已卸载「${record.manifest.displayName}」`)
       events.emit('plugin:uninstalled', { id })
-      scheduleRuntimePluginSync()
+      // soft uninstall 需要让后端 bridge 也停下来，因此这里仍然重扫一次；
+      // 但不再刷新页面，服务端代聊也改为热同步。
+      config
+        .flush?.()
+        .then(() => ctx.registry.get('api')?.rescanPlugins?.())
+        .catch(err => ctx.logger.debug(`[plugin-manager] 卸载后同步后端 bridge 失败：${err?.message || err}`))
       return true
     },
 
@@ -346,8 +370,13 @@ export function apply(ctx) {
       const removed = new Set(config.get('plugins.removed', []))
       removed.delete(id)
       config.set('plugins.removed', [...removed])
+      // 先清掉 uninstall 时写入的 disabled，避免 config:changed 触发的
+      // 偏好对齐在插件刚启用后又把它按“已禁用”停回去。
+      const disabled = new Set(config.get('plugins.disabled', []))
+      disabled.delete(id)
+      config.set('plugins.disabled', [...disabled])
       const ok = await service.enable(id)
-      scheduleRuntimePluginSync()
+      schedulePreferencePush()
       return ok
     },
 
@@ -387,6 +416,23 @@ export function apply(ctx) {
     ctx.on('config:changed', payload => {
       const key = String(payload?.key || '')
       if (key === '*' || key.startsWith('plugins.')) scheduleReconcile(`config:${key}`)
+    }),
+  )
+
+  // 运行期热同步 / 重载完成后，插件页只需要重新渲染列表，不刷新页面。
+  ctx.effect(
+    ctx.on('plugins:synced', payload => {
+      events.emit('plugin:list-changed', { reason: payload?.reason || 'sync', changed: payload?.changed || [] })
+    }),
+  )
+  ctx.effect(
+    ctx.on('plugin:reloaded', payload => {
+      events.emit('plugin:list-changed', { reason: payload?.reason || 'reload', changed: [{ id: payload?.id, kind: 'updated' }] })
+    }),
+  )
+  ctx.effect(
+    ctx.on('plugins:changed', payload => {
+      events.emit('plugin:runtime-rescan-requested', { action: payload?.data?.action || 'changed' })
     }),
   )
 

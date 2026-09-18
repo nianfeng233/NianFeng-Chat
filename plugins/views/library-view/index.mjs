@@ -283,6 +283,16 @@ export function apply(ctx) {
         renderMemoryRoles()
       }
 
+      let memoryRetryTimer = null
+      let memoryRetryDelay = 0
+      const scheduleMemoryRetry = () => {
+        if (disposed || memoryRetryTimer) return
+        memoryRetryDelay = memoryRetryDelay ? Math.min(15000, memoryRetryDelay * 2) : 2000
+        memoryRetryTimer = ctx.setTimeout(() => {
+          memoryRetryTimer = null
+          loadMemory(false)
+        }, memoryRetryDelay)
+      }
       const loadMemory = async (append = false) => {
         const memory = state.memory
         if (memory.loading) return
@@ -305,10 +315,17 @@ export function apply(ctx) {
               ? '后端还没有记忆条目接口：请重启念风后端后再点「刷新」。'
               : result?.error || '记忆库读取失败。'
           renderMemory()
+          // 网络抖动不要停在“读取失败”：保留已有条目，指数退避自动重试。
+          scheduleMemoryRetry()
           return
         }
         memory.records = append ? [...memory.records, ...(result.records || [])] : result.records || []
         memory.total = Number(result.total) || 0
+        memoryRetryDelay = 0
+        if (memoryRetryTimer) {
+          ctx.clearTimeout(memoryRetryTimer)
+          memoryRetryTimer = null
+        }
         renderMemory()
       }
 
@@ -773,6 +790,10 @@ export function apply(ctx) {
 
       return () => {
         disposed = true
+        if (memoryRetryTimer) {
+          ctx.clearTimeout(memoryRetryTimer)
+          memoryRetryTimer = null
+        }
         container.removeEventListener('click', onClick)
         container.removeEventListener('change', onChange)
         container.removeEventListener('keydown', onKeyDown)

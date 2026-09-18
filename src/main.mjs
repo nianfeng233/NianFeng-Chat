@@ -11,6 +11,7 @@
  */
 import { App, VERSION, STATUS } from './runtime/app.mjs'
 import { plugins as builtinPluginEntries } from '../plugins/registry.mjs'
+import { isPluginInScope } from './runtime/plugin-scope.mjs'
 
 const CONFIG_KEY = 'nianfeng:config'
 
@@ -19,7 +20,10 @@ const CONFIG_KEY = 'nianfeng:config'
  * 服务端代聊 Worker 的 localStorage 是空的，必须靠它来决定是否加载外部插件；
  * 普通 WebUI 也会与本地缓存取并集，保证“页面卸载后所有运行时都停用”。
  */
+const PLUGIN_CACHE_KEY = 'nianfeng:plugin-snapshot'
+
 let remotePluginState = null
+let remotePluginEntries = null
 
 function readRemotePluginState(data) {
   const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : null)
@@ -70,6 +74,34 @@ function pluginApiBase() {
   }
 }
 
+/** 最近一次 /api/plugins 结果缓存：远程部署刷新时先用缓存秒开，再后台校验增量。 */
+function readPluginCache() {
+  try {
+    const raw = localStorage.getItem(PLUGIN_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed?.entries) || !parsed.entries.length) return null
+    return parsed
+  } catch (_) {
+    return null
+  }
+}
+
+function writePluginCache(snapshot) {
+  try {
+    localStorage.setItem(
+      PLUGIN_CACHE_KEY,
+      JSON.stringify({
+        entries: snapshot.entries,
+        state: snapshot.state || null,
+        at: snapshot.at || Date.now(),
+      }),
+    )
+  } catch (_) {
+    /* localStorage 满了也不影响启动 */
+  }
+}
+
 /**
  * 服务端代聊 Worker 运行在 Node 中，默认 ESM loader 不支持 import('http(s)://...')，
  * 外部插件如果继续用 /user-plugins 的 HTTP 地址会在代聊里加载失败（浏览器 WebUI 不受影响）。
@@ -99,65 +131,166 @@ async function mapAgentExternalEntries(entries, dirsPath, href) {
   }
 }
 
+/** 拉取一次后端插件清单并归一化路径；失败时抛错，由调用方决定回退策略。 */
+export async function fetchPluginSnapshot({ timeoutMs = 8000 } = {}) {
+  const base = pluginApiBase()
+  const href = typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/'
+  const url = new URL(`${base}/plugins`, href)
+  const signal =
+    typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined
+  const res = await fetch(url.href, { cache: 'no-store', signal })
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+  const data = await res.json()
+  if (!Array.isArray(data?.plugins) || !data.plugins.length) throw new Error('后端未返回插件清单')
 
-/**
- * 插件清单优先从后端取（内置 + 外部插件目录合并）。
- * 如果后端没起来或能力较旧，回退到打包时生成的 registry.mjs，
- * 保证纯静态/离线场景仍能启动。
- */
-async function loadPluginEntries() {
-  try {
-    const base = pluginApiBase()
-    const href = typeof location !== 'undefined' && location.href ? location.href : 'http://127.0.0.1/'
-    const url = new URL(`${base}/plugins`, href)
-    const timeout = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(3500) : undefined
-    const res = await fetch(url.href, { cache: 'no-store', signal: timeout })
-    if (!res.ok) return builtinPluginEntries
-    const data = await res.json()
-    if (!Array.isArray(data?.plugins) || !data.plugins.length) return builtinPluginEntries
-    remotePluginState = readRemotePluginState(data)
-    const entries = data.plugins
-      .filter(entry => entry && entry.path)
-      .map(entry => {
-        // 外部插件路径是 /user-plugins/...；按「页面同源」转成绝对 URL。
-        // 官方启动方式（start.mjs / 单端口 / 桌面壳）都会把 /user-plugins 代理到后端，
-        // 这样插件内部的 ../../../src/... 相对引用也能落到同源的 /src 上。
-        if (entry.external && entry.path.startsWith('/')) {
-          try {
-            const origin = typeof location !== 'undefined' && location.origin ? location.origin : url.origin
-            return { ...entry, path: origin + entry.path }
-          } catch (_) {
-            return entry
-          }
+  const origin = typeof location !== 'undefined' && location.origin ? location.origin : url.origin
+  let entries = data.plugins
+    .filter(entry => entry && entry.path)
+    .map(entry => {
+      // 外部插件路径是 /user-plugins/...；按「页面同源」转成绝对 URL。
+      // 官方启动方式（start.mjs / 单端口 / 桌面壳）都会把 /user-plugins 代理到后端，
+      // 这样插件内部的 ../../../src/... 相对引用也能落到同源的 /src 上。
+      if (entry.external && entry.path.startsWith('/')) {
+        try {
+          return { ...entry, path: origin + entry.path }
+        } catch (_) {
+          return entry
         }
-        return entry
-      })
-      // 服务端代聊是 Node 环境，不认 http(s) 模块；外部插件改成同机 file:// 路径加载。
-      if (globalThis.__NIANFENG_SERVER_AGENT__ === true) {
-        return mapAgentExternalEntries(entries, `${base}/plugins/dirs`, href)
       }
-      return entries
-  } catch (_) {
-    return builtinPluginEntries
+      return entry
+    })
+  // 服务端代聊是 Node 环境，不认 http(s) 模块；外部插件改成同机 file:// 路径加载。
+  if (globalThis.__NIANFENG_SERVER_AGENT__ === true) {
+    entries = await mapAgentExternalEntries(entries, `${base}/plugins/dirs`, href)
+  }
+  return {
+    entries,
+    state: readRemotePluginState(data) || { disabled: [], removed: [], enabled: [] },
+    dirs: {
+      builtinDir: data.builtinDir,
+      externalDir: data.externalDir,
+      externalCount: data.externalCount,
+      count: data.count,
+      warnings: data.warnings || [],
+    },
+    at: Date.now(),
   }
 }
 
-export async function boot() {
+/**
+ * 兼容旧调用：优先从后端取；拿不到就用内置清单先启动，
+ * 之后 scheduleRemotePluginSync 会在后台补上外部插件。
+ */
+async function loadPluginEntries() {
+  const snapshot = await fetchPluginSnapshot({ timeoutMs: 4000 })
+  remotePluginState = snapshot.state
+  remotePluginEntries = snapshot.entries
+  writePluginCache(snapshot)
+  return snapshot
+}
+
+/** 启动进度条文案：让“加载插件”从黑盒等待变成可见的 N/M。 */
+function updateBootProgress(progress) {
+  try {
+    const tip = document.getElementById('bootTip')
+    if (!tip || !progress) return
+    if (progress.phase === 'import') tip.textContent = `正在加载插件… ${progress.loaded}/${progress.total}`
+    else if (progress.phase === 'ready') tip.textContent = '正在启动界面…'
+  } catch (_) {
+    /* 测试环境无 DOM 时忽略 */
+  }
+}
+
+let remoteSyncTimer = null
+let remoteSyncRetry = 0
+/**
+ * 运行期插件清单同步：新增 / 更新 / 删除 / 启停都由 App.syncEntries 热完成，
+ * 不再用 location.reload()，也不再重启服务端代聊 Worker。
+ * 失败按 1.5s ~ 30s 退避重试；页面重新可见 / 后端恢复在线时也会触发。
+ */
+export function scheduleRemotePluginSync(app, { delay = 0, reason = 'background', scope = null } = {}) {
+  if (!app) return null
+  const activeScope = scope || app.scope || 'all'
+  if (remoteSyncTimer) clearTimeout(remoteSyncTimer)
+  remoteSyncTimer = setTimeout(async () => {
+    remoteSyncTimer = null
+    try {
+      const snapshot = await fetchPluginSnapshot({ timeoutMs: 10000 })
+      remotePluginState = snapshot.state
+      remotePluginEntries = snapshot.entries
+      writePluginCache(snapshot)
+      const scopedEntries = snapshot.entries.filter(entry => isPluginInScope(entry, activeScope))
+      const result = await app.syncEntries(scopedEntries, {
+        ...snapshot.state,
+        reason,
+        scope: activeScope,
+        onProgress: updateBootProgress,
+      })
+      remoteSyncRetry = 0
+      app.emit('plugins:remote-synced', { reason, changed: result?.changed || [], active: result?.active })
+      return result
+    } catch (err) {
+      remoteSyncRetry += 1
+      const wait = Math.min(30000, 1500 * 2 ** Math.min(remoteSyncRetry, 4))
+      console.debug(`[plugins] 远程插件清单同步失败，${wait}ms 后重试：${err?.message || err}`)
+      scheduleRemotePluginSync(app, { delay: wait, reason: 'retry', scope: activeScope })
+      return null
+    }
+  }, Math.max(0, Number(delay) || 0))
+  remoteSyncTimer?.unref?.()
+  return remoteSyncTimer
+}
+
+export async function boot({ awaitRemote = false, scope = 'all' } = {}) {
   const t0 = performance.now()
-  const entries = await loadPluginEntries()
+  const activeScope = scope || 'all'
+  const cached = readPluginCache()
+  // 普通 WebUI：有缓存就直接用缓存启动；没有缓存时最多等后端 1.2 秒拿清单，
+  // 拿不到就先用内置清单把界面拉起来，外部插件通过后台热同步补上。
+  let snapshot = cached || { entries: builtinPluginEntries, state: null, at: 0 }
+  if (awaitRemote) {
+    try {
+      snapshot = await loadPluginEntries()
+    } catch (err) {
+      console.warn(`[plugins] 启动时读取后端插件清单失败，先用内置清单启动：${err?.message || err}`)
+      snapshot = snapshot || { entries: builtinPluginEntries, state: null, at: 0 }
+    }
+  } else if (!cached) {
+    try {
+      const remote = await new Promise(resolve => {
+        const timer = setTimeout(() => resolve(null), 1200)
+        loadPluginEntries()
+          .then(value => {
+            clearTimeout(timer)
+            resolve(value)
+          })
+          .catch(() => {
+            clearTimeout(timer)
+            resolve(null)
+          })
+      })
+      if (remote) snapshot = remote
+    } catch (_) {
+      /* 用内置清单启动即可 */
+    }
+  }
+
+  const rawEntries = Array.isArray(snapshot.entries) && snapshot.entries.length ? snapshot.entries : builtinPluginEntries
+  const entries = rawEntries.filter(entry => isPluginInScope(entry, activeScope))
   const app = new App({ baseUrl: new URL('../', import.meta.url) })
   const localPluginState = readBootConfig()
   // 并入后端共享状态：本机 localStorage 为空（代聊 Worker）或新设备首次打开时，
   // 也能立刻得到“卸载 / 禁用”结果，而不是先加载再等偏好同步。
-  const disabled = mergePluginIds(localPluginState.disabled, remotePluginState?.disabled)
-  const removed = mergePluginIds(localPluginState.removed, remotePluginState?.removed)
-  const enabled = mergePluginIds(localPluginState.enabled, remotePluginState?.enabled)
+  const remoteState = snapshot.state || remotePluginState
+  const disabled = mergePluginIds(localPluginState.disabled, remoteState?.disabled)
+  const removed = mergePluginIds(localPluginState.removed, remoteState?.removed)
+  const enabled = mergePluginIds(localPluginState.enabled, remoteState?.enabled)
 
   window.__wind = app.rootCompat
   window.__wind_app = app
   window.__wind_debug = createDebug(app)
 
-  await app.loadAll(entries, { disabled, removed, enabled })
+  await app.loadAll(entries, { disabled, removed, enabled, onProgress: updateBootProgress, scope: activeScope })
 
   const ms = Math.round(performance.now() - t0)
   console.log(
@@ -167,8 +300,25 @@ export async function boot() {
   )
   app.emit('app:ready', { ms, count: app.activeCount, total: entries.length, version: VERSION })
 
+  // 先让外壳渲染出来，再在后台同步远程清单 / 外部插件。
   writeDiagnostics(app)
   hideBootScreen()
+  try {
+    app.rootCompat.on('plugins:changed', payload => scheduleRemotePluginSync(app, { delay: 120, reason: payload?.data?.action || 'event', scope: activeScope }))
+    app.rootCompat.on('backend:status', status => {
+      if (status?.online) scheduleRemotePluginSync(app, { delay: 80, reason: 'backend-online', scope: activeScope })
+    })
+    if (typeof document !== 'undefined') {
+      const onVisible = () => {
+        if (!document.hidden) scheduleRemotePluginSync(app, { delay: 120, reason: 'visible', scope: activeScope })
+      }
+      document.addEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.__nianfengPluginVisibility = onVisible
+    }
+  } catch (err) {
+    console.debug('[plugins] 安装后台同步监听失败：', err)
+  }
+  scheduleRemotePluginSync(app, { delay: awaitRemote ? 60 : 900, reason: awaitRemote ? 'headless-initial' : 'initial', scope: activeScope })
   return { app, ctx: app.rootCompat, cordis: app.cordis, loader: app, version: VERSION }
 }
 

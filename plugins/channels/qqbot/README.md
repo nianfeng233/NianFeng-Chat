@@ -87,7 +87,7 @@ qqbot/
 ├── bridge.mjs         # Node 后端插件（q.qq.com 绑定 / OpenAPI / 绑定路由 / 发送）
 ├── manifest.json
 ├── style.mjs
-├── qrcode.mjs + vendor/qrcode/
+├── qrcode.mjs          # re-export 共享二维码模块
 └── README.md
 ```
 
@@ -99,4 +99,4 @@ qqbot/
 ## 许可
 
 原创部分与念风Chat 一致：Apache License 2.0。
-`vendor/qrcode` 来自 QRCode for JavaScript（MIT License，Copyright (c) 2009 Kazuhiko Arase）。
+`qrcode.mjs` 复用共享的 `src/vendor/qrcode`（QRCode for JavaScript，MIT License，Copyright (c) 2009 Kazuhiko Arase）。

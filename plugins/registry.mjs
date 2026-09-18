@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 95 个插件，按目录名排序；真正的加载顺序由
+ * 共 96 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -816,6 +816,41 @@ export const plugins = [
     "slots": [],
     "path": "./plugins/extras/napcat-input-state/index.mjs",
     "dir": "plugins/extras/napcat-input-state"
+  },
+  {
+    "id": "agent-client",
+    "version": "1.0.0",
+    "displayName": "远程代聊通道",
+    "description": "WebUI 代理 · 把浏览器消息转发给后端终端代聊 Worker，并同步轮次状态。",
+    "author": "念风内核",
+    "core": false,
+    "enabled": true,
+    "icon": "🛰️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "backend-client": ">=1.0.0",
+      "event-bus": "*",
+      "message-service": "^1.0.0"
+    },
+    "optionalDepends": {
+      "config": ">=1.1.0",
+      "session-service": ">=2.0.0",
+      "toast-host": ">=1.0.0"
+    },
+    "inject": [
+      "api",
+      "event-bus",
+      "message-service",
+      "config?",
+      "session-service?",
+      "toast?"
+    ],
+    "provides": [],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/features/agent-client/index.mjs",
+    "dir": "plugins/features/agent-client"
   },
   {
     "id": "channel-base",
@@ -2843,7 +2878,8 @@ export const plugins = [
       "toast-host": ">=1.0.0"
     },
     "optionalDepends": {
-      "model-adapter-backend": ">=2.0.0"
+      "model-adapter-backend": ">=2.0.0",
+      "channel-registry": ">=1.0.0"
     },
     "inject": [
       "settings-container",
@@ -2852,7 +2888,8 @@ export const plugins = [
       "model-adapter?",
       "config",
       "toast",
-      "modal"
+      "modal",
+      "channel-registry?"
     ],
     "provides": [],
     "permissions": [

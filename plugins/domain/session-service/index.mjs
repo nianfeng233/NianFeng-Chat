@@ -1124,7 +1124,8 @@ export function apply(ctx) {
         const action = String(data.action || '')
         // 只处理“另一边”的写入：浏览器处理服务端代聊的消息，代聊 runtime 处理浏览器写回的消息。
         const fromAgent = data.agent === true
-        if (globalThis.__NIANFENG_SERVER_AGENT__ === true ? fromAgent : !fromAgent) return
+        const shouldApply = globalThis.__NIANFENG_SERVER_AGENT__ === true ? !fromAgent : fromAgent
+        if (!shouldApply) return
         // 另一侧删除了会话：本地同步删除即可，绝不能再调 DELETE API，否则两端会互相回环广播。
         if (action === 'remove') {
           service.remove(String(data.id), { remote: false })

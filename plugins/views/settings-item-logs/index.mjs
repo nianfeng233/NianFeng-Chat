@@ -179,8 +179,9 @@ export function apply(ctx) {
       let backendTimer = null
       let backendFile = ''
       const backendSeen = new Set()
-      // 前端本地日志 + 后端运行时日志合并展示；用内容指纹去重，避免转发一份后重复。
+      // 前端本地日志 + 后端运行时日志合并展示；内容指纹 + clientId 双重去重。
       const entryKeys = new Set()
+      const clientIdKeys = new Set()
       // 后端 /api/logs/runtime/stream（SSE）状态；旧后端没有该接口时靠轮询兜底。
       let runtimeSource = null
       let streamRestartTimer = null
@@ -237,9 +238,10 @@ export function apply(ctx) {
         const at = Number(entry?.at) || Date.now()
         const text = String(entry?.text || '').slice(0, 600)
         const source = String(entry?.source || '')
+        const clientId = String(entry?.clientId || '')
         // 时间按 50ms 分桶：前端本地记录与后端回传的同一行时间会略有差异，
-        // 但内容 / 来源一致时应当合并成一条。
-        return `${Math.round(at / 50)}|${source}|${text}`
+        // 但内容 / 来源一致时应当合并成一条；clientId 相同则一定同源。
+        return `${clientId}|${Math.round(at / 50)}|${source}|${text}`
       }
 
       const add = entry => {
@@ -251,15 +253,23 @@ export function apply(ctx) {
           cat: '系统',
           source: '',
           text: '',
+          clientId: '',
           timeout: false,
           ...entry,
         }
+        const clientId = String(item.clientId || '')
+        if (clientId && clientIdKeys.has(clientId)) return false
         const key = fingerprintOf(item)
         if (entryKeys.has(key)) return false
         entryKeys.add(key)
+        if (clientId) clientIdKeys.add(clientId)
         if (entryKeys.size > MAX_ENTRIES * 2) {
           entryKeys.clear()
-          for (const existing of entries) entryKeys.add(fingerprintOf(existing))
+          clientIdKeys.clear()
+          for (const existing of entries) {
+            entryKeys.add(fingerprintOf(existing))
+            if (existing.clientId) clientIdKeys.add(existing.clientId)
+          }
         }
         entries.push(item)
         if (entries.length > MAX_ENTRIES) {
@@ -295,6 +305,7 @@ export function apply(ctx) {
           cat,
           source,
           text,
+          clientId: String(record?.nfId || record?.clientId || ''),
           timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(text),
         })
       }
@@ -408,9 +419,10 @@ export function apply(ctx) {
           at: Number(line.at) || Date.now(),
           level,
           cat: categoryOfSource(name),
-          // 前端转发到后端的日志仍按原始 logger 名展示，避免和本地订阅的同一行重复成两条。
+          // 前端转发到后端的日志仍按原始 logger 名展示；clientId 用于和本地 history 精确去重。
           source: line.origin === 'web' || !line.tag ? name : `${line.tag}·${name}`,
           text,
+          clientId: String(line.clientId || ''),
           timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(text),
         })
       }
@@ -798,6 +810,7 @@ export function apply(ctx) {
         } else if (button.dataset.logsClear !== undefined) {
           entries = []
           entryKeys.clear()
+          clientIdKeys.clear()
           backendSeen.clear()
           runtimeSeen = new Set()
           latestRuntimeId = 0

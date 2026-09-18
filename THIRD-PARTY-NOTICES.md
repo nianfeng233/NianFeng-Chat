@@ -40,16 +40,16 @@ Node.js 主体使用 MIT 许可证；发行版中还包含 V8、OpenSSL、c-ares
 这些依赖均为 MIT 许可证，允许商业使用、修改与再分发，但需要保留版权声明
 与许可证文本。
 
-## 2.1 内置 QRCode（微信clawbot 插件 vendor）
+## 2.1 内置 QRCode（共享模块）
 
-`plugins/channels/wechat-clawbot/vendor/qrcode/` 是 **QRCode for JavaScript** 的
-ESM 转换版，来自 `qrcode-terminal` 的 `vendor/QRCode`：
+`src/vendor/qrcode/` 是 **QRCode for JavaScript** 的 ESM 转换版，来自
+`qrcode-terminal` 的 `vendor/QRCode`，由 QQBot 与微信 Clawbot 渠道插件共用：
 
 - Copyright (c) 2009 Kazuhiko Arase
 - MIT License（<https://opensource.org/licenses/MIT>）
-- 用途：微信 Clawbot 登录二维码的本地渲染；不参与联网请求。
+- 用途：QQ / 微信 Clawbot 登录二维码的本地渲染；不参与联网请求。
 
-分发时请随插件目录保留本声明与 `vendor/qrcode/` 中的版权/许可证注释。
+分发时请随项目保留本声明与 `src/vendor/qrcode/` 中的版权/许可证注释。
 ## 3. Rust 桌面壳依赖
 
 Rust 依赖及许可证清单见 [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)，

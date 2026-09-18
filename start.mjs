@@ -23,6 +23,7 @@ import { startBackend } from './server/index.mjs'
 import { resolveDataDir } from './server/data-dir.mjs'
 import { ensurePortsFree } from './server/port-utils.mjs'
 import { timingSafeStringEqual, isInsideDir, isSensitiveStaticPath } from './server/security-utils.mjs'
+import { serveStaticFile, isVersionedRequest } from './server/static-cache.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
 const args = new Set(process.argv.slice(2))
@@ -303,13 +304,13 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
       }
       const fileInfo = await stat(target)
       if (!fileInfo.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOENT' })
-      const body = await readFile(target)
-      res.writeHead(200, {
-        'Content-Type': MIME[extname(target).toLowerCase()] || 'application/octet-stream',
-        'Content-Length': body.length,
-        'Cache-Control': 'no-store',
+      const html = extname(target).toLowerCase() === '.html'
+      // 带 ?v= 的插件 / 资源强缓存；其它源码 ETag 304；index.html 永远回源。
+      await serveStaticFile(req, res, target, {
+        mime: MIME,
+        immutable: !html && isVersionedRequest(req),
+        cacheControl: html ? 'no-cache, no-store, must-revalidate' : undefined,
       })
-      res.end(body)
     } catch (_) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('404 Not Found')
     }
@@ -552,16 +553,29 @@ async function main() {
   }
 
   let agentReloadTimer = null
-  /** 外部插件清单变化时重启服务端代聊，让代聊 Worker 也加载到新的前端插件与工具。 */
+  /**
+   * 外部插件清单变化时通知服务端代聊 Worker 热同步，而不是终止 / 重启它。
+   * 旧实现会重启 Worker，导致 NapCat / QQ 等渠道在几秒内无法处理消息；
+   * 现在 Worker 内部走 App.syncEntries()，工具与设置无中断更新。
+   */
   const reloadHeadlessAgent = reason => {
     if (!headlessAgentEnabled || shuttingDown) return
     if (agentReloadTimer) clearTimeout(agentReloadTimer)
     agentReloadTimer = setTimeout(() => {
       agentReloadTimer = null
       if (shuttingDown) return
-      console.log(`[plugins] 插件变化（${reason || 'changed'}），重启服务端代聊以加载最新工具…`)
-      stopHeadlessAgent()
-      startHeadlessAgent()
+      if (!agentWorker) {
+        startHeadlessAgent()
+        return
+      }
+      try {
+        agentWorker.postMessage({ type: 'plugins-changed', payload: { action: reason || 'changed' } })
+        console.log(`[plugins] 插件变化（${reason || 'changed'}），已通知服务端代聊热同步`)
+      } catch (err) {
+        console.warn(`[plugins] 通知服务端代聊失败，改用重启兜底：${err?.message || err}`)
+        stopHeadlessAgent()
+        startHeadlessAgent()
+      }
     }, 300)
     agentReloadTimer.unref?.()
   }

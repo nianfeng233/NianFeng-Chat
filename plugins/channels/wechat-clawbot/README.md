@@ -24,8 +24,8 @@ wechat-clawbot/
 ├── bridge.mjs         # Node 后端插件（登录 / 长轮询 / sendmessage / typing）
 ├── manifest.json      # 插件元信息（便于单独分发）
 ├── style.mjs          # 插件样式
-├── qrcode.mjs         # 本地二维码渲染
-└── vendor/qrcode/     # QRCode for JavaScript（MIT，Kazuhiko Arase）
+├── qrcode.mjs         # re-export 共享二维码模块（src/vendor/qrcode）
+└── README.md
 ```
 
 ## 安装（完整版内置）
@@ -48,8 +48,8 @@ wechat-clawbot/
 ## 单独分发
 
 独立分发脚本已移除（`extensions/wechat-clawbot` 是早期测试目录，已不再随仓库维护）。
-如需单独分发，请手动把本目录（含 `index.mjs` / `bridge.mjs` / `style.mjs` / `vendor/`）复制到外部插件目录，
-并确保宿主包含所需的 `/api/clawbot/*` 后端桥与 `image-service/store.mjs`。
+如需单独分发，请手动把本目录（含 `index.mjs` / `bridge.mjs` / `style.mjs`）复制到外部插件目录，
+并确保宿主包含共享的 `src/vendor/qrcode`、所需的 `/api/clawbot/*` 后端桥与 `image-service/store.mjs`。
 
 ## 协议参考
 
@@ -60,4 +60,4 @@ wechat-clawbot/
 ## 许可
 
 本插件原创部分与念风Chat 一致：Apache License 2.0。
-`vendor/qrcode` 来自 QRCode for JavaScript（MIT License，Copyright (c) 2009 Kazuhiko Arase）。
+`qrcode.mjs` 复用共享的 `src/vendor/qrcode`（QRCode for JavaScript，MIT License，Copyright (c) 2009 Kazuhiko Arase）。

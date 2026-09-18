@@ -82,7 +82,7 @@ export function apply(ctx) {
         <div id="pluginDirsContainer" class="plugin-dirs"></div>
           <div data-plugin-summary class="plugin-summary"></div>
         <div id="pluginListContainer" data-plugin-list></div>
-        <div class="plugin-footnote">外部插件放进「插件目录」里的子文件夹（每个插件一个目录，包含 index.mjs），点「重新扫描」并刷新页面后生效；内置插件随版本发布，升级 exe 时会被替换。</div>`)
+        <div class="plugin-footnote">外部插件放进「插件目录」里的子文件夹（每个插件一个目录，包含 index.mjs），点「重新扫描」后立即热加载生效；内置插件随版本发布，升级 exe 时会被替换。</div>`)
 
       const listEl = container.querySelector('[data-plugin-list]')
       const dirsEl = container.querySelector('#pluginDirsContainer')
@@ -301,6 +301,8 @@ export function apply(ctx) {
         loadPluginDirs()
       }
 
+      /* 运行期热同步 / 其它设备启停 / 安装卸载后，当前打开的插件页会通过
+         offs 里的 plugin:list-changed 事件重绘列表，不再刷新页面。 */
       /**
        * 逐项直接绑定 click：极简 DOM 垫片没有事件冒泡，浏览器里也避免
        * “直接监听 + 容器委托”同时触发导致卸载/恢复执行两次。
@@ -358,12 +360,22 @@ export function apply(ctx) {
 
       /* ---------------- 插件目录（内置 + 外部） ---------------- */
     let dirsInfo = null
-    const reloadPage = () => {
-      try {
-        location.reload()
-      } catch (_) {
-        /* dom-shim / 旧环境忽略 */
+    /**
+     * 安装 / 删除 / 重扫后的统一热同步：拉取最新 /api/plugins 并交给 runtime，
+     * 新插件当场 import 激活、删除的当场释放；不刷新页面。
+     */
+    const hotSyncPlugins = async (reason, { refreshDirs = true } = {}) => {
+      const api = ctx.inject('api')
+      const result = await manager.sync({ reason })
+      if (refreshDirs && api?.pluginDirs) {
+        try {
+          dirsInfo = await api.pluginDirs()
+        } catch (err) {
+          ctx.logger.debug(`插件目录刷新失败：${err?.message || err}`)
+        }
       }
+      render()
+      return result
     }
     const renderPluginDirs = () => {
       if (!dirsEl) return
@@ -430,8 +442,8 @@ export function apply(ctx) {
         const dir = String(input?.value || '').trim()
         try {
           await api.setPluginsDir(dir)
-          toast.success('插件目录已保存，正在刷新页面…')
-          reloadPage()
+          toast.success('插件目录已保存，正在热加载插件…')
+          await hotSyncPlugins('dir-changed')
         } catch (err) {
           toast.error(`保存失败：${err.message}`)
         }
@@ -448,8 +460,8 @@ export function apply(ctx) {
         try {
           const result = await api.rescanPlugins()
           dirsInfo = result
-          toast.success(`已重新扫描：外部 ${result?.externalCount ?? 0} 个插件，正在刷新页面…`)
-          reloadPage()
+          toast.success(`已重新扫描：外部 ${result?.externalCount ?? 0} 个插件，正在热加载…`)
+          await hotSyncPlugins('rescan')
         } catch (err) {
           toast.error(`重新扫描失败：${err.message}`)
         }
@@ -483,8 +495,8 @@ export function apply(ctx) {
             const data = await fileToBase64(file)
             const result = await api.uploadPlugin({ filename: file.name, data, overwrite })
             const names = (result?.installed || []).map(item => item.id).join('、')
-            toast.success(`插件已安装：${names || file.name}，正在刷新页面…`)
-            reloadPage()
+            toast.success(`插件已安装：${names || file.name}，正在热加载…`)
+            await hotSyncPlugins('install')
           } catch (err) {
             if (err?.status === 409) {
               const confirmed = await modal.confirm('插件已存在', `${err.message} 覆盖安装会先删除服务器上同名的外部插件目录，是否继续？`)
@@ -544,8 +556,8 @@ export function apply(ctx) {
             if (answer?.ok) {
               try {
                 await ctx.inject('api').removeExternalPlugin(id)
-                toast.success('外部插件文件已删除，正在刷新页面…')
-                reloadPage()
+                toast.success('外部插件文件已删除，正在热卸载…')
+                await hotSyncPlugins('delete-external')
               } catch (err) {
                 toast.error(`删除失败：${err.message}`)
               }
@@ -612,6 +624,8 @@ export function apply(ctx) {
         ctx.on('plugin:error', render),
         ctx.on('plugin:warning', render),
         ctx.on('plugin:settings-registered', render),
+        ctx.on('plugin:list-changed', () => render()),
+        ctx.on('plugin:reloaded', () => render()),
       ]
 
       sortKeyEl.value = sortKey

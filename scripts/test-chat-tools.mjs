@@ -1604,6 +1604,7 @@ async function main() {
 
       // 跨渠道：另一个私聊渠道 3 轮 [B1,B2,B3] 进入工作记忆；当前渠道只带最近 2 轮 [9,10]。
       // 期望工作记忆里的其它渠道轮次保留，当前渠道重合轮次被渠道记忆去重。
+      // 新版默认把跨渠道工作记忆限流为 2 轮，这里先显式调到 3 验证完整保留能力。
       const convOther = sessions.create({ name: '另一个私聊渠道', meta: { roleId } })
       store.channelForConversation(convOther.id)
       for (let index = 1; index <= 3; index += 1) {
@@ -1612,6 +1613,8 @@ async function main() {
       }
       config.set('chat.memoryRounds', 3)
       config.set('chat.channelRounds', 2)
+      const previousCross = config.get('chat.crossChannelMemoryRounds', 2)
+      config.set('chat.crossChannelMemoryRounds', 3)
       const cross = builder.build({ conversationId: convRound.id, roleId, persona: '' })
       const crossText = String(cross.messages.filter(message => message.role === 'user').map(message => String(message.content)).join('\n'))
       check(
@@ -1624,6 +1627,28 @@ async function main() {
           !crossText.includes('轮次问题8'),
         JSON.stringify(questionNumbers(cross)),
       )
+      // 默认 2 轮：更早的 B1 不应再进入当前上下文，减少旧渠道话题污染。
+      config.set('chat.crossChannelMemoryRounds', 2)
+      const cappedCross = builder.build({ conversationId: convRound.id, roleId, persona: '' })
+      const cappedText = String(cappedCross.messages.filter(message => message.role === 'user').map(message => String(message.content)).join('\n'))
+      check(
+        '跨渠道工作记忆默认限流为最近 2 轮（旧渠道话题不污染当前对话）',
+        cappedText.includes('轮次问题B2') && cappedText.includes('轮次问题B3') && !cappedText.includes('轮次问题B1'),
+        JSON.stringify(questionNumbers(cappedCross)),
+      )
+      const parseUserMeta = message => {
+        try {
+          return JSON.parse(String(message?.content || ''))?.meta || null
+        } catch (_) {
+          return null
+        }
+      }
+      const currentPayload = parseUserMeta([...cappedCross.messages].reverse().find(message => message.role === 'user'))
+      check('当前请求在最终 wire 上带 is_current_request=true', currentPayload?.is_current_request === true, JSON.stringify(currentPayload))
+      check('当前请求的 scope 是 current-channel', currentPayload?.scope === 'current-channel', JSON.stringify(currentPayload))
+      const crossPayload = cappedCross.messages.map(parseUserMeta).find(meta => meta?.scope === 'cross-channel')
+      check('跨渠道工作记忆标注 scope=cross-channel', !!crossPayload, JSON.stringify(crossPayload))
+      config.set('chat.crossChannelMemoryRounds', previousCross)
     } finally {
       config.set('chat.memoryRounds', previousMemory)
       config.set('chat.channelRounds', previousChannel)

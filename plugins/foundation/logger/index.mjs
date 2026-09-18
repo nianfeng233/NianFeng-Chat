@@ -124,11 +124,15 @@ export function apply(ctx) {
       level: normalizeForwardLevel(message?.type ?? message?.level),
       name: String(message?.name || 'frontend').slice(0, 120),
       text: text.slice(0, 8000),
+      // 前端本地 history 与后端 runtime.log 会拿到同一条日志：
+      // 带上 clientId 后日志页可以精确去重。
+      clientId: String(message?.nfId || ''),
     })
     if (forwardQueue.length > MAX_FORWARD_QUEUE) forwardQueue.splice(0, forwardQueue.length - MAX_FORWARD_QUEUE)
     scheduleForward()
   }
 
+  let exportSeq = 0
   // 真实接入 cordis：所有 ctx.logger 的输出都会经过这里
   // 注意 ctx.logger 是带名字的 Logger 实例，exporter 方法在 LoggerService 上（root.logger）
   const dispose = ctx.root.logger.exporter({
@@ -136,6 +140,8 @@ export function apply(ctx) {
     // default: 3 表示接收 debug 级在内的全部消息（是否打印由下面的 consoleLevel 决定）
     levels: { default: 3 },
     export(message) {
+      const exportId = `w${Date.now().toString(36)}${(++exportSeq).toString(36)}`
+      message.nfId = exportId
       history.push(message)
       if (history.length > MAX) history.splice(0, history.length - MAX)
       for (const listener of [...listeners]) {

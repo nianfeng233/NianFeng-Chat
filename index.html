@@ -63,7 +63,7 @@
 
   <div id="boot">
     <div class="mark">念</div>
-    <div class="tip">正在加载插件…</div>
+    <div class="tip" id="bootTip">正在加载插件…</div>
     <div class="bar"><i></i></div>
   </div>
 
@@ -75,7 +75,7 @@
 
   <script type="module">
     import { boot } from './src/main.mjs'
-    boot().catch(err => {
+    boot({ scope: 'webui' }).catch(err => {
       console.error('[nianfeng] boot failed', err)
       document.getElementById('boot')?.classList.add('fade')
       document.getElementById('fatalTip').textContent = String(err?.message || err)
