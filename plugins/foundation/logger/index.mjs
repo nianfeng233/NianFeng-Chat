@@ -83,6 +83,9 @@ export function apply(ctx) {
     return ['error', 'warn', 'info', 'debug'].includes(text) ? text : 'info'
   }
 
+  const FORWARD_RANK = { error: 0, warn: 1, info: 2, debug: 3 }
+  const forwardThreshold = () => normalizeForwardLevel(config?.get?.('logs.clientForwardLevel', 'warn'))
+
   const scheduleForward = () => {
     if (forwardTimer || !canForward()) return
     forwardTimer = setTimeout(() => {
@@ -116,12 +119,17 @@ export function apply(ctx) {
 
   const enqueueForward = message => {
     if (!canForward()) return
+    const level = normalizeForwardLevel(message?.type ?? message?.level)
+    // 默认只把 warn / error 转发到后端终端；浏览器刷新时不再把几十条
+    // 加载过程的 info / debug 日志灌进后端。需要完整前端日志时把
+    // logs.clientForwardLevel 设为 info / debug。
+    if ((FORWARD_RANK[level] ?? FORWARD_RANK.info) > (FORWARD_RANK[forwardThreshold()] ?? FORWARD_RANK.warn)) return
     const args = Array.isArray(message?.args) ? message.args : []
     const text = args.map(formatArg).join(' ').trim()
     if (!text) return
     forwardQueue.push({
       at: Number(message?.ts ?? message?.timestamp ?? Date.now()) || Date.now(),
-      level: normalizeForwardLevel(message?.type ?? message?.level),
+      level,
       name: String(message?.name || 'frontend').slice(0, 120),
       text: text.slice(0, 8000),
       // 前端本地 history 与后端 runtime.log 会拿到同一条日志：

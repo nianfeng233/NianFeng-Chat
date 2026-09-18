@@ -442,11 +442,14 @@ async function main() {
     }
     const externalRoot = join(TEMP, 'data-a', 'plugins')
     const demoZip = makeZip([
+      // 部分 zip 工具 / 打包器会写入根目录 `.` / `./` 条目；它必须被忽略，
+      // 而不能被路径规范化成空名后误报“压缩包包含不安全路径”。
+      { name: './', data: '' },
       { name: 'demo-plugin/index.mjs', data: "export const name = 'demo-plugin'\nexport const version = '1.0.0'\nexport function apply() {}\n" },
       { name: 'demo-plugin/manifest.json', data: '{"id":"demo-plugin","name":"demo-plugin"}' },
     ])
     const install = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64') })
-    check('上传 zip 可安装外部插件', install.status === 200 && install.data?.installed?.[0]?.id === 'demo-plugin', JSON.stringify(install.data))
+    check('上传 zip 可安装外部插件（含根目录 ./ 条目）', install.status === 200 && install.data?.installed?.[0]?.id === 'demo-plugin', JSON.stringify(install.data))
     const pluginsAfter = await (await fetch(backend.url + '/api/plugins')).json()
     check('安装后的插件出现在 /api/plugins', (pluginsAfter.plugins || []).some(item => item.id === 'demo-plugin' && item.external), JSON.stringify((pluginsAfter.plugins || []).map(item => item.id)))
     const installedFile = await readFile(join(externalRoot, 'demo-plugin', 'index.mjs'), 'utf8').catch(() => '')

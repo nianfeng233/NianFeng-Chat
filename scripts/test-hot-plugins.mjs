@@ -26,7 +26,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 let querySeq = 0
 /** 写一个外部插件目录，返回与后端 /api/plugins 相同形状的 entry。 */
-async function writePlugin(root, { id, version, depends = {}, inject = [], provides = [], source = '' }) {
+async function writePlugin(root, { id, version, depends = {}, optionalDepends = {}, inject = [], provides = [], source = '' }) {
   const dir = join(root, id)
   await mkdir(dir, { recursive: true })
   const file = join(dir, 'index.mjs')
@@ -37,6 +37,7 @@ export const name = ${JSON.stringify(id)}
 export const version = ${JSON.stringify(version)}
 export const displayName = ${JSON.stringify(`Hot ${id}`)}
 export const depends = ${JSON.stringify(depends)}
+export const optionalDepends = ${JSON.stringify(optionalDepends)}
 export const inject = ${JSON.stringify(inject)}
 export const provides = ${JSON.stringify(provides)}
 export function apply(ctx) {
@@ -58,6 +59,7 @@ export function apply(ctx) {
     external: true,
     source: 'external',
     depends,
+    optionalDepends,
     inject,
     provides,
   }
@@ -136,6 +138,40 @@ async function main() {
     await app.syncEntries([], { disabled: [], removed: [], enabled: [], reason: 'delete-all' })
     check('已删除插件从 records 移除', ['hot-alpha', 'hot-beta', 'hot-broken'].every(id => !app.get(id)))
     check('对应服务全部释放', !app.services.get('hot-alpha-service') && !app.services.get('hot-beta-service') && !app.services.get('hot-broken-service'))
+
+    console.log('\n⑦ 旧版插件依赖版本不匹配必须标红并阻止激活')
+    const legacyApi = await writePlugin(root, { id: 'hot-legacy-api', version: '1.0.0' })
+    const needsV2 = await writePlugin(root, {
+      id: 'hot-needs-v2',
+      version: '1.0.0',
+      depends: { 'hot-legacy-api': '^2.0.0' },
+    })
+    const optionalV2 = await writePlugin(root, {
+      id: 'hot-optional-v2',
+      version: '1.0.0',
+      optionalDepends: { 'hot-legacy-api': '^2.0.0' },
+    })
+    await app.syncEntries([legacyApi, needsV2, optionalV2], state())
+    await wait(100)
+    const requiredRecord = app.list().find(record => record.id === 'hot-needs-v2')
+    const optionalRecord = app.list().find(record => record.id === 'hot-optional-v2')
+    check(
+      '必须依赖版本不匹配时插件不会激活',
+      requiredRecord?.status === 'inactive' && /版本|实际 1\.0\.0/.test(requiredRecord?.reason || ''),
+      JSON.stringify({ status: requiredRecord?.status, reason: requiredRecord?.reason }),
+    )
+    check(
+      '必须依赖版本不匹配标记为 error',
+      requiredRecord?.dependencyHealth === 'error' &&
+        requiredRecord?.dependencyIssues?.some(item => item.required && item.status === 'version-mismatch' && item.severity === 'error'),
+      JSON.stringify(requiredRecord?.dependencyIssues),
+    )
+    check(
+      '可选依赖版本不匹配保持 warning，不阻止激活',
+      optionalRecord?.status === 'active' && optionalRecord?.dependencyHealth === 'warning' &&
+        optionalRecord?.dependencyIssues?.every(item => !item.required || item.severity !== 'error'),
+      JSON.stringify({ status: optionalRecord?.status, health: optionalRecord?.dependencyHealth }),
+    )
   } finally {
     try {
       await app.cordis.stop?.()

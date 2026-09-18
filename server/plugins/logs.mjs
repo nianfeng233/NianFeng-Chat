@@ -153,7 +153,9 @@ const refreshLine = item => {
   return item
 }
 
-const writeConsole = item => {
+const writeConsole = (item, consoleLevel = 'info') => {
+  // 终端只输出当前级别及以上的日志：默认 info，debug（含每条 HTTP 访问）只落盘。
+  if (LEVEL_RANK[item.level] > LEVEL_RANK[consoleLevel]) return
   const tagColor = item.tag === 'Web' ? ANSI.magenta : item.tag === 'Plug' ? ANSI.cyan : ANSI.gray
   const levelColor = item.level === 'error' ? ANSI.red : item.level === 'warn' ? ANSI.yellow : item.level === 'debug' ? ANSI.gray : ANSI.cyan
   const prefix =
@@ -210,7 +212,7 @@ const nativeEffect = (ctx, cleanup) => {
   ctx.effect(() => () => cleanup())
 }
 
-export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = '' } = {}) {
+export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = '', consoleLevel = 'info' } = {}) {
   const logsDir = join(dataDir, 'logs')
   const logFile = join(logsDir, 'runtime.log')
   const rotatedFile = `${logFile}.1`
@@ -227,6 +229,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
   const sseClients = new Set()
   let seq = 0
   let fileBytes = 0
+  let activeConsoleLevel = normalizeLevel(consoleLevel)
   let writeChain = Promise.resolve()
   let readyResolve = () => {}
   const ready = new Promise(resolve => {
@@ -279,7 +282,7 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
     lines.push(item)
     if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES)
     if (persist) appendFiles(item)
-    writeConsole(item)
+    writeConsole(item, activeConsoleLevel)
     if (broadcast) {
       for (const listener of [...listeners]) {
         try {
@@ -360,6 +363,11 @@ export function createRuntimeLogStore(ctx, { dataDir = process.cwd(), version = 
     name: 'runtimeLogs',
     version,
     instanceId: () => instanceId,
+    consoleLevel: () => activeConsoleLevel,
+    setConsoleLevel(level) {
+      activeConsoleLevel = normalizeLevel(level)
+      return activeConsoleLevel
+    },
     file: () => logFile,
     rotatedFile: () => rotatedFile,
     ready: () => ready,
@@ -497,6 +505,16 @@ export function apply(ctx) {
     })
 
   ctx.provide('runtimeLogs', store)
+
+  // 后端终端默认只打印 info 及以上；debug 仍写入 runtime.log / 日志页，
+  // 避免浏览器每次刷新产生的一串 HTTP 访问日志把终端刷屏。
+  const configuredLogLevel = settings?.get?.()?.logLevel
+  if (configuredLogLevel) store.setConsoleLevel(configuredLogLevel)
+  const offLogLevel = ctx.on?.('config:changed', payload => {
+    const key = String(payload?.key || '')
+    if (key === '*' || key === 'logLevel') store.setConsoleLevel(settings?.get?.()?.logLevel)
+  })
+  if (typeof offLogLevel === 'function') ctx.effect(() => () => offLogLevel())
 
   // 兼容旧日志页 / 其它消费者：hub 上的 log/line 事件保持原样。
   const offHubLine = store.onLine(line => {

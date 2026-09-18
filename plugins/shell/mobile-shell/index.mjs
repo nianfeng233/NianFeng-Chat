@@ -37,12 +37,35 @@ import { icons } from '../../../src/util/icons.mjs'
 import { MOBILE_SHELL_CSS } from './style.mjs'
 
 export function apply(ctx) {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return
   const router = ctx.inject('view-router')
   const sessions = ctx.inject('session-service')
   const events = ctx.inject('event-bus')
   const channels = ctx.inject('channel-registry?')
   const settingsView = ctx.inject('settings-view?')
+
+  let mounted = false
+  let pane = 'list'
+  let settingsOpen = false
+
+  // 服务始终注册：桌面访问 / 非浏览器环境只是 enabled()=false，不能因为
+  // “当前没启用手机布局”就让声明 provide 的插件在自检里被标黄。
+  ctx.provide(
+    'mobile-shell',
+    {
+      name: 'mobile-shell',
+      enabled: () => mounted,
+      pane: () => pane,
+      showList: () => {
+        if (mounted) setPane('list')
+      },
+      showMain: () => {
+        if (mounted) setPane('main')
+      },
+    },
+    { type: 'singleton' },
+  )
+
+  if (typeof window === 'undefined' || typeof document === 'undefined') return
 
   const query = new URLSearchParams(window.location.search || '')
   const forced = String(query.get('mobile') || query.get('layout') || '').toLowerCase()
@@ -52,12 +75,11 @@ export function apply(ctx) {
   const mobile = forced === '1' || forced === 'mobile' ? true : forced === '0' || forced === 'desktop' ? false : uaMobile || coarseSmall
   if (!mobile) return
 
+  mounted = true
+  settingsOpen = settingsView?.isOpen?.() === true
   document.documentElement.dataset.mobileLayout = '1'
   document.body.classList.add('mobile-layout')
   useStyle(ctx, MOBILE_SHELL_CSS)
-
-  let settingsOpen = settingsView?.isOpen?.() === true
-  let pane = 'list'
 
   document.body.insertAdjacentHTML(
     'beforeend',
@@ -133,7 +155,7 @@ export function apply(ctx) {
     }
   }
 
-  const setPane = next => {
+  function setPane(next) {
     pane = next === 'main' ? 'main' : 'list'
     document.body.classList.toggle('mobile-pane-main', pane === 'main')
     document.body.classList.toggle('mobile-pane-list', pane === 'list')
@@ -260,11 +282,4 @@ export function apply(ctx) {
     document.body.classList.remove('mobile-layout', 'mobile-pane-main', 'mobile-pane-list', 'mobile-settings-open')
   })
 
-  ctx.provide('mobile-shell', {
-    name: 'mobile-shell',
-    enabled: () => true,
-    pane: () => pane,
-    showList: () => setPane('list'),
-    showMain: () => setPane('main'),
-  }, { type: 'singleton' })
 }

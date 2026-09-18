@@ -27,10 +27,9 @@ export const depends = {
 }
 export const optionalDepends = {
   'backend-client': '>=1.0.0',
-  'memory-store': '^1.0.0',
   'session-service': '>=2.0.0',
 }
-export const inject = ['view-router', 'event-bus', 'api?', 'memory-store?', 'session-service?']
+export const inject = ['view-router', 'event-bus', 'api?', 'session-service?']
 export const provides = [{ name: 'library-view', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -802,5 +801,6 @@ export function apply(ctx) {
     },
   })
 
+  ctx.provide('library-view', { name: 'library-view' }, { type: 'singleton' })
   ctx.logger.debug('记忆与知识库视图就绪')
 }

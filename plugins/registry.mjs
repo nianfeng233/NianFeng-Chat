@@ -846,7 +846,12 @@ export const plugins = [
       "session-service?",
       "toast?"
     ],
-    "provides": [],
+    "provides": [
+      {
+        "name": "agent-client",
+        "type": "singleton"
+      }
+    ],
     "permissions": [],
     "slots": [],
     "path": "./plugins/features/agent-client/index.mjs",
@@ -2399,14 +2404,12 @@ export const plugins = [
     },
     "optionalDepends": {
       "backend-client": ">=1.0.0",
-      "memory-store": "^1.0.0",
       "session-service": ">=2.0.0"
     },
     "inject": [
       "view-router",
       "event-bus",
       "api?",
-      "memory-store?",
       "session-service?"
     ],
     "provides": [

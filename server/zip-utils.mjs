@@ -54,7 +54,14 @@ function normalizeEntryName(name) {
   return String(name ?? '')
     .replace(/\\/g, '/')
     .replace(/^\.\/+/, '')
+    .replace(/^\.$/, '')
     .replace(/\/+/g, '/')
+}
+
+/** 根目录条目：部分打包器会写入 `.` / `./` / `/`，它本身不是插件文件，直接忽略。 */
+function isRootDirectoryEntry(rawName, method, compressedSize, uncompressedSize) {
+  const text = String(rawName ?? '').replace(/\\/g, '/')
+  return method === 0 && compressedSize === 0 && uncompressedSize === 0 && (text === '.' || text === './' || text === '/')
 }
 
 function isSymlinkEntry(externalAttr) {
@@ -95,7 +102,14 @@ export function listZipEntries(buffer, options = {}) {
     let localOffset = buffer.readUInt32LE(offset + 42)
     const nameStart = offset + 46
     if (nameStart + nameLength > buffer.length) throw new ZipError('zip 条目名越界')
-    const name = normalizeEntryName(buffer.subarray(nameStart, nameStart + nameLength).toString('utf8'))
+    const rawName = buffer.subarray(nameStart, nameStart + nameLength).toString('utf8')
+    // 进入下一个中央目录条目前的固定偏移；根目录条目直接跳过用于后续计算。
+    const nextOffset = nameStart + nameLength + extraLength + commentLength
+    if (isRootDirectoryEntry(rawName, method, compressedSize, uncompressedSize)) {
+      offset = nextOffset
+      continue
+    }
+    const name = normalizeEntryName(rawName)
 
     // Zip64 扩展字段：只解析大小 / 偏移，仍拒绝真正的 Zip64 EOCD。
     if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
@@ -123,10 +137,10 @@ export function listZipEntries(buffer, options = {}) {
       }
     }
 
-    if (flags & 0x1) throw new ZipError(`压缩包包含加密条目，无法安装：${name}`)
-    if (method !== 0 && method !== 8) throw new ZipError(`不支持的压缩方式（method=${method}）：${name}`)
-    if (!isSafeZipEntryName(name)) throw new ZipError(`压缩包包含不安全路径：${name}`)
-    if (isSymlinkEntry(externalAttr)) throw new ZipError(`压缩包包含符号链接，已拒绝：${name}`)
+    if (flags & 0x1) throw new ZipError(`压缩包包含加密条目，无法安装：${name || rawName || '(空条目名)'}`)
+    if (method !== 0 && method !== 8) throw new ZipError(`不支持的压缩方式（method=${method}）：${name || rawName || '(空条目名)'}`)
+    if (!isSafeZipEntryName(name)) throw new ZipError(`压缩包包含不安全路径：${name || rawName || '(空条目名)'}`)
+    if (isSymlinkEntry(externalAttr)) throw new ZipError(`压缩包包含符号链接，已拒绝：${name || rawName || '(空条目名)'}`)
 
     const isDirectory = /\/$/.test(name) || (uncompressedSize === 0 && compressedSize === 0 && /[\\/]$/.test(name))
     if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== LOCAL_SIGNATURE) {

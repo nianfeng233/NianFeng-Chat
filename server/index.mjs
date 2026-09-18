@@ -253,7 +253,11 @@ export async function startBackend({
 
   // 尽早接入日志：后面的 settings / sessions / http / channel bridge 启动日志
   // 都会同时进入终端、runtime.log 与 WebUI 日志页。
-  attachRuntimeLogStore(ctx, { dataDir: paths.dataDir, version: pkg.version })
+  attachRuntimeLogStore(ctx, {
+    dataDir: paths.dataDir,
+    version: pkg.version,
+    consoleLevel: logLevel || process.env.NIANFENG_LOG_LEVEL || 'info',
+  })
 
   const plugins = [
     [settingsPlugin, { dataDir: paths.dataDir, logLevel }],

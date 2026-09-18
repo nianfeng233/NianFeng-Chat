@@ -112,6 +112,8 @@ export function apply(ctx) {
 
       const severityOf = (plugin, list) => {
         const own = issuesOf(plugin.id, list)
+        const ownWarning = own.some(i => i.severity === 'warning' || i.severity === 'error')
+        const recordWarning = (plugin.warnings || []).some(item => item?.severity && item.severity !== 'info')
         if (plugin.status === 'error' || plugin.conflict || own.some(i => i.severity === 'error')) return 'error'
         // 用户主动禁用的插件保持灰色，不因为它的依赖当前未启用而虚报红/黄。
         if (plugin.status === 'disabled') return 'disabled'
@@ -119,8 +121,8 @@ export function apply(ctx) {
         if (plugin.unavailable && plugin.status === 'active') return 'warning'
         if (
           plugin.status === 'inactive' ||
-          plugin.warnings?.length ||
-          own.length ||
+          recordWarning ||
+          ownWarning ||
           plugin.dependencyHealth === 'warning' ||
           hasOptionalDependencyIssue(plugin)
         ) {
@@ -359,7 +361,9 @@ export function apply(ctx) {
       }
 
       /* ---------------- 插件目录（内置 + 外部） ---------------- */
-    let dirsInfo = null
+    // 先渲染“读取中”的目录骨架：添加插件 / 选择目录等按钮不依赖后端响应，
+    // 刷新页面后不会再出现“顶部半天没有添加插件按钮”的空窗期。
+    let dirsInfo = { loading: true, externalDir: '', builtinDir: '', count: 0, externalCount: 0, warnings: [] }
     /**
      * 安装 / 删除 / 重扫后的统一热同步：拉取最新 /api/plugins 并交给 runtime，
      * 新插件当场 import 激活、删除的当场释放；不刷新页面。
@@ -391,37 +395,29 @@ export function apply(ctx) {
         dirsEl.querySelector('[data-dir-action="reload"]')?.addEventListener('click', () => loadPluginDirs())
         return
       }
-      if (!api.supports?.('plugin-dirs')) {
-        dirsEl.innerHTML = section('插件目录', card(
-          row('后端未提供外部插件能力', '当前运行的后端是旧进程：请完全关闭念风后重新启动（更新后的后端才会扫描外部插件目录）。', '<span class="plugin-tag warn">需要重启</span>'),
-        ))
-        return
-      }
-      if (!dirsInfo) {
-        dirsEl.innerHTML = section('插件目录', card(row('正在读取插件目录…', '稍候', '')))
-        return
-      }
-      const external = dirsInfo.externalDir || ''
-      const warnings = (dirsInfo.warnings || []).map(w => `${w.id}: ${w.message}`).join('；')
+      const loading = dirsInfo?.loading === true
+      const external = dirsInfo?.externalDir || ''
+      const warnings = (dirsInfo?.warnings || []).map(w => `${w.id}: ${w.message}`).join('；')
       dirsEl.innerHTML = section('插件目录', card(
-        row('内置插件目录', '随版本发布，升级 exe 时会被整体替换；不要在这里长期放自己的插件',
-          `<span class="mono plugin-path">${escapeHtml(dirsInfo.builtinDir || '—')}</span>`) +
+        row('内置插件目录', loading ? '正在读取插件目录…' : '随版本发布，升级 exe 时会被整体替换；不要在这里长期放自己的插件',
+          loading ? '' : `<span class="mono plugin-path">${escapeHtml(dirsInfo.builtinDir || '—')}</span>`) +
         `<div class="setting-row plugin-dir-item">
           <div class="setting-main">
             <div class="setting-name">外部插件目录</div>
-            <div class="setting-help">${dirsInfo.envOverride ? '当前由环境变量 NIANFENG_PLUGINS_DIR 指定，设置页的修改不会生效' : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs），也可以直接上传插件 zip 安装'}</div>
+            <div class="setting-help">${loading ? '正在读取插件目录，按钮已可使用。' : dirsInfo.envOverride ? '当前由环境变量 NIANFENG_PLUGINS_DIR 指定，设置页的修改不会生效' : '把插件文件夹放进这里（每个插件一个子目录，内含 index.mjs），也可以直接上传插件 zip 安装'}</div>
           </div>
           <div class="setting-control plugin-dir-controls">
             <input class="setting-input plugin-dir-input" id="pluginDirInput" value="${escapeHtml(external)}" />
             <button class="outline-btn plugin-upload-btn" data-dir-action="upload">添加插件</button>
-            <button class="outline-btn" data-dir-action="pick">选择目录</button>
-            <button class="outline-btn" data-dir-action="apply">应用并刷新</button>
-            <button class="outline-btn" data-dir-action="open">打开目录</button>
-            <button class="outline-btn" data-dir-action="rescan">重新扫描</button>
+            <button class="outline-btn" data-dir-action="pick"${loading ? ' disabled' : ''}>选择目录</button>
+            <button class="outline-btn" data-dir-action="apply"${loading ? ' disabled' : ''}>应用并刷新</button>
+            <button class="outline-btn" data-dir-action="open"${loading ? ' disabled' : ''}>打开目录</button>
+            <button class="outline-btn" data-dir-action="rescan"${loading ? ' disabled' : ''}>重新扫描</button>
           </div>
         </div>` +
-        row('扫描结果', '外部插件数量 / 插件总数', `<span class="mono">外部 ${dirsInfo.externalCount ?? 0} 个 / 共 ${dirsInfo.count ?? 0} 个</span>`) +
-        (warnings ? row('扫描提示', escapeHtml(warnings), '') : ''),
+        row('扫描结果', loading ? '正在读取插件目录…' : '外部插件数量 / 插件总数',
+          loading ? '' : `<span class="mono">外部 ${dirsInfo.externalCount ?? 0} 个 / 共 ${dirsInfo.count ?? 0} 个</span>`) +
+        (!loading && warnings ? row('扫描提示', escapeHtml(warnings), '') : ''),
       ))
       dirsEl.querySelector('[data-dir-action="pick"]')?.addEventListener('click', async () => {
         try {
@@ -487,10 +483,7 @@ export function apply(ctx) {
           })
         const uploadFile = async (file, overwrite = false) => {
           try {
-            if (!api.supports?.('plugin-upload')) {
-              toast.error('当前后端不支持上传安装插件，请升级并重启念风后再试。')
-              return
-            }
+
             toast.info(`正在上传 ${file.name}…`)
             const data = await fileToBase64(file)
             const result = await api.uploadPlugin({ filename: file.name, data, overwrite })
@@ -517,17 +510,11 @@ export function apply(ctx) {
     const loadPluginDirs = async () => {
       const api = ctx.inject('api')
       if (!api) return
-      try {
-        await api.health()
-      } catch (err) {
-        dirsInfo = { error: `后端未连接：${err.message}` }
-        renderPluginDirs()
-        return
-      }
-      if (!api.supports?.('plugin-dirs')) {
-        renderPluginDirs()
-        return
-      }
+      // 先立即画出可用的目录 / 按钮骨架，再直接请求插件目录。
+      // 不再先等 health（它最长 8 秒），否则远程部署刷新时“添加插件”区
+      // 会一直停在空白 / 旧后端提示上。
+      dirsInfo = { ...(dirsInfo || {}), loading: true, error: '' }
+      renderPluginDirs()
       try {
         dirsInfo = await api.pluginDirs()
       } catch (err) {

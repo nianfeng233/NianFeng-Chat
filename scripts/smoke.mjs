@@ -353,7 +353,8 @@ async function main() {
   const removeRes = await fetch(`${backend.url}/api/plugins/external/smoke-external`, { method: 'DELETE' })
   check('外部插件删除接口生效', removeRes.ok, `HTTP ${removeRes.status}`)
 
-  // depends 版本不匹配：加载前标记未激活并进入 selfCheck 警告，而不是悄悄按旧版本启动。
+  // depends 版本不匹配：加载前标记未激活并进入 selfCheck 错误，而不是悄悄按旧版本启动。
+  // 旧版外部插件未升级时，必须依赖版本不匹配会直接阻止激活并标红。
   const providerDir = join(externalRoot, 'views', 'smoke-dep-provider')
   const versionDir = join(externalRoot, 'views', 'smoke-version')
   await mkdir(providerDir, { recursive: true })
@@ -395,9 +396,9 @@ async function main() {
   const versionRecord = versionApp.records.get('smoke-version')
   const versionIssues = versionApp.selfCheck()
   check(
-    '插件 depends 版本不匹配被标记警告',
-    versionRecord?.status === 'active' &&
-      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
+    '插件 depends 版本不匹配被标记错误且不激活',
+    versionRecord?.status === 'inactive' &&
+      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'error' && issue.message.includes('版本不匹配')),
     `${versionRecord?.status} · ${(versionIssues.find(issue => issue.id === 'smoke-version')?.message || '')}`,
   )
 

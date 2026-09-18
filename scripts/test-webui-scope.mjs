@@ -55,6 +55,18 @@ check('远程代聊通道 agent-client 已激活', app.get('agent-client')?.stat
 console.log('\n③ 无业务执行插件时的自检')
 const fatal = app.list().filter(record => record.status === 'error' && record.id !== 'app-shell')
 check('没有 error 级插件', fatal.length === 0, JSON.stringify(fatal.map(record => [record.id, record.reason])))
+const dependencyBad = app.list().filter(record => record.dependencyHealth !== 'ok')
+check(
+  '出厂内置插件依赖健康度全部正常',
+  dependencyBad.length === 0,
+  JSON.stringify(dependencyBad.map(record => [record.id, record.dependencyHealth, record.dependencyIssues])),
+)
+const factoryWarning = app.selfCheck().filter(issue => issue.severity === 'warning' || issue.severity === 'error')
+check(
+  '出厂内置插件没有 warning / error 自检项',
+  factoryWarning.length === 0,
+  JSON.stringify(factoryWarning.map(issue => [issue.id, issue.severity, issue.message])),
+)
 
 try {
   await app.cordis.stop?.()

@@ -398,7 +398,7 @@ export function apply(ctx) {
         thirdParty: active.filter(r => !r.manifest.core).length,
         errors: list.filter(r => r.status === 'error').length + list.filter(r => r.conflict).length,
         inactive: list.filter(r => r.status === 'inactive').length,
-        warnings: issues.filter(i => i.severity !== 'error').length,
+        warnings: issues.filter(i => i.severity === 'warning').length,
         dependencyErrors: dependencies.filter(d => d.required && d.severity === 'error').length,
         dependencyWarnings: dependencies.filter(d => !d.required && d.severity === 'warning').length,
         services: ctx.registry.list().length,

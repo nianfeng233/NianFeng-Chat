@@ -20,7 +20,7 @@ import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.0.0'
+export const VERSION = '2.0.1'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -895,7 +895,7 @@ export class App {
     return this.dependsIssuesFor(record, record.manifest.optionalDepends || {})
   }
 
-  /** 硬依赖问题：缺失 / 加载失败 / 未激活；版本不匹配只做警告，不阻塞加载 */
+  /** 硬依赖问题：缺失 / 加载失败 / 未激活 / 版本不匹配；后几类都会阻止插件激活。 */
   hardDependsIssues(record) {
     const issues = []
     for (const [dep, range] of Object.entries(record.manifest.depends || {})) {
@@ -905,6 +905,9 @@ export class App {
       else if (target.status === STATUS.ERROR) issues.push(`${dep}(加载失败)`)
       else if (target.status === STATUS.INACTIVE) issues.push(`${dep}(未激活)`)
       else if (target.status === STATUS.DISABLED) issues.push(`${dep}(已被禁用)`)
+      else if (range && range !== '*' && !satisfies(target.manifest.version, range)) {
+        issues.push(`${dep}@${range}(实际 ${target.manifest.version})`)
+      }
     }
     return [...new Set(issues)]
   }
@@ -912,7 +915,8 @@ export class App {
   /**
    * 结构化依赖报告（插件管理页直接消费）。
    * status: ok | pending | missing | version-mismatch | error | inactive | disabled | removed
-   * severity: ok | warning | error；必须依赖缺失/失效为 error，可选依赖任何异常为 warning。
+   * severity: ok | warning | error；必须依赖缺失 / 失效 / 版本不匹配为 error，
+   * 可选依赖任何异常都只做 warning。
    */
   dependencyReportFor(record, kind = DEPENDENCY_KIND.REQUIRED) {
     if (!record) return []
@@ -963,7 +967,7 @@ export class App {
       } else if (range !== '*' && !satisfies(installedVersion, range)) {
         report.status = 'version-mismatch'
         report.satisfied = false
-        report.severity = 'warning'
+        report.severity = optional ? 'warning' : 'error'
         report.reason = `版本不匹配（需要 ${range}，实际 ${installedVersion}）`
       } else if (target.status === STATUS.PENDING) {
         report.status = STATUS.PENDING
@@ -1205,14 +1209,14 @@ export class App {
         if (item.status === 'ok' || item.status === 'pending') continue
         const required = item.required
 
-        // 版本范围不匹配只做黄色告警，不阻止插件加载。
+        // 必须依赖版本不匹配按错误处理，未升级的旧插件不会再只标黄；可选依赖仍只提示。
         if (item.status === 'version-mismatch') {
           push(
             id,
-            'warning',
+            required ? 'error' : 'warning',
             `${required ? '依赖版本不匹配' : '可选依赖版本不匹配'}：${item.name}@${item.range}（实际 ${item.installedVersion}）`,
             required
-              ? '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内'
+              ? '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内；旧版插件需要升级到与之匹配的版本'
               : '可选依赖已安装但版本不同，相关扩展能力可能不可用；升级 / 降级后会自动恢复',
           )
           continue
