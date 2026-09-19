@@ -5,7 +5,7 @@
 -->
 # 图片出入站与上下文保险 · 设计说明
 
-> 覆盖：WebUI、微信 Clawbot、QQ 官方机器人（仅私聊）。
+> 覆盖：WebUI、微信 Clawbot、QQ 官方机器人（私聊 C2C + 群聊 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`）。
 > 目标：用户图片模型能看到、助手能发图，同时避免图片把上下文 / 聊天记录撑爆。
 
 ## 1. 存储：消息只存 imageId
@@ -84,10 +84,11 @@
 
 ## 5. 渠道适配
 
-### 5.1 QQ 官方机器人（仅私聊）
+### 5.1 QQ 官方机器人（私聊 / 群聊）
 
-- 入站：`C2C_MESSAGE_CREATE` 的 `attachments[]`（HTTPS URL）由 bridge 下载（≤3MB/张、≤4 张、总量≤6MB）→ 存 image-service → `meta.images` 只留 id；
-- 出站：`POST /v2/users/{openid}/files`（`file_type:1, srv_send_msg:false`）→ `file_info` → `POST /v2/users/{openid}/messages`（`msg_type:7 + media + msg_id/msg_seq`）。
+- 入站：`C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 的 `attachments[]`（HTTPS URL）由 bridge 下载（≤3MB/张、≤4 张、总量≤6MB）→ 存 image-service → `meta.images` 只留 id；
+- 出站私聊：`POST /v2/users/{openid}/files`（`file_type:1, srv_send_msg:false`）→ `file_info` → `POST /v2/users/{openid}/messages`（`msg_type:7 + media + msg_id/msg_seq`）；
+- 出站群聊：`POST /v2/groups/{group_openid}/files`（`file_type:1, srv_send_msg:false`）→ `file_info` → `POST /v2/groups/{group_openid}/messages`（`msg_type:7 + media + msg_id/msg_seq`）。
 
 ### 5.2 微信 Clawbot
 

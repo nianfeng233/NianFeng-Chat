@@ -23,7 +23,7 @@
 | `scripts/test-backend.mjs` | 后端 API 测试（65 项，含空回复重试与明确报错） | 改后端接口后补测试 |
 | `scripts/test-security.mjs` | 安全回归（39 项：Origin / Host / CORS、health 脱敏、SSRF、令牌、静态敏感路径、SSE 关闭） | 改 HTTP 安全边界或 /api/rss 后补测试 |
 | `scripts/test-clawbot.mjs` | 微信 Clawbot 后端桥测试（本地 mock iLink，26 项） | 改 Clawbot 协议后补测试 |
-| `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，46 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、图片或被动回复后补测试 |
+| `scripts/test-qqbot.mjs` | QQ 官方机器人后端桥测试（本地 mock OpenAPI / q.qq.com 绑定服务，59 项） | 改 QQ 协议、绑定路由、沙箱降级、未绑定提示、群聊 / 群成员身份、多机器人联动、SILK 语音、图片或被动回复后补测试 |
 | `scripts/test-napcat.mjs` | NapCat 后端桥测试（本地 reverse WebSocket mock，74 项，含合并转发发送与外发组装） | 改 OneBot 路由 / 连接复用 / 群聊或私聊发送 / 合并转发后补测试 |
 | `scripts/test-images.mjs` | 图片文件服务测试（保存 / 读取 / 索引无 base64 / 裁剪，8 项） | 改图片存储或 /api/images 路由后补测试 |
 | `scripts/test-chat.mjs` | 后端 /api/chat SSE 集成测试（13 项） | 改模型协议后补测试 |
@@ -83,9 +83,9 @@ export function apply(ctx) { /* ... */ }
 | `session-service` | `domain/session-service/index.mjs` | 会话 CRUD、上下文组装、**后端持久化 + 离线降级 + 迁移** | `session-service` | 会话数据模型/同步策略 |
 | `message-service` | `domain/message-service/index.mjs` | 消息增删改、流式追加、状态机、全部 `message:*` 事件 | `message-service` | 消息状态与事件 |
 | `model-registry` | `domain/model-registry/index.mjs` | 提供商/模型注册、`model` 可选中服务、`replaceModels()` | `model-registry` | 模型列表结构改动 |
-| `model-service` | `domain/model-service/index.mjs` | `stream/complete` 抽象接口、模型未配置时的明确报错 | `model-service` | 调用模型的统一入口 |
+| `model-service` | `domain/model-service/index.mjs` | `stream/complete` 抽象接口、模型未配置时的明确报错、全局 / 角色级备用模型调度 | `model-service` | 调用模型的统一入口 |
 | `view-router` | `domain/view-router/index.mjs` | 当前视图、视图注册表、列表宽度记忆 | `view-router` | 新增视图/切视图逻辑 |
-| `channel-registry` | `domain/channel-registry/index.mjs` | 渠道类型/实例、分组、拖拽排序、**未实现类型登记 `plannedList`** | `channel-registry` | 渠道模型改动 |
+| `channel-registry` | `domain/channel-registry/index.mjs` | 渠道类型/实例、分组、拖拽排序、**渠道类型注册**（`plannedList` 仅为旧调用保留空实现） | `channel-registry` | 渠道模型改动 |
 | `plugin-manager` | `domain/plugin-manager/index.mjs` | 插件启停/卸载/统计/`describe()`/`selfCheck()` | `plugin-manager` | 插件管理策略 |
 | `search-service` | `domain/search-service/index.mjs` | 全局搜索（会话/消息/渠道/插件/设置） | `search-service` | 搜索源扩展 |
 | `export-service` | `domain/export-service/index.mjs` | Markdown / JSON / TXT 导出 | `export-service` | 导出格式 |
@@ -156,7 +156,7 @@ export function apply(ctx) { /* ... */ }
 | `settings-container` (V16) | `views/settings-container/` | 设置页注册表、分组导航、页面调度 | 新增设置页先看这里 |
 | `settings-item-general` (V17) | `views/settings-item-general/` | 通用设置、语言、聊天链路 | 常规开关 |
 | `settings-item-chat-auth` | `views/settings-item-chat-auth/` | 跨渠道读取 / 发送策略、手动授权记录与权限审计集中管理 | 渠道授权 |
-| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理、当前模型、推理等级 / temperature、失败自动切换备用模型 | 模型页 |
+| `settings-item-model` (V18) | `views/settings-item-model/` | 自定义提供商管理、当前模型、推理等级 / temperature、全局失败自动切换备用模型 | 模型页 |
 | `settings-item-theme` (V19) | `views/settings-item-theme/` | 主题/背景/强调色/界面细节 + `appearance-page.addSection()` | 外观页 |
 | `settings-item-bubble` (V20) | `views/settings-item-bubble/` | 气泡切换（插入外观页） | 气泡选择 UI |
 | `settings-item-plugins` (V21) | `views/settings-item-plugins/` | **插件自检、错误/冲突标红、详情、启停** | 插件管理页 |
@@ -176,12 +176,12 @@ export function apply(ctx) { /* ... */ }
 
 | 插件 | 路径 | 职责 | 修改指引 |
 |---|---|---|---|
-| `chat-flow` | `features/chat-flow/index.mjs` | 队列 → 存 → 上下文 → 工具循环 → 收尾；人设、推理等级、temperature、原生工具 / 文本工具协议兼容 | 聊天主链路 |
+| `chat-flow` | `features/chat-flow/index.mjs` | 队列 → 存 → 上下文 → 工具循环 → 收尾；人设、主模型 / 角色级备用模型、推理等级、temperature、原生工具 / 文本工具协议兼容 | 聊天主链路 |
 | `chat-notify` | `features/chat-notify/index.mjs` | 监听 `message:added / message:done`；后台或非当前会话时逐条生成角色消息通知 | 消息提醒策略 |
 | `plugin-health-guard` | `features/plugin-health-guard/index.mjs` | 启动插件自检，发现红色错误时弹窗并引导到插件设置 | 错误门限与提示文案 |
 | `channel-base` | `features/channel-base/index.mjs` | 渠道基座：连接钩子 + 入站消息落库为会话 | 新渠道插件继承它 |
 | `model-adapter-backend` | `features/model-adapter-backend/index.mjs` | 把后端提供商注册为前端模型，经 `/api/chat` 流式对话 / 透传 tools | 模型来源与参数传递 |
-| `character-editor` | `features/character-editor/` | 新建 / 编辑会话角色：人格、模型、头像（捏人窗口） | 角色系统 |
+| `character-editor` | `features/character-editor/` | 新建 / 编辑会话角色：人格、主模型、角色级备用模型（跟随全局 / 不启用 / 指定）、头像（捏人窗口） | 角色系统 |
 | `chat-tools` | `features/chat-tools/index.mjs` | `read_messages / chat_send / send_document / read_document` 工具实现；`send_document` 支持一次多篇资料（`documents` 数组），渠道侧按「聊天记录转发」发送 | 聊天工具语义 |
 | `context-builder` | `features/context-builder/index.mjs` | 工作记忆 + 渠道记忆合并、去重、token 预算截断、untrusted 包装 | 上下文格式 |
 
@@ -204,14 +204,14 @@ export function apply(ctx) { /* ... */ }
 |---|---|---|---|
 | `napcat` | `channels/napcat/index.mjs` + `bridge.mjs` + `outbound.mjs` | NapCatQQ / OneBot 11 渠道：注册「NapCat」类型、私聊 / 群聊 / 隐私、目标 QQ / 群号、多 QQ 连接复用、黑名单 / 艾特 / 回复概率 / 引用 / 艾特触发者、静默 20 条消息群上下文、发现会话；资料与超长消息自动折叠成合并转发（聊天记录） | OneBot 协议 / 连接池 / 群聊规则见插件目录 `README.md`；阈值见 `chat.forward*` 配置 |
 | `wechat-clawbot` | `channels/wechat-clawbot/index.mjs` + `bridge.mjs` | 微信 Clawbot 渠道：注册「微信clawbot」类型、添加/编辑窗口（角色 / 分类 / 权限）、扫码登录、入站消息进入角色模型链路、typing 与聊天记录 | 渠道 UI / 协议行为；单独分发见插件目录 `README.md` |
-| `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` 自动绑定、WebSocket / Webhook、**仅私聊**、图片收发、被动回复与聊天记录 | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md` |
+| `qqbot` | `channels/qqbot/index.mjs` + `bridge.mjs` | QQ 官方机器人渠道：注册「QQ官方机器人」类型、q.qq.com 扫码/AppID 接入、**本地沙箱免 IP 白名单**、`user_openid` / `group_openid` 自动绑定、WebSocket / Webhook、**私聊与群聊（群成员 member_openid + 群昵称）**、群规则、**多机器人联动（同群 bot 互见 / 自动接话）**、**SILK 语音（file_type=3 + msg_type=7）**、图片收发、被动回复与聊天记录；向扩展提供 `qqbot-channel` 前端服务与 `qqbot` 后端发送服务（`send` / `channelInfo` / `supportsVoice`） | 渠道 UI / 协议行为；扫码协议与范围见插件目录 `README.md` 与 `docs/qqbot-plugin.md`；双角色群聊示例见 `docs/characters/` |
 
 微信入站消息由插件写入角色对应的 `wechat-clawbot:<channelId>` 渠道记录，再以
 `skipUserAppend` 触发 `chat-flow`；等 `chat:request-done`（整轮工具调用彻底结束）后，
 才把模型消息发回微信并关闭 typing 状态。
 
 QQ 官方机器人按事件类型区分会话：`C2C_MESSAGE_CREATE`（私聊）/ `GROUP_AT_MESSAGE_CREATE`
-（群聊 @）/ `AT_MESSAGE_CREATE`（频道）。桥按 `(sessionType, openid)` 路由到唯一渠道，
+（群聊 @）/ `GROUP_MESSAGE_CREATE`（群开启全量消息后的普通消息）/ `AT_MESSAGE_CREATE`（频道）。桥按 `(sessionType, openid)` 路由到唯一渠道，
 每个渠道只订阅一个私聊 openid 或一个群 openid，避免同一机器人被拉群后与私聊串线；
 入站消息同样写入 `qqbot:<channelId>` 记录并以 `skipUserAppend` 触发 `chat-flow`，
 整轮结束后作为被动消息（带 `msg_id` + `msg_seq`）发回 QQ。
@@ -236,7 +236,7 @@ NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通
 | `runtime-logs` | `server/plugins/logs.mjs` | 后端 cordis 日志环形缓冲、SSE `log/line` 广播、`<数据目录>/logs/runtime.log` 落盘与轮转、`/api/logs/runtime` | `runtimeLogs`；`GET /api/logs/runtime` |
 | `napcat-bridge` | `channels/napcat/bridge.mjs` | NapCat / OneBot 11 连接池（forward WS + 自实现 reverse WS 服务端）、私聊 / 群聊路由、发送、发现会话、通用 `action` 透传；状态写入 `<数据目录>/napcat.json`（token AES-GCM 加密） | `napcat`；自行通过 `httpApi` 注册 `/api/napcat/*` |
 | `wechat-clawbot-bridge` | `channels/wechat-clawbot/bridge.mjs` | Clawbot 扫码登录 / getupdates 长轮询 / sendmessage / typing；账号状态写入 `<数据目录>/clawbot.json`（token AES-GCM 加密） | `clawbot`；自行通过 `httpApi` 注册 `/api/clawbot/*` |
-| `qqbot-bridge` | `channels/qqbot/bridge.mjs` | QQ 官方机器人 access_token / WebSocket 网关 / Webhook 回调 / 扫码适配器；按 `(sessionType, openid)` 路由与绑定过滤；被动回复 `msg_seq` 管理；账号状态写入 `<数据目录>/qqbot.json`（AppSecret / token AES-GCM 加密） | `qqbot`；自行通过 `httpApi` 注册 `/api/qqbot/*` |
+| `qqbot-bridge` | `channels/qqbot/bridge.mjs` | QQ 官方机器人 access_token / WebSocket 网关 / Webhook 回调 / 扫码适配器；按 `(sessionType, openid)` 路由与绑定过滤；被动回复 `msg_seq` 管理；`file_type=3` SILK 语音上传与 `msg_type=7` 发送；通过 `ctx.provide('qqbot')` 给点歌台等插件提供发送接口；账号状态写入 `<数据目录>/qqbot.json`（AppSecret / token AES-GCM 加密） | `qqbot`；自行通过 `httpApi` 注册 `/api/qqbot/*` |
 | `image-service-bridge` | `domain/image-service/bridge.mjs` | 图片文件存储与 `/api/images` / `/api/images/:id` / `/api/images/prune` 路由；索引写入 `<数据目录>/images.json`（不含 base64） | `imageStore`；通过 `httpApi` 注册 `/api/images*` |
 | （已移除）`telegram` | — | 随 `channel-telegram` 一起移除 | — |
 
@@ -335,7 +335,7 @@ NapCat 一个登录 QQ 只维护一条 OneBot WebSocket 连接，多个渠道通
 | 偶发 Windows 弹窗 | 已加 `user_data/logs/error.log` 崩溃日志与端口占用友好提示；若复现，先看该日志 |
 | 设置页 `settings:page` | 曾因 null 解构报错，现已兼容 `{page}` 与 null |
 | API Key / 系统凭据库 | 已改为 AES-256-GCM + `.secret-key` 同目录存储；尚未接入系统 Keychain / DPAPI |
-| `channel-registry` 渠道类型 | `wechat-clawbot` 通过 `channel-base.defineChannel()` 注册真实类型；Discord/邮箱仍在 `plannedList` 标注原因 |
+| `channel-registry` 渠道类型 | `wechat-clawbot`、`qqbot`、`napcat` 都通过 `channel-base.defineChannel()` 注册真实类型；`plannedList` 已清空，添加渠道菜单只显示真实可用的渠道插件 |
 | 后端 `/api/rss`、`/api/translate` | 无前端调用，保留给扩展插件 |
 | 插件列表排序 | 默认按状态；`installTime` 字段目前恒为 0，未实现真实安装时间 |
 | 双配置存储 | 前端偏好走 localStorage（config 服务），后端配置走 `user_data/config.json`；跨端同步未实现 |

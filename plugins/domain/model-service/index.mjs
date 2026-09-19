@@ -9,9 +9,9 @@
  * chat-flow 只认这个服务，不认任何具体适配器。
  */
 export const name = 'model-service'
-export const version = '1.1.0'
+export const version = '1.2.0'
 export const displayName = '模型服务'
-export const description = '业务服务 · 模型抽象接口与调度，具体由适配器插件实现。'
+export const description = '业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型，具体由适配器插件实现。'
 export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
@@ -49,8 +49,18 @@ export function apply(ctx) {
       const requestedKey = options.model || registry.activeKey()
       const startedAt = Date.now()
       const elapsed = () => Date.now() - startedAt
-      const failoverEnabled = config.get('model.failoverEnabled', false) === true
+      // 角色级备用模型：
+      //   'global'（默认）跟随全局失败转移设置；
+      //   'off' 显式不启用备用模型；
+      //   其它值 = 指定一个备用模型 key。
+      // 角色编辑页的设置优先于全局设置。
+      const backupSetting = String(options.backupModel || '').trim()
+      const backupMode = !backupSetting || backupSetting === 'global' ? 'global' : backupSetting === 'off' ? 'off' : 'custom'
+      const failoverEnabled =
+        backupMode === 'custom' ? true : backupMode === 'global' ? config.get('model.failoverEnabled', false) === true : false
       const configuredKeys = (() => {
+        if (backupMode === 'off') return []
+        if (backupMode === 'custom') return [backupSetting]
         const raw = config.get('model.failoverKeys', [])
         const list = Array.isArray(raw) ? raw : []
         // 兼容旧版单值配置：迁移逻辑没跑到时也能工作。
@@ -66,8 +76,9 @@ export function apply(ctx) {
         return out
       })()
       // failoverPasses = 备用列表循环几轮；旧版 failoverRetries 继续兼容读取。
+      // 角色级指定备用模型时只尝试一轮，避免用户预期的“指定那个模型”变成反复重试。
       const passesRaw = config.get('model.failoverPasses', config.get('model.failoverRetries', 1))
-      const passes = Math.max(1, Math.min(3, Math.floor(Number(passesRaw) || 1)))
+      const passes = backupMode === 'custom' ? 1 : Math.max(1, Math.min(3, Math.floor(Number(passesRaw) || 1)))
       const fallbackQueue = []
       if (failoverEnabled) {
         for (let pass = 0; pass < passes; pass++) {

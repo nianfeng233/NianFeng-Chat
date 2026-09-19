@@ -222,6 +222,7 @@ export function apply(ctx) {
       sensitiveConfirm: permissionsOf(channel).confirm !== false,
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
+      backupModel: role?.meta?.backupModel ?? conv?.meta?.backupModel ?? 'global',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
     }
     if (!conv) {

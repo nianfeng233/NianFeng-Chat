@@ -72,9 +72,12 @@ try {
   check('服务端代聊 Worker 就绪', workerReady, workerLog.slice(-800))
 
   console.log('\n③ WebUI → 后端终端：发送消息')
+  // WebUI 会先在本地回显用户消息，并把该消息 id 一起带到 agent/send；
+  // Worker 落库必须复用这个 id，浏览器才能按 message_id 合并成同一条。
+  const clientMessageId = 'm_e2e_local_echo'
   const send = await (await api(base, '/agent/send', {
     method: 'POST',
-    body: { conversationId: conversation.id, clientId: 'e2e-client', text: '你好，这是一条 E2E 测试消息。' },
+    body: { conversationId: conversation.id, clientId: 'e2e-client', clientMessageId, text: '你好，这是一条 E2E 测试消息。' },
   })).json()
   check('agent/send 入队成功', send?.ok === true, JSON.stringify(send))
 
@@ -89,6 +92,11 @@ try {
   const user = messages.find(message => message.role === 'user' && String(message.content || '').includes('E2E 测试消息'))
   const assistant = messages.find(message => message.role === 'assistant' && String(message.content || '').trim())
   check('用户消息由后端 Worker 写回会话', !!user, JSON.stringify(messages.slice(-4)))
+  check(
+    'Worker 落库复用 WebUI 本地回显消息 id（避免重复气泡）',
+    user?.id === clientMessageId && String(user?.message_id || '') === clientMessageId,
+    JSON.stringify({ id: user?.id, message_id: user?.message_id, clientMessageId }),
+  )
   check('助手回复由后端 chat_send 写回会话', !!assistant, JSON.stringify(messages.slice(-4)))
 } finally {
   await worker?.terminate?.().catch(() => {})

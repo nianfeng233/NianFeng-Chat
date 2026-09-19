@@ -94,6 +94,9 @@ async function main() {
     } else if (/^\/v2\/groups\/[^/]+\/messages$/.test(path)) {
       sentMessages.push({ target: 'group', path, body })
       send({ id: `sent-group-${sentMessages.length}`, timestamp: new Date().toISOString() })
+    } else if (/^\/v2\/groups\/[^/]+\/members\/[^/]+$/.test(path)) {
+      const memberId = decodeURIComponent(String(path).split('/').pop() || '')
+      send({ member_openid: memberId, nick: `群昵称-${memberId}` })
     } else if (path === '/qq-image.png') {
       // 模拟 QQ 附件 HTTPS URL：桥会下载并转存到 image-service。
       res.writeHead(200, { 'Content-Type': 'image/png' })
@@ -312,6 +315,354 @@ async function main() {
       JSON.stringify(unboundStatus.discovered),
     )
 
+    console.log('\n④c QQ 官方群聊适配（group_openid + member_openid + 群昵称）')
+    await api(base, '/api/qqbot/login/start', {
+      method: 'POST',
+      body: {
+        mode: 'manual',
+        channelId: 'ch-group',
+        appId: 'mock-app-1',
+        appSecret: 'mock-secret-1',
+        transport: 'webhook',
+        sessionType: 'group',
+        autoBind: true,
+      },
+    })
+    await api(base, '/api/qqbot/bind', {
+      method: 'POST',
+      body: { channelId: 'ch-group', appId: 'mock-app-1', sessionType: 'group', autoBind: true, bindings: [] },
+    })
+    const groupEventAdapted = {
+      id: 'event-group-adapted',
+      op: 0,
+      s: 5,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-adapted',
+        content: '@MockQQBot 群里说话',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-1',
+        author: { id: 'member-openid-1', member_openid: 'member-openid-1' },
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: groupEventAdapted })
+    await sleep(260)
+    const groupInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group')).json()
+    const groupMessage = (groupInbox.messages || []).find(item => item.id.includes('msg-group-adapted'))
+    check(
+      '群消息进入群聊渠道并携带 group_openid',
+      !!groupMessage && groupMessage.sessionType === 'group' && groupMessage.peerId === 'group-openid-1' && groupMessage.mentionedSelf === true,
+      JSON.stringify(groupInbox),
+    )
+    check(
+      '群成员以 member_openid 作为群内唯一身份',
+      groupMessage?.senderId === 'member-openid-1' && groupMessage?.senderOpenid === 'member-openid-1',
+      JSON.stringify(groupMessage),
+    )
+    check(
+      '群昵称由群成员信息接口回填',
+      groupMessage?.senderName === '群昵称-member-openid-1',
+      JSON.stringify(groupMessage),
+    )
+    check(
+      '群成员信息接口按群 / 成员 openid 请求',
+      calls.some(call => call.method === 'GET' && call.path === '/v2/groups/group-openid-1/members/member-openid-1'),
+      JSON.stringify(calls.filter(call => call.path.includes('/members/'))),
+    )
+    const groupStatus = await (await api(base, '/api/qqbot/status?channelId=ch-group')).json()
+    check(
+      '群 openid 自动绑定为本渠道会话',
+      groupStatus.bindings?.some(item => item.sessionType === 'group' && item.peerId === 'group-openid-1'),
+      JSON.stringify(groupStatus.bindings),
+    )
+    const groupReply = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: { channelId: 'ch-group', text: '群聊回复', sessionType: 'group', peerId: 'group-openid-1', msgId: 'msg-group-adapted' },
+    })).json()
+    const groupSendCall = sentMessages.find(item => item.target === 'group' && item.path === '/v2/groups/group-openid-1/messages')
+    check(
+      '群聊回复走 /v2/groups/{group_openid}/messages 且携带 msg_id',
+      groupReply.ok === true && groupSendCall?.body?.msg_id === 'msg-group-adapted' && groupSendCall?.body?.content === '群聊回复',
+      JSON.stringify({ groupReply, groupSendCall }),
+    )
+
+    console.log('\n④d QQ 群全量消息（群开启「机器人可获取群内全部消息」后的未 @ 消息）')
+    await api(base, '/api/qqbot/login/start', {
+      method: 'POST',
+      body: {
+        mode: 'manual',
+        channelId: 'ch-group-full',
+        appId: 'mock-app-1',
+        appSecret: 'mock-secret-1',
+        transport: 'webhook',
+        sessionType: 'group',
+        autoBind: true,
+      },
+    })
+    await api(base, '/api/qqbot/bind', {
+      method: 'POST',
+      body: { channelId: 'ch-group-full', appId: 'mock-app-1', sessionType: 'group', autoBind: true, bindings: [] },
+    })
+    const groupFullEvent = {
+      id: 'event-group-full-1',
+      op: 0,
+      s: 6,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-full-1',
+        content: '普通群聊消息，没有艾特机器人',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+        mentions: [],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: groupFullEvent })
+    await sleep(260)
+    const fullInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const fullMessage = (fullInbox.messages || []).find(item => item.id.includes('msg-group-full-1'))
+    check(
+      'GROUP_MESSAGE_CREATE 未 @ 消息进入群聊渠道并记录为全量消息',
+      !!fullMessage &&
+        fullMessage.sessionType === 'group' &&
+        fullMessage.peerId === 'group-openid-full' &&
+        fullMessage.mentionedSelf === false &&
+        fullMessage.fullGroupMessage === true,
+      JSON.stringify(fullInbox),
+    )
+    const fullStatus = await (await api(base, '/api/qqbot/status?channelId=ch-group-full')).json()
+    check(
+      '未 @ 的全量群消息也能触发自动绑定',
+      fullStatus.bindings?.some(item => item.sessionType === 'group' && item.peerId === 'group-openid-full'),
+      JSON.stringify(fullStatus.bindings),
+    )
+    const mentionedFullEvent = {
+      id: 'event-group-full-2',
+      op: 0,
+      s: 7,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-full-2',
+        content: '@MockQQBot 这条是全量事件里 @ 我的',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: mentionedFullEvent })
+    await sleep(260)
+    const mentionedInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const mentionedMessage = (mentionedInbox.messages || []).find(item => item.id.includes('msg-group-full-2'))
+    check(
+      '全量事件里带 @ 的消息仍会标记 mentionedSelf=true',
+      mentionedMessage?.mentionedSelf === true && mentionedMessage?.fullGroupMessage === true,
+      JSON.stringify(mentionedMessage),
+    )
+
+    // AstrBot / qq-botpy 全量群消息用 mentions[].is_you 标记“是不是 @ 的机器人”。
+    const mentionsFlagEvent = {
+      id: 'event-group-full-3',
+      op: 0,
+      s: 9,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-full-3',
+        content: '这条正文没有 @ 字符',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+        mentions: [{ id: 'bot-openid-1', is_you: true, username: 'MockQQBot' }],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: mentionsFlagEvent })
+    await sleep(260)
+    const mentionsFlagInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const mentionsFlagMessage = (mentionsFlagInbox.messages || []).find(item => item.id.includes('msg-group-full-3'))
+    check(
+      '全量事件里 mentions[].is_you 能识别 @',
+      mentionsFlagMessage?.mentionedSelf === true,
+      JSON.stringify(mentionsFlagMessage),
+    )
+
+
+    // QQ 如果未来改事件名，payload 结构兜底仍要能识别群消息，避免整类消息被丢弃。
+    const structuralGroupEvent = {
+      id: 'event-group-structural-1',
+      op: 0,
+      s: 8,
+      t: 'GROUP_CHAT_MESSAGE_PUSH',
+      d: {
+        id: 'msg-group-structural-1',
+        content: '未知事件名但结构是群消息',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: structuralGroupEvent })
+    await sleep(260)
+    const structuralInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const structuralMessage = (structuralInbox.messages || []).find(item => item.id.includes('msg-group-structural-1'))
+    check(
+      '未知群消息事件名按 payload 结构兜底识别',
+      !!structuralMessage && structuralMessage.sessionType === 'group' && structuralMessage.peerId === 'group-openid-full',
+      JSON.stringify(structuralInbox),
+    )
+
+    const quotedSend = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group-full',
+        sessionType: 'group',
+        peerId: 'group-openid-full',
+        text: '开启引用时发送 message_reference',
+        msgId: 'msg-group-full-2',
+        quote: true,
+      },
+    })).json()
+    const quotedCall = sentMessages.find(item => item.target === 'group' && item.body?.content === '开启引用时发送 message_reference')
+    check(
+      '回复引用开关开启时走被动回复（带 msg_id）',
+      quotedSend.ok === true && quotedCall?.body?.msg_id === 'msg-group-full-2' && quotedCall?.body?.message_reference === undefined,
+      JSON.stringify({ quotedSend, quotedCall }),
+    )
+
+    const unquotedSend = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group-full',
+        sessionType: 'group',
+        peerId: 'group-openid-full',
+        text: '关闭引用时不发送 message_reference',
+        msgId: 'msg-group-full-2',
+        quote: false,
+      },
+    })).json()
+    const unquotedCall = sentMessages.find(item => item.target === 'group' && item.body?.content === '关闭引用时不发送 message_reference')
+    check(
+      '回复引用开关关闭时走主动消息（不带 msg_id）',
+      unquotedSend.ok === true && unquotedCall && unquotedCall.body?.msg_id === undefined && unquotedCall.body?.message_reference === undefined,
+      JSON.stringify({ unquotedSend, unquotedCall }),
+    )
+
+
+    const SILK_BASE64 = Buffer.from('\u0002#!SILK_V3test-voice', 'latin1').toString('base64')
+    const uploadsBeforeVoice = calls.filter(call => call.method === 'UPLOAD' && call.path === '/v2/groups/group-openid-1/files').length
+    const sendsBeforeVoice = sentMessages.filter(item => item.target === 'group').length
+    const voiceReply = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group',
+        text: '给你唱一小段。',
+        sessionType: 'group',
+        peerId: 'group-openid-1',
+        msgId: 'msg-group-adapted',
+        voice: { dataUrl: `data:audio/silk;base64,${SILK_BASE64}`, mime: 'audio/silk' },
+      },
+    })).json()
+    await sleep(40)
+    const voiceUploadCall = calls
+      .filter(call => call.method === 'UPLOAD' && call.path === '/v2/groups/group-openid-1/files')
+      .slice(uploadsBeforeVoice)
+      .find(call => Number(call.body?.file_type) === 3)
+    const voiceSentCall = sentMessages
+      .filter(item => item.target === 'group')
+      .slice(sendsBeforeVoice)
+      .find(item => Number(item.body?.msg_type) === 7 && !!item.body?.media?.file_info)
+    check(
+      'QQ 官方语音先按 file_type=3 上传',
+      voiceReply.ok === true && !!voiceUploadCall && !!voiceUploadCall.body?.file_data,
+      JSON.stringify({ voiceReply, uploads: calls.filter(call => call.method === 'UPLOAD').slice(-2) }),
+    )
+    check(
+      'QQ 官方语音用 msg_type=7 + media.file_info 发送',
+      !!voiceSentCall && voiceSentCall.body?.media?.file_info === 'file-info-g1' && voiceSentCall.body?.msg_id === 'msg-group-adapted',
+      JSON.stringify({ voiceReply, voiceSentCall }),
+    )
+    const badVoice = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group',
+        sessionType: 'group',
+        peerId: 'group-openid-1',
+        voice: { dataUrl: `data:audio/mpeg;base64,${Buffer.from('not-silk').toString('base64')}` },
+      },
+    })).json()
+    check('非 SILK 语音会被明确拒绝', badVoice.ok === false && badVoice.code === 'VOICE_FORMAT_INVALID', JSON.stringify(badVoice))
+
+    console.log('\n④d 同群多机器人联动镜像（官方 bot 之间本地互见）')
+    await api(base, '/api/qqbot/login/start', {
+      method: 'POST',
+      body: {
+        mode: 'manual',
+        channelId: 'ch-group-2',
+        appId: 'mock-app-link',
+        appSecret: 'mock-link-1',
+        transport: 'webhook',
+        sessionType: 'group',
+        autoBind: false,
+      },
+    })
+    await api(base, '/api/qqbot/bind', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group-2',
+        appId: 'mock-app-link',
+        sessionType: 'group',
+        autoBind: false,
+        channelName: '桑多涅',
+        linkGroupId: 'fatui-harbingers',
+        linkAutoReply: true,
+        linkMaxTurns: 1,
+        bindings: [{ sessionType: 'group', peerId: 'group-openid-2', alias: '联动测试群', identityMode: 'member' }],
+      },
+    })
+    await api(base, '/api/qqbot/bind', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-group',
+        appId: 'mock-app-1',
+        sessionType: 'group',
+        autoBind: true,
+        channelName: '哥伦比娅',
+        linkGroupId: 'fatui-harbingers',
+        linkAutoReply: true,
+        linkMaxTurns: 1,
+      },
+    })
+    const linkedSend = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: { channelId: 'ch-group', text: '月亮升起来了。', sessionType: 'group', peerId: 'group-openid-1' },
+    })).json()
+    await sleep(40)
+    const group2Inbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-2')).json()
+    const linkedMessage = (group2Inbox.messages || []).find(item => item.text === '月亮升起来了。')
+    check(
+      'A 机器人群消息会镜像到同联动标识的 B 机器人',
+      linkedSend.ok === true &&
+        !!linkedMessage &&
+        linkedMessage.linkedBot === true &&
+        linkedMessage.peerId === 'group-openid-2' &&
+        linkedMessage.senderName === '哥伦比娅',
+      JSON.stringify({ linkedSend, group2Inbox }),
+    )
+    const linkedBack = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: { channelId: 'ch-group-2', text: '不过是人造的光。', sessionType: 'group', peerId: 'group-openid-2' },
+    })).json()
+    await sleep(40)
+    const groupInboxBack = await (await api(base, '/api/qqbot/inbox?channelId=ch-group')).json()
+    const linkedBackMessage = (groupInboxBack.messages || []).find(item => item.text === '不过是人造的光。')
+    check(
+      'B 机器人群消息会反向镜像到 A 机器人',
+      linkedBack.ok === true &&
+        !!linkedBackMessage &&
+        linkedBackMessage.linkedBot === true &&
+        linkedBackMessage.peerId === 'group-openid-1' &&
+        linkedBackMessage.senderName === '桑多涅',
+      JSON.stringify({ linkedBack, groupInboxBack }),
+    )
+
     console.log('\n⑤ 被动回复 msg_seq 与主动消息')
     const sendReply = async (text = '回复') =>
       (await api(base, '/api/qqbot/send', {
@@ -428,7 +779,7 @@ async function main() {
       JSON.stringify(qrReply),
     )
 
-    console.log('\n⑦b 群聊暂不支持：消息不进入任何渠道')
+    console.log('\n⑦b 群聊 / 私聊分类隔离：群消息不会串进私聊渠道')
     const groupEventUnsupported = {
       id: 'event-5',
       op: 0,
@@ -448,8 +799,8 @@ async function main() {
     const qrDiscover = await (await api(base, '/api/qqbot/discover?channelId=ch-qr')).json()
     check('群聊消息不会进入私聊渠道', qrInboxAfterGroup.messages?.length === 1, JSON.stringify(qrInboxAfterGroup.messages))
     check(
-      '群聊消息只出现在发现列表并标注暂不支持',
-      qrDiscover.discovered?.some(item => item.peerId === 'group-openid-unsupported' && item.unsupported),
+      '群聊消息不会污染私聊渠道的发现列表（需创建群聊渠道后显示）',
+      !qrDiscover.discovered?.some(item => item.sessionType === 'group' && item.peerId === 'group-openid-unsupported'),
       JSON.stringify(qrDiscover),
     )
 

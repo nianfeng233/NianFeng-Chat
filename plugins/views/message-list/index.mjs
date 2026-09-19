@@ -480,9 +480,25 @@ export function apply(ctx) {
     scrollEl.addEventListener('contextmenu', onContextMenu)
 
     /* -------- 消息增量更新：流式 chunk 不整表重绘 -------- */
+    /**
+     * 当前激活会话还没绑定到本视图时（启动自动恢复 / 后台同步选中的会话），
+     * 先补一次 reset 渲染。否则用户发送后 message:added 会被直接忽略，
+     * 界面要等本轮模型回复写入并触发 conversation:update 才整段显示。
+     */
+    const rebindIfActive = conversationId => {
+      if (!conversationId || conversationId === boundConversationId) return false
+      if (conversationId !== sessions.activeId()) return false
+      scheduleRender({ reset: true, stickBottom: true })
+      return true
+    }
+
     const onMessageAdded = payload => {
       const conversationId = payload?.conversationId
-      if (!conversationId || conversationId !== boundConversationId) return
+      if (!conversationId) return
+      if (conversationId !== boundConversationId) {
+        rebindIfActive(conversationId)
+        return
+      }
       const conv = sessions.active()
       if (!conv) return
       if (conv.messages !== boundMessagesRef) {
@@ -533,7 +549,11 @@ export function apply(ctx) {
 
     const patchMessageRow = payload => {
       const conversationId = payload?.conversationId
-      if (!conversationId || conversationId !== boundConversationId) return
+      if (!conversationId) return
+      if (conversationId !== boundConversationId) {
+        rebindIfActive(conversationId)
+        return
+      }
       const messageId = payload?.id || payload?.message?.id
       if (!messageId) return
       pendingPatches.set(messageId, payload.message || null)
@@ -570,8 +590,24 @@ export function apply(ctx) {
       events.on('message:updated', patchMessageRow),
       events.on('message:error', patchMessageRow),
       events.on('message:delete', payload => {
-        if (payload?.conversationId !== boundConversationId) return
+        const conversationId = payload?.conversationId
+        if (!conversationId || conversationId !== boundConversationId) {
+          rebindIfActive(conversationId)
+          return
+        }
         scheduleRender({ anchor: captureAnchor() })
+      }),
+      // 启动 / 手动同步会更换 active 会话或刷新当前会话元数据；补一次渲染以保证
+      // 自动恢复的会话首屏能正常显示，也让被后端刷新过的消息重新进入窗口。
+      // 用户正在翻旧记录时保持锚点，不能被后台同步强行拉回底部。
+      events.on('conversation:sync', () => {
+        const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120
+        scheduleRender({
+          reset: true,
+          keepAnchor: !nearBottom,
+          anchor: nearBottom ? null : captureAnchor(),
+          stickBottom: nearBottom,
+        })
       }),
       events.on('bubble-styles:changed', () => scheduleRender({ stickBottom: false })),
       events.on('bubble-styles:registered', () => scheduleRender({ stickBottom: false })),

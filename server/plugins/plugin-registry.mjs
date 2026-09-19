@@ -16,7 +16,7 @@
  *     这样 exe 不需要内置 scripts/sync-plugins.mjs，用户丢完插件重启/重新扫描即可。
  */
 import { constants } from 'node:fs'
-import { access, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
@@ -99,22 +99,38 @@ export function apply(ctx, config = {}) {
     return builtinEntries
   }
 
-  /** 递归查找外部插件目录里的 index.mjs */
-  async function walkPlugins(dir, out = []) {
+  /**
+   * 递归查找外部插件目录里的 index.mjs。
+   *
+   * 关键边界：一旦某个目录本身包含 manifest.json（或非根目录下直接包含 index.mjs），
+   * 就把它视为“一个插件根”，不再继续往它的 lib / vendor / node_modules 内部递归。
+   * 否则插件自带的依赖包入口（例如 media-post/vendor/silk-wasm/lib/index.mjs）会被
+   * 误识别成名为 lib 的独立插件，版本 0.0.0 → 被标红“旧版不兼容”。
+   */
+  async function walkPlugins(dir, out = [], depth = 0) {
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch (_) {
       return out
     }
+    const fileNames = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name))
+    const hasManifest = fileNames.has('manifest.json')
+    const hasIndex = fileNames.has('index.mjs')
+    if (hasManifest) {
+      // 有清单的目录就是插件根：入口固定为同级 index.mjs，不再扫描内部 vendored 依赖。
+      if (hasIndex) out.push(join(dir, 'index.mjs'))
+      return out
+    }
+    if (hasIndex && depth > 0) {
+      // 兼容旧版没有 manifest 的外部插件：同级 index.mjs 直接作为插件入口。
+      out.push(join(dir, 'index.mjs'))
+      return out
+    }
     for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue
-      const full = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) await walkPlugins(full, out)
-      } else if (entry.isFile() && entry.name === 'index.mjs') {
-        out.push(full)
-      }
+      if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
+      if (!entry.isDirectory()) continue
+      await walkPlugins(join(dir, entry.name), out, depth + 1)
     }
     return out
   }
@@ -122,51 +138,78 @@ export function apply(ctx, config = {}) {
   /** 读取单个外部插件的元信息（在 Node 侧动态 import，与 sync-plugins 的做法一致） */
   async function readExternalEntry(file, root) {
     const info = await stat(file)
+    const dir = dirname(file)
     const relFile = relative(root, file).split(sep).join('/')
-    const folder = relative(root, dirname(file)).split(sep).join('/') || relFile.replace(/\/index\.mjs$/, '')
+    const folder = relative(root, dir).split(sep).join('/') || relFile.replace(/\/index\.mjs$/, '')
     const revision = Math.round(info.mtimeMs || Date.now())
     // 保持与内置插件相同的“三层目录”URL 结构，插件里 ../../../src/... 的相对引用仍可解析。
     const urlPath = '/user-plugins/' + relFile.split('/').map(encodeURIComponent).join('/') + '?v=' + revision
     const base = { external: true, source: 'external', path: urlPath, dir: folder, __file: file }
+
+    let manifest = null
+    try {
+      const parsed = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) manifest = parsed
+    } catch (_) {
+      manifest = null
+    }
+
     try {
       const mod = await import(pathToFileURL(file).href + '?v=' + revision)
-      const pluginVersion = mod.version || '0.0.0'
-      const pluginMajor = Number.parseInt(String(pluginVersion).split('.')[0], 10)
+      const isPluginModule =
+        typeof mod.apply === 'function' ||
+        typeof mod.default === 'function' ||
+        typeof mod.default?.apply === 'function'
+      // 没有 manifest、也不具备 Cordis 插件形态的 index.mjs 只是插件内部依赖
+      // （典型：vendor/silk-wasm/lib/index.mjs），不能当成外部插件扫描出来。
+      if (!manifest && !isPluginModule) return null
+
+      const pluginVersion = String(mod.version || manifest?.version || '0.0.0')
+      const pluginMajor = Number.parseInt(pluginVersion.split('.')[0], 10)
       const legacy = !Number.isFinite(pluginMajor) || pluginMajor < appMajor
+      const pluginId = mod.name || manifest?.id || manifest?.name || folder || relFile
       return {
         ...base,
-        id: mod.name || folder || relFile,
-        name: mod.name || folder || relFile,
+        id: pluginId,
+        name: mod.name || manifest?.name || manifest?.id || folder || relFile,
         version: pluginVersion,
         legacy,
         legacyReason: legacy ? legacyReasonFor(pluginVersion) : '',
-        displayName: mod.displayName || mod.name || folder || relFile,
-        description: mod.description || '',
-        author: mod.author || '',
-        icon: mod.icon || '',
-        core: !!mod.core,
-        enabled: mod.enabled !== false,
-        unavailable: mod.unavailable === true,
-        unavailableReason: mod.unavailableReason || '',
-        depends: mod.depends || {},
-        optionalDepends: mod.optionalDepends || mod.softDepends || {},
-        inject: Array.isArray(mod.inject) ? mod.inject : mod.inject && typeof mod.inject === 'object' ? Object.keys(mod.inject) : [],
-        provides: mod.provides || [],
-        permissions: mod.permissions || [],
-        slots: mod.slots || [],
+        displayName: mod.displayName || manifest?.displayName || mod.name || manifest?.name || folder || relFile,
+        description: mod.description || manifest?.description || '',
+        author: mod.author || manifest?.author || '',
+        icon: mod.icon || manifest?.icon || '',
+        core: !!(mod.core || manifest?.core),
+        enabled: mod.enabled !== undefined ? mod.enabled !== false : manifest?.enabled !== false,
+        unavailable: mod.unavailable === true || manifest?.unavailable === true,
+        unavailableReason: mod.unavailableReason || manifest?.unavailableReason || '',
+        depends: mod.depends || manifest?.depends || {},
+        optionalDepends: mod.optionalDepends || mod.softDepends || manifest?.optionalDepends || manifest?.optional_depends || {},
+        inject: Array.isArray(mod.inject)
+          ? mod.inject
+          : mod.inject && typeof mod.inject === 'object'
+            ? Object.keys(mod.inject)
+            : Array.isArray(manifest?.inject)
+              ? manifest.inject
+              : manifest?.inject && typeof manifest.inject === 'object'
+                ? Object.keys(manifest.inject)
+                : [],
+        provides: mod.provides || manifest?.provides || [],
+        permissions: mod.permissions || manifest?.permissions || [],
+        slots: mod.slots || manifest?.slots || [],
         // 运行范围：external 插件可通过 export const scope = 'server'|'webui'|'both'
         // 声明；默认 both，保持旧插件兼容。
-        scope: mod.scope || mod.runtime || 'both',
+        scope: mod.scope || mod.runtime || manifest?.scope || manifest?.runtime || 'both',
         error: '',
       }
     } catch (err) {
       return {
         ...base,
-        id: folder || relFile,
-        name: folder || relFile,
-        displayName: folder || relFile,
-        version: '0.0.0',
-        description: '',
+        id: manifest?.id || manifest?.name || folder || relFile,
+        name: manifest?.name || manifest?.id || folder || relFile,
+        displayName: manifest?.displayName || manifest?.name || folder || relFile,
+        version: String(manifest?.version || '0.0.0'),
+        description: manifest?.description || '',
         error: String(err?.message || err),
       }
     }
@@ -187,6 +230,8 @@ export function apply(ctx, config = {}) {
 
     for (const file of files) {
       const entry = await readExternalEntry(file, root)
+      // 插件内部依赖包（vendor / lib 等）没有 manifest 也不是 Cordis 插件，直接忽略。
+      if (!entry) continue
       if (entry.error) {
         warnings.push({ id: entry.id, level: 'error', message: `模块读取失败：${entry.error}` })
       }
@@ -336,22 +381,57 @@ export function apply(ctx, config = {}) {
     return name || 'plugin'
   }
 
-  /** 从 zip 条目里找出「插件根目录」：包含 index.mjs 的最外层目录（最多三层）。 */
+  /** 判断 child 是否就是 parent 本身，或位于 parent 目录内部；parent 为空表示 zip 根目录。 */
+  const isSameOrInside = (parent, child) => {
+    if (parent === child) return true
+    if (parent === '') return child !== ''
+    return child.startsWith(`${parent}/`)
+  }
+
+  /**
+   * 从 zip 条目里找出「插件根目录」：包含 index.mjs 的最外层目录（最多三层）。
+   *
+   * 不能简单把所有 index.mjs 都当成插件：插件 zip 里常带 vendor/<包名>/lib/index.mjs
+   * （例如 media-post 内置的 silk-wasm），如果把这类依赖入口也当成插件解压，
+   * 会多出一个名为 lib、版本 0.0.0 的假插件并在插件页标红。
+   *   1. 排除 npm 包内部的入口（该目录的某个祖先是 package.json 所在目录）；
+   *   2. 当 zip 根目录本身就是一个插件根（有根 index.mjs）时，丢弃其所有嵌套根。
+   */
   const findPluginRoots = entries => {
+    const files = entries.filter(entry => !entry.directory)
+    const packageDirs = new Set()
+    for (const entry of files) {
+      if (/(^|\/)package\.json$/i.test(entry.name)) {
+        packageDirs.add(entry.name.slice(0, entry.name.length - 'package.json'.length).replace(/\/$/, ''))
+      }
+    }
+
     const roots = new Set()
-    for (const entry of entries) {
-      if (entry.directory) continue
+    for (const entry of files) {
       const name = entry.name
       if (!/(^|\/)index\.mjs$/i.test(name)) continue
       if (/(^|\/)node_modules(\/|$)/i.test(name)) continue
       const root = name.slice(0, name.length - 'index.mjs'.length).replace(/\/$/, '')
       if (root.split('/').filter(Boolean).length > 3) continue
+      // vendor/silk-wasm/lib/index.mjs 的某个非空祖先是 package.json 所在目录 → 依赖入口。
+      let ancestor = root
+      let insidePackage = false
+      while (ancestor) {
+        const slash = ancestor.lastIndexOf('/')
+        ancestor = slash < 0 ? '' : ancestor.slice(0, slash)
+        if (ancestor && packageDirs.has(ancestor)) {
+          insidePackage = true
+          break
+        }
+      }
+      if (insidePackage) continue
       roots.add(root)
     }
+
     const sorted = [...roots].sort((a, b) => a.split('/').filter(Boolean).length - b.split('/').filter(Boolean).length)
     const picked = []
     for (const root of sorted) {
-      if (picked.some(parent => root === parent || root.startsWith(`${parent}/`))) continue
+      if (picked.some(parent => isSameOrInside(parent, root))) continue
       picked.push(root)
     }
     return picked
@@ -418,38 +498,63 @@ export function apply(ctx, config = {}) {
       } catch (_) {
         /* 不存在 */
       }
-      if (exists) {
-        if (!overwrite) return { ok: false, exists: true, pluginId: item.name, error: `插件目录「${item.name}」已存在，确认覆盖后可重试` }
-        await rm(item.target, { recursive: true, force: true })
-      }
+      if (exists && !overwrite) return { ok: false, exists: true, pluginId: item.name, error: `插件目录「${item.name}」已存在，确认覆盖后可重试` }
+      // 覆盖时不在这里删旧目录：先把新文件完整写进隐藏暂存目录，最后再整体替换，
+      // 避免前端在文件写了一半时扫描并出现“大量插件一下子标红又恢复”。
     }
 
     const installed = []
     const blocked = []
-    for (const item of planned) {
-      await mkdir(item.target, { recursive: true })
-      const prefix = item.pluginRoot ? `${item.pluginRoot}/` : ''
-      let fileCount = 0
-      for (const entry of entries) {
-        if (entry.directory || !isSafeZipEntryName(entry.name)) continue
-        if (prefix) {
-          if (!entry.name.startsWith(prefix)) continue
-        } else if (roots.some(root => root && (entry.name === root || entry.name.startsWith(`${root}/`)))) {
-          continue // 属于其它插件根，交给对应轮次
+    const staged = []
+    let currentStage = ''
+    try {
+      for (const item of planned) {
+        const suffix = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+        const stageDir = resolve(rootDir, `.${item.name}.installing-${suffix}`)
+        if (!isInside(rootDir, stageDir) || stageDir === rootDir) throw new Error('插件暂存目录不合法')
+        currentStage = stageDir
+        await rm(stageDir, { recursive: true, force: true }).catch(() => {})
+        await mkdir(stageDir, { recursive: true })
+        const prefix = item.pluginRoot ? `${item.pluginRoot}/` : ''
+        let fileCount = 0
+        for (const entry of entries) {
+          if (entry.directory || !isSafeZipEntryName(entry.name)) continue
+          if (prefix) {
+            if (!entry.name.startsWith(prefix)) continue
+          } else if (roots.some(root => root && (entry.name === root || entry.name.startsWith(`${root}/`)))) {
+            continue // 属于其它插件根，交给对应轮次
+          }
+          const rel = prefix ? entry.name.slice(prefix.length) : entry.name
+          if (!rel || !isSafeZipEntryName(rel)) continue
+          if (BLOCKED_INSTALL_EXTENSIONS.has(extname(rel).toLowerCase())) {
+            blocked.push(`${item.name}/${rel}`)
+            continue
+          }
+          const dest = resolve(stageDir, rel)
+          if (!isInside(stageDir, dest)) continue
+          await mkdir(dirname(dest), { recursive: true })
+          await writeFile(dest, entry.data)
+          fileCount += 1
         }
-        const rel = prefix ? entry.name.slice(prefix.length) : entry.name
-        if (!rel || !isSafeZipEntryName(rel)) continue
-        if (BLOCKED_INSTALL_EXTENSIONS.has(extname(rel).toLowerCase())) {
-          blocked.push(`${item.name}/${rel}`)
-          continue
-        }
-        const dest = resolve(item.target, rel)
-        if (!isInside(item.target, dest)) continue
-        await mkdir(dirname(dest), { recursive: true })
-        await writeFile(dest, entry.data)
-        fileCount += 1
+        staged.push({ ...item, stageDir, fileCount })
+        currentStage = ''
       }
-      installed.push({ id: item.name, dir: item.target, files: fileCount })
+
+      // 全部暂存成功后再切换；此时外部插件目录里最多只有隐藏的 .installing-*，
+      // 扫描会直接跳过，不会把半成品标成错误插件。
+      for (const item of staged) {
+        await rm(item.target, { recursive: true, force: true })
+        await rename(item.stageDir, item.target)
+        installed.push({ id: item.name, dir: item.target, files: item.fileCount })
+      }
+    } catch (err) {
+      for (const item of staged) {
+        try { await rm(item.stageDir, { recursive: true, force: true }) } catch (_) { /* ignore */ }
+      }
+      if (currentStage) {
+        try { await rm(currentStage, { recursive: true, force: true }) } catch (_) { /* ignore */ }
+      }
+      return { ok: false, error: `插件安装失败：${err?.message || err}` }
     }
 
     const next = await scan({ force: true })

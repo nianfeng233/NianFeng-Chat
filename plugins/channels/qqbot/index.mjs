@@ -5,9 +5,9 @@
  * QQ 官方机器人渠道插件。
  *
  * 安装后会在「渠道 → 添加渠道」里注册“QQ官方机器人”类型：
- *   1. 添加渠道时选择角色、渠道分类（私聊 / 隐私）；QQ 官方机器人当前仅支持私聊（C2C）；
+ *   1. 添加渠道时选择角色、渠道分类（私聊 / 群聊 / 隐私）；
  *   2. 支持“扫码接入”（q.qq.com 官方绑定接口）与“手动 AppID/AppSecret”两种方式；
- *   3. 渠道只绑定一个 QQ 私聊 openid，避免同一机器人的多个会话串线；
+ *   3. 私聊绑定 C2C openid；群聊绑定 group_openid，群成员以 member_openid 作为群内唯一身份、群昵称作为称呼；
  *   4. 入站消息写入所选角色的 qqbot 渠道聊天记录，并走念风完整模型链路；
  *   5. 模型整轮调用（含工具调用与全部回复消息）结束后，才把回复作为被动消息发回 QQ。
  *
@@ -20,9 +20,9 @@ import { QQBOT_CSS } from './style.mjs'
 import { renderQrSvg, isQrImageContent } from './qrcode.mjs'
 
 export const name = 'qqbot'
-export const version = '1.2.1'
+export const version = '1.5.0'
 export const displayName = 'QQ官方机器人'
-export const description = '渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊绑定与被动回复。'
+export const description = '渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。'
 export const author = '念风插件'
 export const icon = '🐧'
 export const core = false
@@ -54,7 +54,7 @@ export const inject = [
   'chat-store?',
   'plugin-manager?',
 ]
-export const provides = []
+export const provides = [{ name: 'qqbot-channel', type: 'singleton' }]
 export const permissions = ['network']
 
 const TYPE_ID = 'qqbot'
@@ -62,13 +62,24 @@ const TYPE_COLOR = '#12b7f5'
 const TYPE_ICON = '🐧'
 const TAB_LABELS = { private: '私聊', group: '群聊', privacy: '隐私' }
 const TAB_ORDER = ['private', 'group', 'privacy']
-const SESSION_TYPES = [{ id: 'c2c', label: 'QQ 私聊（C2C）', help: '当前仅支持私聊' }]
+const SESSION_TYPES = [
+  { id: 'c2c', label: 'QQ 私聊（C2C）', help: '一对一私聊' },
+  { id: 'group', label: 'QQ 群聊（@机器人 / 全量消息）', help: '群内消息；未 @ 的消息取决于 QQ 群是否开放全量消息' },
+]
 const SESSION_LABEL = { c2c: 'QQ私聊', group: 'QQ群聊' }
-const CATEGORY_SESSION = { private: 'c2c', group: 'c2c', privacy: 'c2c' }
+const CATEGORY_SESSION = { private: 'c2c', group: 'group', privacy: 'c2c' }
 const CATEGORY_OPTIONS = [
   ['private', '私聊（参与角色工作记忆）'],
+  ['group', '群聊（只使用本群上下文，可配置群规则）'],
   ['privacy', '隐私（独立单会话，不与其他渠道交互）'],
 ]
+const CATEGORY_HELP = {
+  private: '私聊：正常参与角色级工作记忆；该 openid 默认按主人身份处理，可在「身份与授权」里改。',
+  group: '群聊：只使用本群最近若干条消息作为上下文，不参与角色工作记忆；QQ 群默认只推送 @机器人 的消息，群管理员开启「机器人可获取群内全部消息」后也能收到未 @ 的消息。',
+  privacy: '隐私：正常聊天与自动回复，但只使用本渠道自己的上下文，不能与其它任何渠道互读 / 互发。',
+}
+const GROUP_CONTEXT_MESSAGES = 20
+const DEFAULT_LINK_MAX_TURNS = 1
 const DEFAULT_PERMISSIONS = {
   read: true,
   reply: true,
@@ -80,15 +91,44 @@ const DEFAULT_PERMISSIONS = {
 const PERMISSION_META = [
   ['read', '接收消息', '把 QQ 消息写入角色上下文'],
   ['reply', '自动回复', '模型生成后作为被动消息发回 QQ'],
-  ['context', '参与工作记忆', '私聊渠道消息参与角色级工作记忆'],
+  ['context', '参与工作记忆', '私聊渠道消息参与角色级工作记忆；群聊固定只用自己的记录'],
   ['crossRead', '跨渠道读取', '允许该角色读取其它渠道记录'],
   ['crossSend', '跨渠道发送', '允许向其它渠道发送消息'],
   ['confirm', '敏感操作确认', '跨渠道等敏感操作需要二次确认'],
 ]
+/** 按渠道分类决定哪些权限真正有意义，避免把无关选项全堆给用户。 */
+const PERMISSION_SCOPES = {
+  read: ['private', 'group', 'privacy'],
+  reply: ['private', 'group', 'privacy'],
+  context: ['private'],
+  crossRead: ['private', 'group'],
+  crossSend: ['private', 'group'],
+  confirm: ['private', 'group'],
+}
+const permissionMetaFor = category =>
+  PERMISSION_META.filter(([key]) => (PERMISSION_SCOPES[key] || ['private', 'group', 'privacy']).includes(category))
+/** 群聊规则与 NapCat 渠道保持同一口径，便于用户在两个渠道之间切换。 */
+const DEFAULT_GROUP_RULES = {
+  blacklist: [],
+  whitelist: [],
+  whitelistForAt: false,
+  whitelistForProbability: false,
+  requireAt: true,
+  // true = @ 时 100% 回复（NapCat 默认口径）；false = @ 也参与概率 / 白名单。
+  mentionAlwaysReply: true,
+  replyProbability: 50,
+  // 与 NapCat 同名开关：默认不强制引用触发消息，也不强行 @ 触发者。
+  quote: false,
+  mention: false,
+  silentContext: true,
+  // 0 = 继承 通用 → 群聊上下文条数（chat.groupMessages，默认 20）；>0 = 本群单独覆盖。
+  contextMessages: 0,
+  ruleSchema: 3,
+}
 const STATUS_LABEL = { online: '已接入', connecting: '连接中', offline: '未连接', error: '异常' }
 const STATUS_COLOR = { online: '#70a15a', connecting: '#c9a227', offline: '#b3b9c2', error: '#c65b5b' }
 const PASSIVE_HINT =
-  'QQ 被动回复：官方窗口口径不一致，插件总是先带 msg_id 尝试被动回复；窗口失效或同一条消息超过 5 次时，会自动改发主动消息（是否成功仍取决于 QQ 官方额度）。'
+  'QQ 回复口径：群聊默认先发主动消息（避免强制引用）；主动额度不可用或勾选「回复时引用触发消息」时走带 msg_id 的被动回复。窗口失效或同一条消息超过 5 次时会自动在主动 / 被动之间回退（是否成功仍取决于 QQ 官方额度）。'
 
 export function apply(ctx) {
   const base = ctx.inject('channel-base')
@@ -111,6 +151,8 @@ export function apply(ctx) {
   const busyChains = new Map()
   /** channelId -> Set(messageId)，页面内去重（SSE 与 inbox 可能同时到达） */
   const handledInbound = new Map()
+  /** channelId -> { turns, lastAt }，多机器人联动自动接话的轮数控制 */
+  const linkTurnState = new Map()
   const closing = []
   let backendEvents = null
 
@@ -128,10 +170,31 @@ export function apply(ctx) {
   const isQQChannel = channel => channel?.type === TYPE_ID
   const permissionsOf = channel => ({ ...DEFAULT_PERMISSIONS, ...(channel?.meta?.permissions || {}) })
   const statusClickColor = status => STATUS_COLOR[status] || STATUS_COLOR.offline
-  const categoryOf = channel => channel?.meta?.category || 'private'
-  // 当前范围：QQ 官方机器人只做私聊（C2C）；历史渠道即使残留 sessionType=group，
-  // 也统一按 c2c 过滤，避免群消息误入。
-  const sessionTypeOf = channel => 'c2c'
+  const categoryOf = channel => {
+    const category = channel?.meta?.category
+    return TAB_ORDER.includes(category) ? category : 'private'
+  }
+  /**
+   * QQ 官方渠道的会话类型由渠道分类决定：
+   * - 群聊分类 → GROUP_AT_MESSAGE_CREATE（@机器人）/ GROUP_MESSAGE_CREATE（群开启全量消息后的未 @ 消息）
+   * - 私聊 / 隐私分类 → C2C_MESSAGE_CREATE
+   */
+  const sessionTypeOf = channel => {
+    if (categoryOf(channel) === 'group') return 'group'
+    return String(channel?.meta?.sessionType || '') === 'group' ? 'group' : 'c2c'
+  }
+  const groupRulesOf = channel => ({ ...DEFAULT_GROUP_RULES, ...(channel?.meta?.rules || {}) })
+  const clampGroupMessages = (value, fallback = GROUP_CONTEXT_MESSAGES) => {
+    const n = Math.floor(Number(value))
+    if (!Number.isFinite(n) || n <= 0) return Math.max(1, Math.min(1000, Math.floor(Number(fallback) || GROUP_CONTEXT_MESSAGES)))
+    return Math.max(1, Math.min(1000, n))
+  }
+  const globalGroupMessages = () => clampGroupMessages(config.get('chat.groupMessages', GROUP_CONTEXT_MESSAGES), GROUP_CONTEXT_MESSAGES)
+  /** 群聊上下文条数：群规则里 contextMessages > 0 时本群覆盖，否则跟随全局设置。 */
+  const groupContextMessagesOf = channel => {
+    const override = Math.floor(Number(groupRulesOf(channel).contextMessages))
+    return Number.isFinite(override) && override > 0 ? clampGroupMessages(override) : globalGroupMessages()
+  }
   const bindingsOf = channel => (Array.isArray(channel?.meta?.bindings) ? channel.meta.bindings : [])
   const bindingLabel = binding => {
     const alias = String(binding?.alias || '').trim()
@@ -227,7 +290,13 @@ export function apply(ctx) {
       return null
     }
     const firstBinding = bindingsOf(channel)[0]
-    const suffix = firstBinding ? `（${bindingLabel(firstBinding)}）` : ''
+    // 群聊容器名用备注 / 群 openid 尾号，避免「QQ群聊（QQ群聊 · xxx）」重复。
+    const bindingName = firstBinding
+      ? sessionType === 'group'
+        ? String(firstBinding.alias || '').trim() || `群 ${shortId(firstBinding.peerId)}`
+        : bindingLabel(firstBinding)
+      : ''
+    const suffix = bindingName ? `（${bindingName}）` : ''
     const metaPatch = {
       channelId: channelKey(channel.id),
       channelType: TYPE_ID,
@@ -244,9 +313,15 @@ export function apply(ctx) {
       crossSendable: permissions.crossSend === true,
       sensitiveConfirm: permissions.confirm !== false,
       qqSessionType: sessionType,
+      qqGroupOpenid: sessionType === 'group' ? String(firstBinding?.peerId || '') : '',
+      // 群聊与 NapCat 一样只使用本渠道记录，按“条”读取上下文，不参与角色工作记忆。
+      contextMode: category === 'group' ? 'channel-only' : '',
+      contextRounds: 0,
+      contextMessages: category === 'group' ? groupContextMessagesOf(channel) : 0,
       trustedConfirmIds: Array.isArray(channel.meta?.trustedUserIds) ? channel.meta.trustedUserIds : [],
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
+      backupModel: role?.meta?.backupModel ?? conv?.meta?.backupModel ?? 'global',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
     }
     if (!conv) {
@@ -392,6 +467,12 @@ export function apply(ctx) {
         sessionType: sessionTypeOf(channel),
         autoBind: meta.bindingMode !== 'manual',
         intents: 0,
+        transport: meta.transport || 'ws',
+        rules: groupRulesOf(channel),
+        channelName: String(channel.name || '').trim(),
+        linkGroupId: String(meta.linkGroupId || '').trim(),
+        linkAutoReply: meta.linkAutoReply !== false,
+        linkMaxTurns: clampLinkTurns(meta.linkMaxTurns),
         trustedUserIds: Array.isArray(meta.trustedUserIds) ? meta.trustedUserIds : [],
         bindings: bindingsOf(channel).map(item => ({
           sessionType: item.sessionType,
@@ -446,6 +527,12 @@ export function apply(ctx) {
           }
         } else if (type === 'qqbot:discover') {
           markChanged()
+          try {
+            // 详情页可以即时把新发现的会话插入「发现会话」，不用等手动刷新。
+            events.emit('qqbot:discover', data)
+          } catch (_) {
+            /* 扩展监听失败不影响主链路 */
+          }
         }
       }
       for (const type of ['qqbot:message', 'qqbot:member', 'qqbot:status', 'qqbot:discover']) source.addEventListener(type, forward(type))
@@ -478,12 +565,141 @@ export function apply(ctx) {
         userName: String(binding?.alias || '').trim() || `QQ用户·${shortId(message.senderId || message.peerId)}`,
       }
     }
-    const memberName = String(message.senderName || '').trim() || `QQ成员·${shortId(message.senderId)}`
-    const groupAlias = String(binding?.alias || '').trim()
-    return {
-      userId: `qq:${message.sessionType}:${message.senderId || message.peerId}`,
-      userName: groupAlias ? `${groupAlias}·${memberName}` : memberName,
+    // 联动镜像消息：发送者是同群另一个 QQ 官方机器人（本机镜像），
+    // 用 linkFromAccountId 做稳定标识，名字使用对方渠道名 / 机器人昵称。
+    if (message.linkedBot === true) {
+      const from = String(message.linkFromAccountId || message.senderId || '').trim()
+      return {
+        userId: `qq:linked-bot:${from || 'unknown'}`,
+        userName: String(message.senderName || '').trim() || '同群机器人',
+      }
     }
+    // 群聊：author.member_openid 是群内的专属身份 id（官方接口不给 QQ 号），
+    // 用它在渠道内做唯一身份标识；群昵称（member nick）作为群内称呼。
+    const memberId = String(message.senderId || '').trim()
+    const memberName = String(message.senderName || '').trim() || `QQ成员·${shortId(memberId || message.peerId)}`
+    return {
+      userId: `qq:group:${memberId || message.peerId}`,
+      userName: memberName,
+    }
+  }
+
+  /**
+   * 群聊触发规则：与 NapCat 渠道保持同一口径。
+   * QQ 群默认只推送 @机器人 的消息；群开启全量消息后，未 @ 的消息也会进入这里。
+   * requireAt 默认开启时，只有 @ 消息会回复；关闭后未 @ 消息按概率触发。
+   * mentionAlwaysReply 默认开启：@ 必定回复；关闭后 @ 也参与概率 / 白名单。
+   * 黑名单 / 白名单 / 概率 / 静默上下文与 NapCat 保持一致。
+   */
+  function triggerDecision(channel, message) {
+    const category = categoryOf(channel)
+    const rules = groupRulesOf(channel)
+    const senderId = String(message.senderId || '').trim()
+    const blacklist = (rules.blacklist || []).map(item => String(item || '').trim()).filter(Boolean)
+    // 黑名单优先级最高：命中后连静默写入也一起忽略。
+    if (category === 'group' && senderId && blacklist.includes(senderId)) {
+      return { trigger: false, ignore: true, reason: 'blacklist', rules }
+    }
+    const whitelist = (rules.whitelist || []).map(item => String(item || '').trim()).filter(Boolean)
+    const whitelistAllowed = () => !!senderId && whitelist.includes(senderId)
+    let decision = null
+    if (category !== 'group') {
+      decision = { trigger: true, ignore: false, reason: 'private', rules }
+    } else if (message.mentionedSelf === true) {
+      if (rules.mentionAlwaysReply === false) {
+        // 用户取消了“被 @ 时必定回复”：@ 也走概率 / 白名单，不再 100% 强制触发。
+        const probability = Math.max(0, Math.min(100, Number(rules.replyProbability) || 0))
+        let trigger = true
+        let reason = 'mention+probability'
+        if (rules.whitelistForAt === true || rules.whitelistForProbability === true) {
+          trigger = whitelistAllowed()
+          reason = trigger ? 'mention+probability+whitelist' : 'mention+probability+whitelist-blocked'
+        }
+        decision = { trigger: trigger && Math.random() * 100 < probability, ignore: false, reason, rules }
+      } else {
+        let trigger = true
+        let reason = 'mention'
+        if (rules.whitelistForAt === true) {
+          trigger = whitelistAllowed()
+          reason = trigger ? 'mention+whitelist' : 'mention+whitelist-blocked'
+        }
+        decision = { trigger, ignore: false, reason, rules }
+      }
+    } else if (rules.requireAt) {
+      decision = { trigger: false, ignore: false, reason: 'requireAt', rules }
+    } else {
+      const probability = Math.max(0, Math.min(100, Number(rules.replyProbability) || 0))
+      let trigger = true
+      let reason = 'probability'
+      if (rules.whitelistForProbability === true) {
+        trigger = whitelistAllowed()
+        reason = trigger ? 'probability+whitelist' : 'probability+whitelist-blocked'
+      }
+      decision = { trigger: trigger && Math.random() * 100 < probability, ignore: false, reason, rules }
+    }
+    const payload = { channel, message, ...decision }
+    try {
+      const intercepted = events.emit('qqbot:trigger-decision', payload, { interceptor: true }) || payload
+      if (intercepted && typeof intercepted === 'object') {
+        return {
+          trigger: intercepted.trigger === true,
+          ignore: intercepted.ignore === true,
+          reason: intercepted.reason || decision.reason,
+          rules: intercepted.rules || rules,
+        }
+      }
+    } catch (_) {
+      /* 扩展失败时继续默认规则 */
+    }
+    return decision
+  }
+
+  const clampLinkTurns = value => {
+    if (value === '' || value === undefined || value === null) return DEFAULT_LINK_MAX_TURNS
+    const n = Math.floor(Number(value))
+    if (!Number.isFinite(n) || n < 0) return DEFAULT_LINK_MAX_TURNS
+    return Math.min(5, n)
+  }
+  const allQQChannels = () => {
+    const list = []
+    for (const tab of channels.tabs()) {
+      for (const item of channels.channels(tab)) if (isQQChannel(item)) list.push(item)
+    }
+    return list
+  }
+  /** 人类用户在群里发言后，重置同一个联动标识下所有机器人的接话轮数。 */
+  const resetLinkedTurns = linkGroupId => {
+    const key = String(linkGroupId || '').trim()
+    if (!key) return
+    for (const item of allQQChannels()) {
+      if (String(item.meta?.linkGroupId || '').trim() === key) linkTurnState.delete(item.id)
+    }
+  }
+  /** 多机器人联动决策：别的机器人发言默认只写上下文；开启自动接话时按轮数上限触发。 */
+  const applyLinkDecision = (channel, message, decision, permissions) => {
+    if (message.linkedBot !== true) {
+      if (message.sessionType === 'group') resetLinkedTurns(channel.meta?.linkGroupId)
+      return decision
+    }
+    const meta = channel.meta || {}
+    const maxTurns = clampLinkTurns(meta.linkMaxTurns)
+    const state = linkTurnState.get(channel.id) || { turns: 0, lastAt: 0 }
+    // 两条用户消息间隔较久时允许重新开一轮联动，避免上一轮的计数把新话题锁死。
+    if (state.lastAt && Date.now() - state.lastAt > 60 * 1000) state.turns = 0
+    const allowed =
+      meta.linkAutoReply !== false &&
+      maxTurns > 0 &&
+      state.turns < maxTurns &&
+      permissions?.read !== false &&
+      permissions?.reply !== false
+    decision.trigger = allowed
+    decision.reason = allowed ? 'linked-bot' : 'linked-context'
+    if (allowed) {
+      state.turns += 1
+      state.lastAt = Date.now()
+      linkTurnState.set(channel.id, state)
+    }
+    return decision
   }
 
   /* ---------------- QQ 消息 -> 角色模型 -> QQ ---------------- */
@@ -553,11 +769,30 @@ export function apply(ctx) {
   function resolveOutboundTarget(channel, conversationId) {
     const active = activeTurns.get(conversationId)
     if (active && String(active.channel?.id || '') === String(channel.id)) {
+      const activeMsgId = String(active.message.qqMessageId || '').trim()
+      if (activeMsgId) {
+        return {
+          sessionType: active.message.sessionType,
+          peerId: active.message.peerId,
+          msgId: activeMsgId,
+          eventId: active.message.eventId || '',
+        }
+      }
+      // 对方机器人的联动镜像消息没有 QQ msg_id：优先回退到本群最近一条真人 @消息的
+      // msg_id 走被动回复；窗口已经过期时，deliverOutbound 会自动改发主动消息。
+      const fallbackInbound = [...(sessions.messages(conversationId) || [])]
+        .reverse()
+        .find(
+          item =>
+            item.meta?.direction === 'inbound' &&
+            String(item.meta?.peerId || '') === String(active.message.peerId || '') &&
+            String(item.meta?.qqMessageId || '').trim(),
+        )
       return {
         sessionType: active.message.sessionType,
         peerId: active.message.peerId,
-        msgId: active.message.qqMessageId || '',
-        eventId: active.message.eventId || '',
+        msgId: String(fallbackInbound?.meta?.qqMessageId || ''),
+        eventId: String(fallbackInbound?.meta?.qqEventId || ''),
       }
     }
     const lastInbound = [...(sessions.messages(conversationId) || [])]
@@ -598,17 +833,42 @@ export function apply(ctx) {
       msgId: target.msgId,
       eventId: target.eventId,
     }
-    const preferActive = !payloadBase.msgId
+    const active = activeTurns.get(conversationId)
+    const activeMessage = active && String(active.channel?.id || '') === String(channel.id) ? active.message : null
+    const rules = groupRulesOf(channel)
+    const isGroupReply = target.sessionType === 'group'
+    const quoteEnabled = isGroupReply && rules.quote === true
+    const shouldMention = isGroupReply && rules.mention === true && !!activeMessage && activeMessage.linkedBot !== true
+    let mentionName = ''
+    if (shouldMention) {
+      mentionName = String(activeMessage.senderName || '').trim() || `QQ成员·${shortId(activeMessage.senderId || activeMessage.peerId)}`
+    }
+    let outboundText = buildOutboundText(message)
+    if (mentionName && !outboundText.trimStart().startsWith('@')) {
+      outboundText = `@${mentionName} ${outboundText}`
+    }
+    // 对齐 AstrBot：
+    // - 群聊 quote 关闭（默认）→ 优先主动消息（不带 msg_id，因此不会强制引用）；
+    //   主动额度/权限不可用时再回退被动回复（可能表现为引用，但至少能发出去）。
+    // - 群聊 quote 开启 → 优先被动回复（带 msg_id，引用触发消息）。
+    // - 私聊维持原来的 passive-first 策略。
+    const preferActive = isGroupReply ? !quoteEnabled : !payloadBase.msgId
+    const sendWithFallback = async payload => {
+      let result = await bridgePost('/send', { ...payload, active: preferActive })
+      if (result?.ok === false && preferActive && payloadBase.msgId) {
+        // 主动发送失败时回退被动回复；QQ 可能会把这条被动消息显示成引用回复。
+        result = await bridgePost('/send', { ...payload, msgId: payloadBase.msgId, active: false })
+      } else if (result?.ok === false && !preferActive && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
+        result = await bridgePost('/send', { ...payload, msgId: '', active: true })
+      }
+      return result
+    }
     const errors = []
     let sent = false
     let lastResult = null
-    for (const segment of splitForQQ(buildOutboundText(message))) {
+    for (const segment of splitForQQ(outboundText)) {
       if (!segment) continue
-      const payload = { ...payloadBase, text: segment }
-      let result = await bridgePost('/send', { ...payload, active: preferActive })
-      if (result?.ok === false && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
-        result = await bridgePost('/send', { ...payload, msgId: '', active: true })
-      }
+      const result = await sendWithFallback({ ...payloadBase, text: segment })
       if (result?.ok === false) {
         errors.push(result.error || '文本发送失败')
         continue
@@ -618,11 +878,7 @@ export function apply(ctx) {
     }
     const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
     if (images.length) {
-      const payload = { ...payloadBase, text: '', images }
-      let result = await bridgePost('/send', { ...payload, active: preferActive })
-      if (result?.ok === false && ['PASSIVE_EXPIRED', 'PASSIVE_LIMIT'].includes(result.code)) {
-        result = await bridgePost('/send', { ...payload, msgId: '', active: true })
-      }
+      const result = await sendWithFallback({ ...payloadBase, text: '', images })
       if (result?.ok === false) errors.push(result.error || '图片发送失败')
       else {
         sent = true
@@ -641,6 +897,8 @@ export function apply(ctx) {
         qqMessageId: target.msgId,
         msgSeq: lastResult?.msgSeq || 0,
         outboundMode: lastResult?.mode || 'passive',
+        quoteMessageId: quoteEnabled ? target.msgId : '',
+        mentionName,
         ...(images.length && sent ? { imagesSent: true } : {}),
         ...(errors.length ? { outboundError: errors.join('；') } : { outboundError: '' }),
       },
@@ -664,7 +922,13 @@ export function apply(ctx) {
         pendingTurns.set(conv.id, finish)
         try {
           if (!ctx.registry.get('chat-flow')) finish()
-          else events.emit('message:send', { conversationId: conv.id, text: message.text, skipUserAppend: true })
+          else
+            events.emit('message:send', {
+              conversationId: conv.id,
+              text: message.text || (Array.isArray(message.images) && message.images.length ? '[图片]' : ''),
+              images: Array.isArray(message.images) ? message.images : [],
+              skipUserAppend: true,
+            })
         } catch (_) {
           finish()
         }
@@ -697,12 +961,13 @@ export function apply(ctx) {
       for (const message of sessions.messages(convId) || []) {
         if (
           message.role === 'user' &&
+          message.meta?.sessionType === 'group' &&
           String(message.meta?.senderOpenid || '') === memberId &&
-          (!message.sender_name || String(message.sender_name).startsWith('QQ成员'))
+          (message.meta?.senderNameResolved !== true || !message.sender_name || String(message.sender_name).startsWith('QQ成员'))
         ) {
           messages?.update?.(convId, message.id, {
             sender_name: name,
-            meta: { ...(message.meta || {}), memberName: name },
+            meta: { ...(message.meta || {}), memberName: name, senderNickname: name, senderNameResolved: true },
           })
         }
       }
@@ -734,29 +999,73 @@ export function apply(ctx) {
       seen.delete(first)
     }
 
-    // 防御性过滤：桥已经按绑定路由，这里再校验一次会话类型与绑定，避免串线。
+    // 防御性过滤：会话类型不一致说明 bridge 路由错了，直接拒绝并留下日志。
     const expected = sessionTypeOf(channel)
-    if (expected && message.sessionType !== expected) return
-    const bindings = bindingsOf(channel)
-    const binding = bindings.find(item => item.sessionType === message.sessionType && String(item.peerId) === String(message.peerId))
-    if (bindings.length && !binding) return
+    if (expected && message.sessionType !== expected) {
+      ctx.logger?.warn?.(`[qqbot] bridge 把 ${message.sessionType} 消息路由到 ${expected} 渠道 ${channel.id}，已拒绝`)
+      return
+    }
+    // 绑定不一致时以 bridge 路由为准，并回填本机 meta。
+    // 之前这里直接 return，导致 bridge 路由到了本渠道但本机 meta 没同步时消息被静默丢弃。
+    let bindings = bindingsOf(channel)
+    let binding = bindings.find(item => item.sessionType === message.sessionType && String(item.peerId) === String(message.peerId))
+    if (bindings.length && !binding) {
+      ctx.logger?.warn?.(
+        `[qqbot] bridge 路由到渠道 ${channel.id} 的 ${message.sessionType}:${message.peerId} 不在本机绑定列表，已按 bridge 路由处理并回填`,
+      )
+      binding = {
+        sessionType: message.sessionType,
+        peerId: message.peerId,
+        alias: '',
+        identityMode: message.sessionType === 'c2c' ? 'owner' : 'member',
+        auto: true,
+        boundAt: Date.now(),
+      }
+      bindings = [...bindings, binding]
+      try {
+        channels.updateChannel(findTab(channel.id), channel.id, {
+          meta: { ...(channel.meta || {}), bindings },
+        })
+      } catch (_) {
+        /* 渠道 meta 回填失败不影响本条消息处理 */
+      }
+    }
 
     const conv = ensureConversation(channel)
     if (!conv) return
 
+    const permissions = permissionsOf(channel)
+    const decision = triggerDecision(channel, message)
+    // 多机器人联动：人类发言会重置接话轮数；对方机器人的镜像消息按联动配置决定是否接话。
+    applyLinkDecision(channel, message, decision, permissions)
+    if (decision.ignore) {
+      await ackInbox(channel.id, [message.id])
+      try {
+        events.emit('qqbot:ignored', { channel, message, reason: decision.reason })
+      } catch (_) {
+        /* 扩展监听失败不影响主链路 */
+      }
+      return
+    }
+
     const sender = senderIdentityFor(channel, message, binding)
     // 敏感操作确认权限：
     // - 私聊“主人身份”：默认由主人（网页端统一身份）确认；
-    // - 私聊“访客身份”：只有渠道里显式信任的 openid 才能确认，其他人“确认”会被无视且不消费 pending。
-    // （群聊已不在当前范围，这里保留兼容分支。）
+    // - 私聊“访客身份”：只有渠道里显式信任的 openid 才能确认；
+    // - 群聊：成员专属 id 以 qq:group:<member_openid> 表示，只有信任列表里的成员能确认。
     const trustedIds = Array.isArray(channel.meta?.trustedUserIds)
       ? channel.meta.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean)
       : []
     const trustedForSender = trustedIds.map(id => (id.startsWith('qq:') ? id : `qq:${id}`))
-    const trustedForGroup = trustedIds.map(id => (id.startsWith('qq:') ? id : `qq:group:${id}`))
+    const trustedForGroup = trustedIds.flatMap(id => {
+      const value = String(id || '').trim()
+      if (!value) return []
+      if (value.startsWith('qq:')) return [value]
+      return [`qq:group:${value}`, value]
+    })
     const confirmContext =
       message.sessionType === 'group'
-        ? { senderId: String(sender.userId || ''), allowedUserIds: trustedForGroup }
+        ? { senderId: String(sender.userId || ''), allowedUserIds: [...new Set([...trustedForGroup, ...trustedForSender])] }
         : (binding?.identityMode || 'owner') === 'guest'
           ? { senderId: sender.userId, allowedUserIds: trustedForSender }
           : { senderId: sender.userId, allowedUserIds: [sender.userId].filter(Boolean), owner: true }
@@ -767,30 +1076,60 @@ export function apply(ctx) {
       return
     }
 
-    const permissions = permissionsOf(channel)
-    if (store?.append) {
-      store.append(conv.id, {
-        role: 'user',
-        content: message.text,
-        sender_id: sender.userId,
-        sender_name: sender.userName,
-        source: 'qqbot',
-        meta: {
-          via: 'qqbot',
-          direction: 'inbound',
-          qqbotChannelId: channel.id,
-          sessionType: message.sessionType,
-          peerId: message.peerId,
-          senderOpenid: message.senderId,
-          qqMessageId: message.qqMessageId,
-          qqEventId: message.eventId,
-          images: Array.isArray(message.images) ? message.images : [],
-        },
-      })
-    } else {
-      messages?.add?.(conv.id, { role: 'user', content: message.text, status: 'sent', meta: { images: message.images || [] } })
+    const shouldWrite = decision.trigger || decision.rules.silentContext !== false
+    if (shouldWrite) {
+      const messageMeta = {
+        via: 'qqbot',
+        direction: 'inbound',
+        qqbotChannelId: channel.id,
+        sessionType: message.sessionType,
+        peerId: message.peerId,
+        groupId: message.sessionType === 'group' ? message.peerId : '',
+        senderId: message.senderId || '',
+        senderOpenid: message.senderId || '',
+        senderNickname: message.senderName || '',
+        senderNameResolved: message.senderNameResolved === true,
+        senderRole: '',
+        linkedBot: message.linkedBot === true,
+        linkFromAccountId: message.linkFromAccountId || '',
+        linkFromChannelId: message.linkFromChannelId || '',
+        mentionedSelf: message.mentionedSelf === true,
+        fullGroupMessage: message.fullGroupMessage === true,
+        eventType: message.eventType || '',
+        qqMessageId: message.qqMessageId,
+        qqEventId: message.eventId,
+        images: Array.isArray(message.images) ? message.images : [],
+        triggered: decision.trigger === true,
+        triggerReason: decision.reason,
+        replyRules: { quote: decision.rules.quote === true, mention: decision.rules.mention === true },
+      }
+      if (store?.append) {
+        store.append(conv.id, {
+          role: 'user',
+          content: message.text,
+          sender_id: sender.userId,
+          sender_name: sender.userName,
+          source: 'qqbot',
+          meta: messageMeta,
+        })
+      } else {
+        messages?.add?.(conv.id, {
+          role: 'user',
+          content: message.text,
+          status: 'sent',
+          sender_id: sender.userId,
+          sender_name: sender.userName,
+          meta: messageMeta,
+        })
+      }
     }
     await ackInbox(channel.id, [message.id])
+    try {
+      events.emit('qqbot:inbound', { channel, message, conversationId: conv.id, decision, permissions })
+    } catch (_) {
+      /* 扩展监听失败不影响主链路 */
+    }
+    if (!decision.trigger) return
     if (permissions.read === false || permissions.reply === false) return
 
     const previous = busyChains.get(conv.id) || Promise.resolve()
@@ -811,17 +1150,20 @@ export function apply(ctx) {
     const source = editing ? findChannel(channel.id) || channel : null
     const meta = source?.meta || {}
     const roleId = meta.roleId || ''
-    const category = meta.category || (TAB_ORDER.includes(tab) ? tab : 'private')
-    const sessionType = meta.sessionType || CATEGORY_SESSION[category] || 'c2c'
+    const category = TAB_ORDER.includes(meta.category) ? meta.category : TAB_ORDER.includes(tab) ? tab : 'private'
+    const sessionType = source ? sessionTypeOf(source) : CATEGORY_SESSION[category] || 'c2c'
+    const rules = groupRulesOf(source)
     const permissions = permissionsOf(source)
     const identity = channelIdentity(source)
     const bindings = bindingsOf(source)
+    const sessionBinding = bindings.find(item => item?.sessionType === sessionType && item?.peerId) || null
     const firstBinding = bindings[0] || null
     const bindingMode = meta.bindingMode === 'manual' ? 'manual' : 'auto'
     const accessMode = meta.accessMode || (meta.appId ? 'manual' : 'qrcode')
     const transport = meta.transport || 'ws'
     let overlay = null
     let access = accessMode
+    let saving = false
 
     overlay = document.createElement('div')
     overlay.className = 'wc-mask'
@@ -830,150 +1172,228 @@ export function apply(ctx) {
         <h3>${editing ? '编辑 QQ 官方机器人渠道' : '添加 QQ 官方机器人渠道'}</h3>
         <div class="wc-sub">${
           editing
-            ? '修改角色、会话类型、绑定与权限后立即生效；已保存的 AppSecret 不会回显。'
-            : 'QQ 消息会进入所选角色的渠道记录，整轮模型调用结束后作为被动消息回复。'
+            ? '修改角色、渠道分类与群聊规则后立即生效；接入凭据、绑定与身份设置收在下方折叠区，默认不展开。'
+            : '先选角色和渠道分类；保存后到渠道详情点「接入」扫码或填写 AppID / AppSecret。'
         }</div>
+
+        <div class="wc-grid">
+          <label class="wc-field">
+            <span>渠道名称</span>
+            <input data-wc-name maxlength="30" value="${escapeHtml(source?.name || 'QQ官方机器人')}" placeholder="例如：猫娘的QQ机器人" />
+          </label>
+          <label class="wc-field">
+            <span>使用角色</span>
+            <select data-wc-role>
+              <option value="">请选择角色</option>
+              ${roleOptions(roleId)}
+            </select>
+          </label>
+        </div>
+
         <label class="wc-field">
-          <span>渠道名称</span>
-          <input data-wc-name maxlength="30" value="${escapeHtml(source?.name || 'QQ官方机器人')}" placeholder="例如：猫娘的QQ机器人" />
-        </label>
-        <label class="wc-field">
-          <span>使用角色</span>
-          <select data-wc-role>
-            <option value="">请选择角色</option>
-            ${roleOptions(roleId)}
+          <span>渠道分类（决定渠道 Tab、上下文与群规则）</span>
+          <select data-wc-category>
+            ${CATEGORY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === category ? 'selected' : ''}>${label}</option>`).join('')}
           </select>
+          <div class="wc-field-help" data-wc-category-note>${escapeHtml(CATEGORY_HELP[category] || CATEGORY_HELP.private)}</div>
         </label>
-        <div class="wc-grid">
-          <label class="wc-field">
-            <span>渠道分类（决定渠道 Tab 与工作记忆）</span>
-            <select data-wc-category>
-              ${CATEGORY_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === category ? 'selected' : ''}>${label}</option>`).join('')}
-            </select>
-          </label>
-          <label class="wc-field" ${editing ? '' : 'hidden'}>
-            <span>QQ 会话类型</span>
-            <select data-wc-session disabled>
-              ${SESSION_TYPES.map(item => `<option value="${item.id}" selected>${item.label}</option>`).join('')}
-            </select>
-          </label>
-        </div>
-        <div class="wc-note">
-          当前范围<b>只支持 QQ 私聊（C2C）</b>，暂不支持群聊：群消息不会进入渠道，请勿把渠道绑定到群。
-          隐私渠道仍然是正常聊天，只是只使用本渠道自己的上下文，且不能与其他任何渠道互读 / 互发。
-        </div>
-        ${editing ? '' : '<div class="wc-note">这里只负责创建渠道并选择角色。保存后请到渠道详情点「接入」，再选择扫码或手动凭证；保存时不会自动弹出二维码。</div>'}
 
-        <div data-wc-advanced="" ${editing ? '' : 'hidden'}>
-        <div class="wc-field">
-          <span>接入方式</span>
-          <div class="wc-access">
-            <label><input type="radio" name="wc-access" value="qrcode" ${access === 'qrcode' ? 'checked' : ''}/> 扫码接入（手机 QQ 扫一扫）</label>
-            <label><input type="radio" name="wc-access" value="manual" ${access === 'manual' ? 'checked' : ''}/> 手动 AppID + AppSecret</label>
-          </div>
-        </div>
+        <label class="wc-field">
+          <span>绑定模式</span>
+          <select data-wc-bindmode>
+            <option value="auto" ${bindingMode === 'auto' ? 'selected' : ''}>自动绑定首次匹配的会话（推荐）</option>
+            <option value="manual" ${bindingMode === 'manual' ? 'selected' : ''}>手动指定 openid（需先从「发现会话」拿到 openid）</option>
+          </select>
+          <div class="wc-field-help" data-wc-binding-help></div>
+        </label>
+        <div class="wc-note" data-wc-binding-summary></div>
 
-        <div data-wc-pane="manual" ${access === 'manual' ? '' : 'hidden'}>
-          <div class="wc-grid">
-            <label class="wc-field">
-              <span>AppID</span>
-              <input data-wc-appid maxlength="64" value="${escapeHtml(meta.appId || '')}" placeholder="机器人 AppID" />
-            </label>
-            <label class="wc-field">
-              <span>AppSecret</span>
-              <input data-wc-secret type="password" maxlength="128" value="" placeholder="${meta.appId ? '已保存，留空则不修改' : '机器人 AppSecret'}" />
-            </label>
-          </div>
-          <div class="wc-grid">
-            <label class="wc-field">
-              <span>连接方式</span>
-              <select data-wc-transport>
-                <option value="ws" ${transport !== 'webhook' ? 'selected' : ''}>WebSocket（本地直连，需 Node 22+，推荐）</option>
-                <option value="webhook" ${transport === 'webhook' ? 'selected' : ''}>Webhook（需要公网 HTTPS 回调）</option>
-              </select>
-            </label>
-            <label class="wc-field">
-              <span>环境</span>
-              <select data-wc-sandbox>
-                <option value="0" ${meta.sandbox ? '' : 'selected'}>正式环境</option>
-                <option value="1" ${meta.sandbox ? 'selected' : ''}>沙箱环境</option>
-              </select>
-            </label>
-          </div>
-          <div class="wc-note">
-            AppSecret 只加密保存在本机数据目录（<code>qqbot.json</code>），不会写进渠道列表 / localStorage / config.json。
-          </div>
-        </div>
-
-        <div data-wc-pane="qrcode" ${access === 'qrcode' ? '' : 'hidden'}>
-          <div class="wc-note">
-            扫码流程：点击「获取二维码」→ 手机 QQ 扫一扫 → 在打开的页面确认授权 →
-            插件自动拿到 AppID / AppSecret 并连接。扫码默认使用本地 WebSocket（无需公网）；若 QQ 正式环境提示本机 IP 不在白名单，插件会自动切换沙箱 OpenAPI（免白名单）。
-          </div>
-          <label class="wc-field">
-            <span>绑定服务域名（高级，默认 q.qq.com）</span>
-            <input data-wc-bindhost maxlength="120" value="${escapeHtml(meta.bindHost || '')}" placeholder="q.qq.com；一般留空" />
-          </label>
-        </div>
-
-        <div class="wc-grid">
-          <label class="wc-field">
-            <span>绑定模式</span>
-            <select data-wc-bindmode>
-              <option value="auto" ${bindingMode === 'auto' ? 'selected' : ''}>自动绑定首次匹配的会话</option>
-              <option value="manual" ${bindingMode === 'manual' ? 'selected' : ''}>手动指定私聊 openid</option>
-            </select>
-          </label>
-          <label class="wc-field">
-            <span>私聊身份</span>
-            <select data-wc-identitymode>
-              <option value="owner" ${(firstBinding?.identityMode || 'owner') === 'owner' ? 'selected' : ''}>把该私聊用户视为网页端主人</option>
-              <option value="guest" ${firstBinding?.identityMode === 'guest' ? 'selected' : ''}>作为独立 QQ 用户</option>
-            </select>
-          </label>
-        </div>
         <div class="wc-grid" data-wc-manual-binding ${bindingMode === 'manual' ? '' : 'hidden'}>
           <label class="wc-field">
-            <span>私聊 openid</span>
-            <input data-wc-peerid maxlength="128" value="${escapeHtml(firstBinding?.peerId || '')}" placeholder="QQ 官方接口给的是 openid，不是 QQ 号" />
+            <span data-wc-peer-label>${sessionType === 'group' ? '群 openid' : '私聊 openid'}</span>
+            <input data-wc-peerid maxlength="128" value="${escapeHtml(sessionBinding?.peerId || '')}" placeholder="QQ 官方接口给的是 openid，不是 QQ 号 / 群号" />
           </label>
           <label class="wc-field">
             <span>会话备注</span>
-            <input data-wc-alias maxlength="30" value="${escapeHtml(firstBinding?.alias || '')}" placeholder="例如：我 / 测试群" />
+            <input data-wc-alias maxlength="30" value="${escapeHtml(sessionBinding?.alias || '')}" placeholder="例如：我 / 测试群" />
           </label>
-        </div>
-        <div class="wc-note">
-          QQ 官方接口出于隐私保护只提供 <b>openid</b>（每个机器人不同），拿不到 QQ 号 / 群号。
-          自动绑定模式下，第一次收到哪个会话的消息就绑定哪个；之后同一机器人的其它会话不会进入本渠道。
-        </div>
-        <label class="wc-field">
-          <span>允许确认的用户 openid（逗号分隔）</span>
-          <input data-wc-trusted maxlength="400" value="${escapeHtml((meta.trustedUserIds || []).join(','))}" placeholder="例如把你的 openid 填进来；留空时只有「主人身份」能确认" />
-        </label>
-        <div class="wc-note">如何知道自己的 openid：用手机 QQ 给机器人发一条消息，渠道详情的「发现会话」会显示你的 openid；也可以直接把它填在这里授权。</div>
         </div>
 
-        <div class="wc-grid">
-          <label class="wc-field">
-            <span>用户显示名（绑定为“主人”时使用）</span>
-            <input data-wc-identity-name maxlength="30" value="${escapeHtml(identity.userName)}" placeholder="例如：我 / 猫娘主人" />
+        <details class="wc-details" data-wc-advanced>
+          <summary>接入设置（扫码 / AppID / 连接方式）</summary>
+          <div class="wc-field">
+            <span>接入方式</span>
+            <div class="wc-access">
+              <label><input type="radio" name="wc-access" value="qrcode" ${access === 'qrcode' ? 'checked' : ''}/> 扫码接入（手机 QQ 扫一扫）</label>
+              <label><input type="radio" name="wc-access" value="manual" ${access === 'manual' ? 'checked' : ''}/> 手动 AppID + AppSecret</label>
+            </div>
+          </div>
+          <div data-wc-pane="manual" ${access === 'manual' ? '' : 'hidden'}>
+            <div class="wc-grid">
+              <label class="wc-field">
+                <span>AppID</span>
+                <input data-wc-appid maxlength="64" value="${escapeHtml(meta.appId || '')}" placeholder="机器人 AppID" />
+              </label>
+              <label class="wc-field">
+                <span>AppSecret</span>
+                <input data-wc-secret type="password" maxlength="128" value="" placeholder="${meta.appId ? '已保存，留空则不修改' : '机器人 AppSecret'}" />
+              </label>
+            </div>
+            <div class="wc-grid">
+              <label class="wc-field">
+                <span>连接方式</span>
+                <select data-wc-transport>
+                  <option value="ws" ${transport !== 'webhook' ? 'selected' : ''}>WebSocket（本地直连，需 Node 22+，推荐）</option>
+                  <option value="webhook" ${transport === 'webhook' ? 'selected' : ''}>Webhook（需要公网 HTTPS 回调）</option>
+                </select>
+              </label>
+              <label class="wc-field">
+                <span>环境</span>
+                <select data-wc-sandbox>
+                  <option value="0" ${meta.sandbox ? '' : 'selected'}>正式环境</option>
+                  <option value="1" ${meta.sandbox ? 'selected' : ''}>沙箱环境</option>
+                </select>
+              </label>
+            </div>
+            <div class="wc-note">AppSecret 只加密保存在本机数据目录（<code>qqbot.json</code>），不会写进渠道列表 / localStorage / config.json。</div>
+          </div>
+          <div data-wc-pane="qrcode" ${access === 'qrcode' ? '' : 'hidden'}>
+            <div class="wc-note">
+              扫码流程：点击「获取二维码」→ 手机 QQ 扫一扫 → 在打开的页面确认授权 →
+              插件自动拿到 AppID / AppSecret 并连接。扫码默认使用本地 WebSocket（无需公网）；若正式环境提示本机 IP 不在白名单，会自动切换到沙箱 OpenAPI（免白名单）。
+            </div>
+            <label class="wc-field">
+              <span>绑定服务域名（高级，默认 q.qq.com）</span>
+              <input data-wc-bindhost maxlength="120" value="${escapeHtml(meta.bindHost || '')}" placeholder="q.qq.com；一般留空" />
+            </label>
+          </div>
+        </details>
+
+        <details class="wc-details" data-wc-identity-details>
+          <summary>身份与授权（可选）</summary>
+          <label class="wc-field" data-wc-identity-mode-row ${sessionType === 'group' ? 'hidden' : ''}>
+            <span>私聊身份</span>
+            <select data-wc-identitymode>
+              <option value="owner" ${(sessionBinding?.identityMode || firstBinding?.identityMode || 'owner') === 'owner' ? 'selected' : ''}>把该私聊用户视为网页端主人</option>
+              <option value="guest" ${(sessionBinding?.identityMode || firstBinding?.identityMode) === 'guest' ? 'selected' : ''}>作为独立 QQ 用户</option>
+            </select>
+            <div class="wc-field-help">群聊统一以 member_openid 作为群内身份，不使用该模式。</div>
           </label>
           <label class="wc-field">
-            <span>用户唯一标识</span>
-            <input data-wc-identity-id maxlength="80" value="${escapeHtml(identity.userId)}" placeholder="例如：web-user" />
+            <span>允许确认的用户 / 成员 openid（逗号分隔）</span>
+            <input data-wc-trusted maxlength="400" value="${escapeHtml((meta.trustedUserIds || []).join(','))}" placeholder="例如：把「发现会话」里复制的 openid 填进来" />
+            <div class="wc-field-help">留空时私聊主人身份仍可确认；群聊成员需要在这里授权，或到渠道详情点「信任该成员 openid」。</div>
           </label>
+          <div class="wc-grid">
+            <label class="wc-field">
+              <span>用户显示名（绑定为主人时使用）</span>
+              <input data-wc-identity-name maxlength="30" value="${escapeHtml(identity.userName)}" placeholder="例如：我 / 主人" />
+            </label>
+            <label class="wc-field">
+              <span>用户唯一标识</span>
+              <input data-wc-identity-id maxlength="80" value="${escapeHtml(identity.userId)}" placeholder="例如：web-user" />
+            </label>
+          </div>
+        </details>
+
+        <div data-wc-group-rules ${category === 'group' ? '' : 'hidden'}>
+          <div class="settings-section-title" style="margin:6px 0 4px">群聊规则（与 NapCat 口径一致）</div>
+          <div class="wc-details" style="display:block">
+            <div class="wc-note">
+              QQ 群默认只推送 <b>@机器人</b> 的消息；群管理员在 QQ 群设置里打开「机器人可获取群内全部消息」后，未 @ 的消息也会通过全量事件进入本渠道。
+              规则按 NapCat 处理：<b>@ 的消息默认直接回复</b>（可取消“被 @ 时必定回复”，改为参与概率 / 白名单）；<b>未 @ 的消息</b>在关闭「仅 @ 时回复」后按概率触发；未触发的消息默认只静默写入本群上下文。
+            </div>
+            <div class="wc-grid">
+              <label class="wc-field">
+                <span>黑名单成员 openid（逗号 / 换行分隔）</span>
+                <textarea data-wc-rule-blacklist rows="2" maxlength="1000" placeholder="这些成员的消息会被忽略">${escapeHtml((rules.blacklist || []).join(','))}</textarea>
+                <div class="wc-field-help">优先级最高：命中后不回复，也不写入本群上下文。</div>
+              </label>
+              <label class="wc-field">
+                <span>白名单成员 openid（逗号 / 换行分隔）</span>
+                <textarea data-wc-rule-whitelist rows="2" maxlength="1000" placeholder="只允许这些成员触发回复">${escapeHtml((rules.whitelist || []).join(','))}</textarea>
+                <div class="wc-field-help">白名单本身不会自动生效，由下面两个开关决定是否应用。</div>
+              </label>
+            </div>
+            <div class="wc-perms" style="grid-template-columns:1fr">
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-whitelistforat ${rules.whitelistForAt === true ? 'checked' : ''} />
+                <span>@ 触发也受白名单限制<small>只有白名单成员的 @ 才会回复</small></span>
+              </label>
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-whitelistprob ${rules.whitelistForProbability === true ? 'checked' : ''} />
+                <span>概率回复时应用白名单<small>未 @ 的普通消息只从白名单成员里按概率抽</small></span>
+              </label>
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-mentionalways ${rules.mentionAlwaysReply !== false ? 'checked' : ''} />
+                <span>被 @ 时必定回复<small>默认开启（NapCat 同款）。取消后 @ 消息也会参与概率 / 白名单，不再是 100% 强制执行。</small></span>
+              </label>
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-requireat ${rules.requireAt !== false ? 'checked' : ''} />
+                <span>仅 @ 时回复<small>只控制未 @ 的普通消息：勾选 = 普通消息不触发；取消 = 普通消息按概率触发。@ 消息由上一项决定是否必定回复。</small></span>
+              </label>
+            </div>
+            <div class="wc-grid">
+              <label class="wc-field" data-wc-probability-row>
+                <span>普通消息回复概率（%）</span>
+                <input type="number" min="0" max="100" step="1" data-wc-rule-probability value="${Math.max(0, Math.min(100, Number(rules.replyProbability) || 0))}" />
+                <div class="wc-field-help">取消「被 @ 时必定回复」后，@ 消息也按本概率；取消「仅 @ 时回复」后，未 @ 消息也按本概率。两项都开启时本项不生效。</div>
+              </label>
+              <label class="wc-field">
+                <span>本群上下文条数（0 = 跟随通用设置）</span>
+                <input type="number" min="0" max="1000" step="1" data-wc-rule-context value="${Math.floor(Number(rules.contextMessages)) > 0 ? Math.floor(Number(rules.contextMessages)) : 0}" placeholder="通用设置默认 ${globalGroupMessages()} 条" />
+                <div class="wc-field-help">当前生效 <b data-wc-rule-context-effective>${groupContextMessagesOf(source)}</b> 条；群聊只使用本群记录。</div>
+              </label>
+            </div>
+            <div class="wc-perms">
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-quote ${rules.quote === true ? 'checked' : ''} />
+                <span>回复时引用触发消息<small>默认关闭。关闭时发主动消息（不带 msg_id），不会强制引用；开启时走被动回复带 msg_id，QQ 可能显示为引用。主动额度不可用时会自动回退被动回复。</small></span>
+              </label>
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-mention ${rules.mention === true ? 'checked' : ''} />
+                <span>回复时艾特触发者<small>默认关闭。开启后会在回复正文前加“@群昵称 ”；QQ 官方群接口没有真正的 at 消息段，这是文本 @。</small></span>
+              </label>
+              <label class="wc-perm">
+                <input type="checkbox" data-wc-rule-silent ${rules.silentContext !== false ? 'checked' : ''} />
+                <span>未触发时也写入本群上下文<small>关掉后，未触发回复的消息不写进聊天记录</small></span>
+              </label>
+            </div>
+          </div>
+
+          <details class="wc-details" style="margin-top:10px">
+            <summary>多机器人同群联动（可选）</summary>
+            <div class="wc-grid">
+              <label class="wc-field">
+                <span>跨机器人联动标识</span>
+                <input data-wc-link-group maxlength="60" value="${escapeHtml(meta.linkGroupId || '')}" placeholder="例如：fatui-harbingers；两个 bot 填同一个值" />
+              </label>
+              <label class="wc-field">
+                <span>自动接话轮数上限（每个用户消息后）</span>
+                <input type="number" min="0" max="5" step="1" data-wc-link-max value="${clampLinkTurns(meta.linkMaxTurns)}" />
+              </label>
+            </div>
+            <label class="wc-perm" style="display:flex">
+              <input type="checkbox" data-wc-link-auto ${meta.linkAutoReply !== false ? 'checked' : ''} />
+              <span>对方机器人发言时自动接话<small>关闭后只把对方消息写入上下文；上限 0 等于不接话</small></span>
+            </label>
+          </details>
         </div>
 
         <div class="wc-field">
           <span>权限设置</span>
           <div class="wc-perms">
-            ${PERMISSION_META.map(([key, label, help]) => `
-              <label class="wc-perm">
+            ${PERMISSION_META.map(
+              ([key, label, help]) => `
+              <label class="wc-perm" data-wc-perm-row="${key}" data-wc-perm-scope="${(PERMISSION_SCOPES[key] || []).join(',')}">
                 <input type="checkbox" data-wc-perm="${key}" ${permissions[key] !== false ? 'checked' : ''} />
                 <span>${label}<small>${help}</small></span>
-              </label>`).join('')}
+              </label>`,
+            ).join('')}
           </div>
+          <div class="wc-field-help" data-wc-perm-note></div>
         </div>
+
         <div class="wc-note">${PASSIVE_HINT}主动消息配额由 QQ 官方限制，失败会回写错误提示。</div>
         <div class="wc-error" data-wc-error hidden></div>
         <div class="wc-actions">
@@ -985,22 +1405,45 @@ export function apply(ctx) {
     const nameInput = overlay.querySelector('[data-wc-name]')
     const roleSelect = overlay.querySelector('[data-wc-role]')
     const categorySelect = overlay.querySelector('[data-wc-category]')
-    const sessionSelect = overlay.querySelector('[data-wc-session]')
+    const categoryNote = overlay.querySelector('[data-wc-category-note]')
+    const bindModeSelect = overlay.querySelector('[data-wc-bindmode]')
+    const manualBindingRow = overlay.querySelector('[data-wc-manual-binding]')
+    const bindingHelp = overlay.querySelector('[data-wc-binding-help]')
+    const bindingSummary = overlay.querySelector('[data-wc-binding-summary]')
+    const peerLabel = overlay.querySelector('[data-wc-peer-label]')
+    const peerIdInput = overlay.querySelector('[data-wc-peerid]')
+    const aliasInput = overlay.querySelector('[data-wc-alias]')
     const appIdInput = overlay.querySelector('[data-wc-appid]')
     const secretInput = overlay.querySelector('[data-wc-secret]')
     const transportSelect = overlay.querySelector('[data-wc-transport]')
     const sandboxSelect = overlay.querySelector('[data-wc-sandbox]')
     const bindHostInput = overlay.querySelector('[data-wc-bindhost]')
-    const bindModeSelect = overlay.querySelector('[data-wc-bindmode]')
+    const identityModeRow = overlay.querySelector('[data-wc-identity-mode-row]')
     const identityModeSelect = overlay.querySelector('[data-wc-identitymode]')
-    const peerIdInput = overlay.querySelector('[data-wc-peerid]')
-    const aliasInput = overlay.querySelector('[data-wc-alias]')
     const identityNameInput = overlay.querySelector('[data-wc-identity-name]')
     const identityIdInput = overlay.querySelector('[data-wc-identity-id]')
     const trustedInput = overlay.querySelector('[data-wc-trusted]')
+    const groupRulesPanel = overlay.querySelector('[data-wc-group-rules]')
+    const ruleProbabilityInput = overlay.querySelector('[data-wc-rule-probability]')
+    const ruleProbabilityRow = overlay.querySelector('[data-wc-probability-row]')
+    const ruleContextInput = overlay.querySelector('[data-wc-rule-context]')
+    const ruleContextEffective = overlay.querySelector('[data-wc-rule-context-effective]')
+    const ruleWhitelistInput = overlay.querySelector('[data-wc-rule-whitelist]')
+    const ruleBlacklistInput = overlay.querySelector('[data-wc-rule-blacklist]')
+    const ruleWhitelistAtInput = overlay.querySelector('[data-wc-rule-whitelistforat]')
+    const ruleWhitelistProbInput = overlay.querySelector('[data-wc-rule-whitelistprob]')
+    const ruleRequireAtInput = overlay.querySelector('[data-wc-rule-requireat]')
+    const ruleMentionAlwaysInput = overlay.querySelector('[data-wc-rule-mentionalways]')
+    const ruleQuoteInput = overlay.querySelector('[data-wc-rule-quote]')
+    const ruleMentionInput = overlay.querySelector('[data-wc-rule-mention]')
+    const ruleSilentInput = overlay.querySelector('[data-wc-rule-silent]')
+    const linkGroupInput = overlay.querySelector('[data-wc-link-group]')
+    const linkMaxInput = overlay.querySelector('[data-wc-link-max]')
+    const linkAutoInput = overlay.querySelector('[data-wc-link-auto]')
     const manualPane = overlay.querySelector('[data-wc-pane="manual"]')
     const qrPane = overlay.querySelector('[data-wc-pane="qrcode"]')
-    const manualBindingRow = overlay.querySelector('[data-wc-manual-binding]')
+    const permRows = [...overlay.querySelectorAll('[data-wc-perm-row]')]
+    const permNote = overlay.querySelector('[data-wc-perm-note]')
     const errorEl = overlay.querySelector('[data-wc-error]')
 
     const setError = message => {
@@ -1011,16 +1454,75 @@ export function apply(ctx) {
       overlay?.remove()
       overlay = null
     }
+    const currentSessionType = () => (TAB_ORDER.includes(categorySelect.value) ? CATEGORY_SESSION[categorySelect.value] : 'c2c') || 'c2c'
+    const sessionBindingOf = id => bindings.find(item => item?.sessionType === id && item?.peerId) || null
     const syncAccessPanes = () => {
       manualPane.hidden = access !== 'manual'
       qrPane.hidden = access !== 'qrcode'
     }
-    const syncManualBinding = () => {
-      manualBindingRow.hidden = bindModeSelect.value !== 'manual'
+    const syncProbability = () => {
+      const onlyAt = ruleRequireAtInput?.checked !== false
+      const atAlways = ruleMentionAlwaysInput?.checked !== false
+      // 只有“仅 @ 时回复”且“@ 必定回复”同时开启时，概率才完全用不到。
+      const disabled = onlyAt && atAlways
+      if (ruleProbabilityInput) {
+        ruleProbabilityInput.disabled = disabled
+        ruleProbabilityInput.title = disabled ? '当前规则下概率不生效；可取消“被 @ 时必定回复”或“仅 @ 时回复”' : ''
+      }
+      if (ruleProbabilityRow) ruleProbabilityRow.style.opacity = disabled ? '.55' : '1'
     }
-    const syncSessionFromCategory = () => {
-      const next = CATEGORY_SESSION[categorySelect.value] || 'c2c'
-      sessionSelect.value = next
+    const updateBindingHint = () => {
+      const manual = bindModeSelect.value === 'manual'
+      const sessionId = currentSessionType()
+      if (manualBindingRow) manualBindingRow.hidden = !manual
+      if (peerLabel) peerLabel.textContent = sessionId === 'group' ? '群 openid' : '私聊 openid'
+      if (peerIdInput) {
+        peerIdInput.placeholder = sessionId === 'group'
+          ? '群 openid（例如 4C06…）；QQ 官方不给群号'
+          : '私聊 openid；QQ 官方不给 QQ 号'
+      }
+      if (bindingHelp) {
+        bindingHelp.textContent = manual
+          ? '手动绑定只对上面这一个 openid 生效；留空保存会自动改回自动绑定。openid 可在渠道详情「发现会话」里复制。'
+          : '收到该机器人的第一条匹配消息后自动绑定到本渠道；同一 AppID 的其它会话可在详情「发现会话」里绑定到别的渠道。'
+      }
+      if (bindingSummary) {
+        const peer = String(peerIdInput?.value || '').trim()
+        const existing = sessionBindingOf(sessionId)
+        if (manual && peer) {
+          bindingSummary.textContent = `当前设置：手动绑定（${peer.length > 16 ? `…${peer.slice(-12)}` : peer}）`
+        } else if (existing) {
+          bindingSummary.textContent = `当前已绑定：${bindingLabel(existing)}；openid：${existing.peerId}`
+        } else if (manual) {
+          bindingSummary.textContent = '当前设置：手动绑定，但还没有填 openid；保存时会自动改为自动绑定。'
+        } else {
+          bindingSummary.textContent = '当前还没有绑定会话：收到该机器人的第一条匹配消息后会自动绑定。'
+        }
+      }
+    }
+    const syncCategoryUi = () => {
+      const nextCategory = TAB_ORDER.includes(categorySelect.value) ? categorySelect.value : 'private'
+      const nextSession = CATEGORY_SESSION[nextCategory] || 'c2c'
+      const isGroup = nextCategory === 'group'
+      if (groupRulesPanel) groupRulesPanel.hidden = !isGroup
+      if (identityModeRow) identityModeRow.hidden = isGroup
+      if (categoryNote) categoryNote.textContent = CATEGORY_HELP[nextCategory] || CATEGORY_HELP.private
+      for (const row of permRows) {
+        const scopes = String(row.dataset.wcPermScope || '').split(',').filter(Boolean)
+        row.hidden = scopes.length > 0 && !scopes.includes(nextCategory)
+      }
+      if (permNote) {
+        permNote.textContent = nextCategory === 'privacy'
+          ? '隐私渠道按设计不能与其它渠道互读 / 互发，因此跨渠道相关权限已隐藏。'
+          : isGroup
+            ? '群聊只使用本群记录，因此「参与工作记忆」已隐藏；消息会写入本渠道，不会污染角色工作记忆。'
+            : '私聊可使用全部权限；跨渠道操作仍可能要求二次确认。'
+      }
+      const existing = sessionBindingOf(nextSession)
+      if (peerIdInput) peerIdInput.value = existing?.peerId || ''
+      if (aliasInput) aliasInput.value = existing?.alias || ''
+      updateBindingHint()
+      syncProbability()
     }
 
     overlay.querySelectorAll('input[name="wc-access"]').forEach(input =>
@@ -1029,29 +1531,75 @@ export function apply(ctx) {
         syncAccessPanes()
       }),
     )
-    categorySelect.addEventListener('change', syncSessionFromCategory)
-    bindModeSelect.addEventListener('change', syncManualBinding)
+    categorySelect.addEventListener('change', syncCategoryUi)
+    bindModeSelect.addEventListener('change', updateBindingHint)
+    peerIdInput?.addEventListener('input', updateBindingHint)
+    ruleRequireAtInput?.addEventListener('change', syncProbability)
+    ruleMentionAlwaysInput?.addEventListener('change', syncProbability)
+    ruleContextInput?.addEventListener('input', () => {
+      if (!ruleContextEffective) return
+      const n = Math.floor(Number(ruleContextInput.value))
+      ruleContextEffective.textContent = String(Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(1000, n)) : globalGroupMessages())
+    })
 
     const save = async () => {
+      if (saving) return
       setError('')
       const name = String(nameInput.value || '').trim() || 'QQ官方机器人'
       const nextRoleId = String(roleSelect.value || '').trim()
       if (!nextRoleId) return setError('请先选择一个角色；没有角色时可先到「会话」里创建一个角色。')
       const nextCategory = TAB_ORDER.includes(categorySelect.value) ? categorySelect.value : 'private'
-      const nextSession = SESSION_TYPES.some(item => item.id === sessionSelect.value) ? sessionSelect.value : 'c2c'
+      const nextSession = CATEGORY_SESSION[nextCategory] || 'c2c'
+      const requestedBindingMode = bindModeSelect.value === 'manual' ? 'manual' : 'auto'
       const nextTransport = transportSelect.value === 'webhook' ? 'webhook' : 'ws'
       const nextSandbox = sandboxSelect.value === '1'
-      const nextBindingMode = bindModeSelect.value === 'manual' ? 'manual' : 'auto'
       const appId = String(appIdInput.value || '').trim()
       const appSecret = String(secretInput.value || '').trim()
       const peerId = String(peerIdInput.value || '').trim()
       const alias = String(aliasInput.value || '').trim()
-      const identityMode = identityModeSelect.value === 'guest' ? 'guest' : 'owner'
+      const identityMode = nextSession === 'group' ? 'member' : identityModeSelect.value === 'guest' ? 'guest' : 'owner'
       const sharedIdentity = ctx.registry.get('user-identity')?.get?.() || {}
       const nextIdentity = {
         userId: String(identityIdInput.value || '').trim() || sharedIdentity.userId || config.get('chat.userId', 'web-user') || 'web-user',
         userName: String(identityNameInput.value || '').trim() || sharedIdentity.userName || resolveUserNickname(config),
       }
+      let nextBindingMode = requestedBindingMode
+      const existingBindings = bindings.filter(item => item?.sessionType === nextSession && item?.peerId)
+      let nextBindings = existingBindings
+      if (peerId) {
+        nextBindings = [{ sessionType: nextSession, peerId, alias, identityMode, boundAt: Date.now() }]
+      } else if (nextBindingMode === 'manual' && !existingBindings.length) {
+        // QQ 官方只给 openid，不能像 NapCat 那样预先填写群号；留空保存自动退回自动绑定，避免保存被卡死。
+        nextBindingMode = 'auto'
+      }
+      const parseRuleIds = value =>
+        String(value || '')
+          .split(/[,，\s]+/)
+          .map(item => item.trim())
+          .filter(Boolean)
+      const nextRules =
+        nextCategory === 'group'
+          ? {
+              ...DEFAULT_GROUP_RULES,
+              ...(meta.rules || {}),
+              blacklist: parseRuleIds(ruleBlacklistInput?.value),
+              whitelist: parseRuleIds(ruleWhitelistInput?.value),
+              whitelistForAt: ruleWhitelistAtInput?.checked === true,
+              whitelistForProbability: ruleWhitelistProbInput?.checked === true,
+              requireAt: ruleRequireAtInput?.checked !== false,
+              mentionAlwaysReply: ruleMentionAlwaysInput?.checked !== false,
+              replyProbability: Math.max(0, Math.min(100, Math.floor(Number(ruleProbabilityInput?.value) || 0))),
+              quote: ruleQuoteInput?.checked === true,
+              mention: ruleMentionInput?.checked === true,
+              silentContext: ruleSilentInput?.checked !== false,
+              contextMessages: Math.max(0, Math.min(1000, Math.floor(Number(ruleContextInput?.value) || 0))),
+              contextRounds: 0,
+              ruleSchema: 3,
+            }
+          : meta.rules || {}
+      const linkGroupId = nextCategory === 'group' ? String(linkGroupInput?.value || '').trim() : ''
+      const linkAutoReply = linkGroupId ? linkAutoInput?.checked !== false : false
+      const linkMaxTurns = clampLinkTurns(linkMaxInput?.value)
       const nextPermissions = {}
       for (const [key] of PERMISSION_META) nextPermissions[key] = !!overlay.querySelector(`[data-wc-perm="${key}"]`)?.checked
 
@@ -1059,13 +1607,7 @@ export function apply(ctx) {
         if (!appId) return setError('手动接入需要填写 AppID。')
         if (!appSecret && !meta.appId) return setError('手动接入需要填写 AppSecret（首次接入时）。')
       }
-      if (nextBindingMode === 'manual' && !peerId && !bindings.length) {
-        return setError('手动绑定模式需要填写私聊 openid。')
-      }
 
-      const nextBindings = peerId
-        ? [{ sessionType: nextSession, peerId, alias, identityMode, boundAt: Date.now() }]
-        : bindings.filter(item => item.sessionType === nextSession)
       const nextMeta = {
         ...meta,
         kind: TYPE_ID,
@@ -1078,9 +1620,13 @@ export function apply(ctx) {
         sandbox: nextSandbox,
         bindingMode: nextBindingMode,
         bindings: nextBindings,
-        bindHost: String(bindHostInput.value || '').trim(),
+        bindHost: String(bindHostInput?.value || '').trim(),
+        rules: nextRules,
+        linkGroupId,
+        linkAutoReply,
+        linkMaxTurns,
         identity: nextIdentity,
-        trustedUserIds: String(trustedInput.value || '')
+        trustedUserIds: String(trustedInput?.value || '')
           .split(/[,，\s]+/)
           .map(value => value.trim())
           .filter(Boolean),
@@ -1089,44 +1635,43 @@ export function apply(ctx) {
         lastError: '',
       }
 
-      let saved = null
-      if (editing && source) {
-        const fromTab = findTab(source.id)
-        channels.updateChannel(fromTab, source.id, { name, meta: nextMeta })
-        if (fromTab !== nextCategory) {
-          const moved = channels.removeChannel(fromTab, source.id)
-          if (moved) {
-            const groups = channels.groups(nextCategory)
-            const group = groups[0] || channels.addGroup(nextCategory, '我的渠道')
-            saved = channels.addChannel(nextCategory, group.id, { ...moved, name, meta: nextMeta })
-            channels.activate(nextCategory, saved.id)
+      saving = true
+      const saveButton = overlay.querySelector('[data-wc-save]')
+      if (saveButton) saveButton.disabled = true
+      try {
+        let saved = null
+        if (editing && source) {
+          const fromTab = findTab(source.id)
+          channels.updateChannel(fromTab, source.id, { name, meta: nextMeta })
+          if (fromTab !== nextCategory) {
+            const moved = channels.removeChannel(fromTab, source.id)
+            if (moved) {
+              const groups = channels.groups(nextCategory)
+              const group = groups[0] || channels.addGroup(nextCategory, '我的渠道')
+              saved = channels.addChannel(nextCategory, group.id, { ...moved, name, meta: nextMeta })
+              channels.activate(nextCategory, saved.id)
+            }
+          } else {
+            saved = channels.findChannel(fromTab, source.id)
           }
         } else {
-          saved = channels.findChannel(fromTab, source.id)
+          const groups = channels.groups(nextCategory)
+          const group = groups[0] || channels.addGroup(nextCategory, '我的渠道')
+          saved = channels.addChannel(nextCategory, group.id, {
+            type: TYPE_ID,
+            name,
+            color: TYPE_COLOR,
+            status: 'offline',
+            meta: nextMeta,
+          })
+          channels.activate(nextCategory, saved.id)
         }
-        toast.success(`「${name}」已更新`)
-      } else {
-        const groups = channels.groups(nextCategory)
-        const group = groups[0] || channels.addGroup(nextCategory, '我的渠道')
-        saved = channels.addChannel(nextCategory, group.id, { type: TYPE_ID, name, color: TYPE_COLOR, status: 'offline', meta: nextMeta })
-        channels.activate(nextCategory, saved.id)
-        toast.success(`「${name}」已添加，点击详情里的「接入」扫码或手动登录`)
-      }
-      if (saved) {
+        if (!saved) throw new Error('保存渠道失败，请重试。')
         try {
           ensureConversation(saved)
         } catch (err) {
           ctx.logger?.warn?.(`创建 QQ 渠道会话失败：${err.message}`)
         }
-      }
-      if (!saved) {
-        setError('保存渠道失败，请重试。')
-        return
-      }
-
-      try {
-        // 与微信 clawbot 对齐：保存渠道只负责持久化与同步绑定，
-        // 真正的扫码 / 连接由用户在详情页点「接入」触发，避免保存瞬间创建绑定任务。
         if (access === 'manual' && appSecret) {
           const data = await bridgePost('/login/start', {
             mode: 'manual',
@@ -1141,13 +1686,19 @@ export function apply(ctx) {
           if (data) updateChannelFromStatus(data)
           if (data?.ok === false) toast.warn(data.error || '保存凭据失败')
         }
-        await syncChannelToBridge(findChannel(saved.id) || saved)
+        await syncChannelToBridge(findChannel(saved.id) || saved, { notify: true })
+        if (requestedBindingMode === 'manual' && nextBindingMode === 'auto') {
+          toast.warn('没有填写 openid，已改为自动绑定；收到该群 / 用户的第一条消息后会自动绑定。')
+        }
+        toast.success(editing ? `「${name}」已更新` : `「${name}」已添加，点详情里的「接入」扫码或手动登录`)
+        onSaved?.(findChannel(saved.id) || saved)
+        close()
       } catch (err) {
-        toast.error(`同步 QQ 渠道失败：${err.message}`)
+        setError(err.message || String(err))
+      } finally {
+        saving = false
+        if (saveButton) saveButton.disabled = false
       }
-
-      onSaved?.(findChannel(saved.id) || saved)
-      close()
     }
 
     overlay.querySelector('[data-wc-cancel]')?.addEventListener('click', close)
@@ -1162,7 +1713,8 @@ export function apply(ctx) {
     closing.push(() => document.removeEventListener('keydown', onKeydown))
     document.body.appendChild(overlay)
     syncAccessPanes()
-    syncManualBinding()
+    updateBindingHint()
+    syncCategoryUi()
     setTimeout(() => nameInput?.focus(), 30)
   }
 
@@ -1439,7 +1991,7 @@ export function apply(ctx) {
           accountId: account.accountId || '',
           appId: account.appId,
           autoBind: meta.bindingMode !== 'manual',
-          sessionType: meta.sessionType || sessionTypeOf(current),
+          sessionType: sessionTypeOf(current),
         })
         if (closed) return
         paint(data)
@@ -1466,7 +2018,7 @@ export function apply(ctx) {
             mode: 'reconnect',
             channelId: current.id,
             autoBind: meta.bindingMode !== 'manual',
-            sessionType: meta.sessionType || sessionTypeOf(current),
+            sessionType: sessionTypeOf(current),
           })
           if (closed) return
           if (data?.ok === false) {
@@ -1512,7 +2064,7 @@ export function apply(ctx) {
           bindHost,
           forceBind: force === true,
           autoBind: meta.bindingMode !== 'manual',
-          sessionType: meta.sessionType || sessionTypeOf(current),
+          sessionType: sessionTypeOf(current),
         })
         if (closed) return
         if (data?.ok === false) {
@@ -1549,7 +2101,7 @@ export function apply(ctx) {
           appSecret,
           transport: transportSelect.value === 'webhook' ? 'webhook' : 'ws',
           sandbox: sandboxSelect.value === '1',
-          sessionType: meta.sessionType || sessionTypeOf(current),
+          sessionType: sessionTypeOf(current),
           autoBind: meta.bindingMode !== 'manual',
         })
         if (closed) return
@@ -1617,8 +2169,19 @@ export function apply(ctx) {
     const permissions = permissionsOf(channel)
     const conv = sessions.get(channel.meta?.conversationId)
     const status = channel.status || 'offline'
-    const bindings = bindingsOf(channel)
-    const discovered = (live.discovered || []).filter(item => !item.channelId && (!item.sessionType || item.sessionType === sessionType || item.unsupported))
+    const localBindings = bindingsOf(channel)
+    const backendBindings = Array.isArray(live.bindings) ? live.bindings : null
+    const bindings = backendBindings || localBindings
+    const bindingsMismatch =
+      !!backendBindings &&
+      JSON.stringify(backendBindings.map(item => `${item.sessionType}:${item.peerId}`).sort()) !==
+        JSON.stringify(localBindings.map(item => `${item.sessionType}:${item.peerId}`).sort())
+    const bridgeVersion = String(live.bridgeVersion || '')
+    const lastGatewayEvent = live.lastGatewayEvent || null
+    const discovered = (live.discovered || []).filter(item => {
+      if (item.channelId && String(item.channelId) === String(channel.id)) return false
+      return !item.sessionType || item.sessionType === sessionType || item.unsupported
+    })
     const count = conv ? (sessions.messages(conv.id) || []).filter(m => m.kind !== 'divider').length : 0
     const enabled = PERMISSION_META.filter(([key]) => permissions[key] !== false).map(([, label]) => label)
     const accountText = channel.meta?.botName ? `${channel.meta.botName}（${channel.meta.appId || '—'}）` : channel.meta?.appId || '未登录'
@@ -1640,23 +2203,31 @@ export function apply(ctx) {
           <button class="outline-btn" data-wc-action="edit">编辑渠道</button>
           ${conv ? '<button class="outline-btn" data-wc-action="open">打开聊天记录</button>' : ''}
           <button class="outline-btn" data-wc-action="refresh">刷新状态</button>
+          ${status === 'online' ? '<button class="outline-btn" data-wc-action="reconnect">重连网关</button>' : ''}
           ${status === 'online' ? '<button class="outline-btn" data-wc-action="logout">断开连接</button>' : ''}
         </div>
         ${channel.meta?.lastError ? `<div class="wc-error" style="margin-top:12px">${escapeHtml(channel.meta.lastError)}</div>` : ''}
+        ${live.fetchError ? `<div class="wc-error" style="margin-top:12px">读取后端状态失败：${escapeHtml(live.fetchError)}（确认服务器上的 bridge.mjs 已更新且进程已完整重启）</div>` : ''}
 
         <div class="settings-section" style="margin-top:18px">
           <div class="settings-section-title">渠道配置</div>
           <div class="settings-card" style="padding:14px 16px">
             <div class="wc-kv">
               <span class="k">使用角色</span><span class="v">${escapeHtml(role?.name || '未绑定（请在编辑渠道里选择）')}</span>
-              <span class="k">渠道分类</span><span class="v">${escapeHtml(TAB_LABELS[category] || category)}${category === 'private' ? '（参与角色工作记忆）' : '（仅本渠道上下文）'}</span>
-              <span class="k">QQ 会话类型</span><span class="v">${escapeHtml(SESSION_LABEL[sessionType] || sessionType)}</span>
+              <span class="k">渠道分类</span><span class="v">${escapeHtml(TAB_LABELS[category] || category)}${category === 'private' ? '（参与角色工作记忆）' : category === 'group' ? '（仅本群上下文）' : '（仅本渠道上下文）'}</span>
+              <span class="k">QQ 会话类型</span><span class="v">${escapeHtml(SESSION_LABEL[sessionType] || sessionType)}${sessionType === 'group' ? '（@机器人 / 群开启全量消息后的普通消息）' : ''}</span>
+              ${sessionType === 'group' ? `<span class="k">群上下文</span><span class="v">最近 ${groupContextMessagesOf(channel)} 条消息 · channel-only</span>` : ''}
+              ${channel.meta?.linkGroupId ? `<span class="k">跨机器人联动</span><span class="v">${escapeHtml(channel.meta.linkGroupId)} · ${channel.meta.linkAutoReply === false ? '仅同步上下文' : `自动接话 ≤ ${clampLinkTurns(channel.meta.linkMaxTurns)} 轮/条`}</span>` : ''}
               <span class="k">机器人账号</span><span class="v">${escapeHtml(accountText)}</span>
               <span class="k">连接方式</span><span class="v">${escapeHtml(channel.meta?.transport === 'webhook' ? 'Webhook 回调' : 'WebSocket 网关')}</span>
               <span class="k">接入环境</span><span class="v">${channel.meta?.sandbox ? `沙箱${channel.meta?.sandboxFallback ? '（自动降级，免 IP 白名单）' : ''}` : '正式'}</span>
               <span class="k">聊天记录</span><span class="v">${conv ? `${escapeHtml(conv.name)} · ${count} 条` : '接入后自动创建'}</span>
               <span class="k">权限</span><span class="v">${escapeHtml(enabled.join(' · ') || '仅基础权限')}</span>
               <span class="k">绑定模式</span><span class="v">${channel.meta?.bindingMode === 'manual' ? '手动绑定' : '自动绑定首次会话'}</span>
+              <span class="k">后端连接</span><span class="v">${escapeHtml(`${live.status || '—'} · ${live.transport === 'webhook' ? 'Webhook' : 'WebSocket'}${live.sandbox ? ' · 沙箱' : ' · 正式'}${live.error ? ` · ${live.error}` : ''}`)}</span>
+              <span class="k">后端插件</span><span class="v">${escapeHtml(bridgeVersion || '未上报（请确认后端进程已完全重启）')}</span>
+              <span class="k">最近事件</span><span class="v">${lastGatewayEvent ? `${escapeHtml(lastGatewayEvent.type || '事件')} · ${formatTime(lastGatewayEvent.at)}` : '还没有收到任何 QQ 事件'}</span>
+              <span class="k">最近入站</span><span class="v">${live.lastInbound ? `${escapeHtml(live.lastInbound.sessionType)} · ${escapeHtml(live.lastInbound.peerId)} · ${formatTime(live.lastInbound.at)}` : '无（事件没有路由到本渠道）'}</span>
               <span class="k">owner 标识</span><span class="v">${escapeHtml(channelIdentity(channel).userName)} · ${escapeHtml(channelIdentity(channel).userId)}</span>
             </div>
           </div>
@@ -1664,6 +2235,14 @@ export function apply(ctx) {
 
         <div class="settings-section">
           <div class="settings-section-title">会话绑定（只接收这些会话）</div>
+          ${bindingsMismatch
+            ? `<div class="wc-error" style="margin-bottom:10px">本机保存的绑定和后端路由不一致。请先点上方「刷新状态」；如果仍不一致，编辑渠道保存一次，或完全重启后端进程后再试。</div>`
+            : ''}
+          ${Array.isArray(live.conflicts) && live.conflicts.length
+            ? `<div class="wc-error" style="margin-bottom:10px">后端存在路由冲突：${escapeHtml(
+                live.conflicts.map(item => `${item.key} → ${item.channelId}/${item.otherChannelId}`).join('；'),
+              )}。请重新保存需要接收该会话的渠道，让绑定归属唯一。</div>`
+            : ''}
           <div class="settings-card" style="padding:12px 14px">
             ${bindings.length
               ? bindings
@@ -1675,10 +2254,12 @@ export function apply(ctx) {
                         <div class="wc-bind-id">${escapeHtml(binding.sessionType)} · ${escapeHtml(binding.peerId)}</div>
                       </div>
                       <div class="wc-bind-actions">
-                        <select data-wc-bind-identity="${escapeHtml(`${binding.sessionType}|${binding.peerId}`)}">
+                        ${binding.sessionType === 'c2c'
+                          ? `<select data-wc-bind-identity="${escapeHtml(`${binding.sessionType}|${binding.peerId}`)}">
                           <option value="owner" ${(binding.identityMode || 'owner') === 'owner' ? 'selected' : ''}>视为主人</option>
                           <option value="guest" ${binding.identityMode === 'guest' ? 'selected' : ''}>独立用户</option>
-                        </select>
+                        </select>`
+                          : '<span class="wc-tag">群成员身份</span>'}
                         <button class="outline-btn" data-wc-action="unbind" data-wc-session="${escapeHtml(binding.sessionType)}" data-wc-peer="${escapeHtml(binding.peerId)}">解绑</button>
                         <button class="outline-btn" data-wc-action="copy" data-wc-peer="${escapeHtml(binding.peerId)}">复制 openid</button>
                       </div>
@@ -1690,7 +2271,7 @@ export function apply(ctx) {
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title">发现会话（同一机器人收到的其它 openid）</div>
+          <div class="settings-section-title">发现会话（同一机器人收到的其它 openid / 群）</div>
           <div class="settings-card" style="padding:12px 14px">
             ${discovered.length
               ? discovered
@@ -1698,18 +2279,18 @@ export function apply(ctx) {
                     item => `
                     <div class="wc-bind-row">
                       <div class="wc-bind-main">
-                        <div class="wc-bind-name">${item.unsupported ? `<span class="wc-tag">${escapeHtml(item.unsupported)}</span> ` : ''}${escapeHtml(SESSION_LABEL[item.sessionType] || item.sessionType)} · ${escapeHtml(item.peerId)}</div>
+                        <div class="wc-bind-name">${item.unsupported ? `<span class="wc-tag">${escapeHtml(item.unsupported)}</span> ` : ''}${item.channelId ? '<span class="wc-tag">已绑定到其它渠道</span> ' : ''}${escapeHtml(SESSION_LABEL[item.sessionType] || item.sessionType)} · ${escapeHtml(item.peerId)}</div>
                         <div class="wc-bind-id">${escapeHtml(item.preview || '（暂无内容）')} · ${escapeHtml(formatTime(item.at))} · 共 ${Number(item.count) || 0} 条${item.lastSenderName ? ` · ${escapeHtml(item.lastSenderName)}` : ''}</div>
                       </div>
                       <div class="wc-bind-actions">
                         <input data-wc-discover-alias="${escapeHtml(`${item.sessionType}|${item.peerId}`)}" maxlength="20" placeholder="备注" />
-                        <button class="outline-btn primary-soft" data-wc-action="bind" data-wc-session="${escapeHtml(item.sessionType)}" data-wc-peer="${escapeHtml(item.peerId)}" ${item.unsupported ? 'disabled title="暂不支持群聊"' : ''}>绑定到本渠道</button>
-                        <button class="outline-btn" data-wc-action="trust" data-wc-peer="${escapeHtml(item.peerId)}" ${item.unsupported ? 'disabled' : ''}>信任该 openid</button>
+                        <button class="outline-btn primary-soft" data-wc-action="bind" data-wc-session="${escapeHtml(item.sessionType)}" data-wc-peer="${escapeHtml(item.peerId)}" ${item.unsupported ? 'disabled title="暂不支持该会话类型"' : ''}>${item.channelId ? '改绑到本渠道' : '绑定到本渠道'}</button>
+                        <button class="outline-btn" data-wc-action="trust" data-wc-peer="${escapeHtml(item.peerId)}" ${item.unsupported ? 'disabled' : ''}>信任该成员 openid</button>
                       </div>
                     </div>`,
                   )
                   .join('')
-              : '<div class="wc-bind-empty">还没有发现其它会话。让 QQ 用户先给机器人发一条私聊消息，这里就会出现对应 openid；点「绑定并允许确认」即可把它授权给本渠道。</div>'}
+              : '<div class="wc-bind-empty">还没有发现其它会话。让 QQ 用户先给机器人发一条私聊 / 群内 @消息，这里就会出现对应 openid；点「绑定到本渠道」即可把它授权给本渠道。</div>'}
           </div>
         </div>
 
@@ -1726,6 +2307,7 @@ export function apply(ctx) {
         <div class="settings-section">
           <div class="settings-note">
             入站消息会写入当前渠道记录并触发所选角色；模型整轮调用结束后，回复作为被动消息按 <code>msg_seq</code> 发回 QQ。
+            ${sessionType === 'group' ? `群聊只使用本群最近若干条消息作为上下文，不参与角色工作记忆；群成员以 member_openid 作为身份，群昵称作为称呼。QQ 群默认只推送 @机器人 的消息；要让普通消息也写入聊天记录，请在 QQ 群设置里打开「机器人可获取群内全部消息」。` : ''}
             ${PASSIVE_HINT}窗口失效时自动改发主动消息（受 QQ 官方配额限制），无需额外开关。
           </div>
         </div>
@@ -1747,7 +2329,7 @@ export function apply(ctx) {
           updateChannelFromStatus(data)
         }
       } catch (_) {
-        /* 后端未就绪时保持本地状态 */
+        live = { ...live, fetchError: _?.message || String(_ || '后端状态读取失败') }
       }
       render()
     }
@@ -1765,6 +2347,20 @@ export function apply(ctx) {
       } else if (action === 'refresh') {
         await refresh()
         toast.info('已刷新 QQ 机器人状态')
+      } else if (action === 'reconnect') {
+        try {
+          toast.info('正在请求重连 QQ 网关…')
+          const data = await bridgePost('/login/start', { mode: 'reconnect', channelId: current.id, force: true })
+          if (data) {
+            live = { ...live, ...data }
+            updateChannelFromStatus(data)
+          }
+          if (data?.ok === false) toast.warn(data.error || '重连失败')
+          else toast.success('已请求重连 QQ 网关，几秒后点「刷新状态」查看最近事件')
+          render()
+        } catch (err) {
+          toast.error(`重连失败：${err.message}`)
+        }
       } else if (action === 'logout') {
         const modal = ctx.registry.get('modal')
         const confirmed = modal
@@ -1884,6 +2480,17 @@ export function apply(ctx) {
       }),
       events.on('qqbot:changed', () => render()),
       events.on('channel:sync', () => render()),
+      events.on('qqbot:discover', payload => {
+        const item = payload?.item
+        if (!item?.peerId || (payload?.accountId && live.accountId && String(payload.accountId) !== String(live.accountId))) return
+        const list = Array.isArray(live.discovered) ? [...live.discovered] : []
+        const key = `${item.sessionType}:${item.peerId}`
+        const index = list.findIndex(entry => `${entry.sessionType}:${entry.peerId}` === key)
+        if (index >= 0) list[index] = { ...list[index], ...item }
+        else list.push(item)
+        live = { ...live, discovered: list }
+        render()
+      }),
     ]
     const bootTimer = setTimeout(() => refresh().catch(() => {}), 0)
     const statusTimer = setInterval(() => {
@@ -1922,12 +2529,34 @@ export function apply(ctx) {
     name: 'QQ官方机器人',
     color: TYPE_COLOR,
     icon: TYPE_ICON,
-    description: 'QQ 官方机器人渠道：扫码 / AppID 接入，支持私聊绑定、被动回复与完整聊天记录（暂不支持群聊）。',
+    description: 'QQ 官方机器人渠道：扫码 / AppID 接入，支持私聊与群聊绑定、群规则、群昵称身份、多机器人联动、SILK 语音、被动回复与完整聊天记录。',
     create: options => openSettings({ mode: 'create', ...(options || {}) }),
     detail: options => mountDetail(options),
     outbound: deliverOutbound,
   })
   ctx.effect(() => () => registration.dispose?.())
+
+  // 给其它插件使用的稳定接口：群规则决策 / 会话类型 / 绑定查询，与 napcat-channel 口径一致。
+  ctx.provide(
+    'qqbot-channel',
+    {
+      name,
+      version,
+      sessionTypeOf,
+      rulesOf: channel => groupRulesOf(channel),
+      decide: (channel, message) => triggerDecision(channel, message),
+      trigger: (channel, message) => triggerDecision(channel, message),
+      bindingsOf,
+      groupContextMessagesOf,
+      linkMaxTurnsOf: channel => clampLinkTurns(channel?.meta?.linkMaxTurns),
+      linkDecide: (channel, message, permissions) =>
+        applyLinkDecision(channel, message, triggerDecision(channel, message), permissions || permissionsOf(channel)),
+      resetLinkedTurns,
+      send: body => bridgePost('/send', body),
+    },
+    { type: 'singleton' },
+  )
+
 
   // 插件设置面板：出现在「设置 → 插件 → QQ官方机器人 → 设置」。
   const pluginManager = ctx.registry.get('plugin-manager')
@@ -2090,9 +2719,46 @@ export function apply(ctx) {
 
   const boot = async () => {
     ensureBackendEvents()
+    // 清理后端里已经不存在于前端的渠道配置，避免已删除渠道的旧绑定继续抢走消息路由。
+    const activeChannelIds = []
+    for (const tab of channels.tabs()) {
+      for (const channel of channels.channels(tab)) {
+        if (isQQChannel(channel)) activeChannelIds.push(String(channel.id || ''))
+      }
+    }
+    if (api && activeChannelIds.length) {
+      try {
+        const reconciled = await bridgePost('/channels/reconcile', { channelIds: activeChannelIds })
+        if (reconciled?.removed) ctx.logger?.info?.(`[qqbot] 已清理 ${reconciled.removed} 个后端遗留渠道配置`)
+      } catch (_) {
+        /* 旧后端没有该接口时忽略 */
+      }
+    }
     for (const tab of channels.tabs()) {
       for (const channel of channels.channels(tab)) {
         if (!isQQChannel(channel)) continue
+        // 历史遗留迁移：
+        // 1. 手动绑定但当前会话类型没有 openid 的渠道等于永远收不到消息，自动退回自动绑定；
+        // 2. 旧版本规则里的 quote / mention 是插件默认塞进去、用户从未选过，升级后默认关闭，
+        //    需要引用 / @ 触发者的用户可在编辑渠道里重新勾选。
+        const nextMeta = { ...(channel.meta || {}) }
+        let metaChanged = false
+        const hasSessionBinding = bindingsOf(channel).some(item => item?.sessionType === sessionTypeOf(channel) && item?.peerId)
+        if (nextMeta.bindingMode === 'manual' && !hasSessionBinding) {
+          nextMeta.bindingMode = 'auto'
+          metaChanged = true
+          ctx.logger?.info?.(`[qqbot] 渠道「${channel.name || channel.id}」未绑定 openid，已自动改为自动绑定`)
+        }
+        if (categoryOf(channel) === 'group' && nextMeta.rules && Number(nextMeta.rules.ruleSchema || 0) < 3) {
+          nextMeta.rules = { ...nextMeta.rules, quote: false, mention: false, mentionAlwaysReply: true, ruleSchema: 3 }
+          metaChanged = true
+          ctx.logger?.info?.(`[qqbot] 渠道「${channel.name || channel.id}」已迁移群规则：引用 / 艾特默认关闭，@ 默认必定回复`)
+        }
+        if (metaChanged) {
+          nextMeta.updatedAt = Date.now()
+          channel.meta = nextMeta
+          channels.updateChannel(tab, channel.id, { meta: nextMeta })
+        }
         try {
           ensureConversation(channel)
         } catch (_) {

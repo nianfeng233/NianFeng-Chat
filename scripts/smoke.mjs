@@ -18,7 +18,7 @@
  *  8. 主题样式注入、诊断信息
  */
 import './dom-shim.mjs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from '../server/index.mjs'
@@ -245,6 +245,73 @@ async function main() {
         mentionedSelf: false,
       }).trigger === false,
   )
+
+  const qqbotService = ctx.inject('qqbot-channel')
+  check('QQ官方机器人 扩展服务 qqbot-channel 可用', typeof qqbotService?.decide === 'function' && typeof qqbotService?.bindingsOf === 'function')
+  const qqbotRulesBase = {
+    blacklist: [],
+    whitelist: [],
+    requireAt: true,
+    mentionAlwaysReply: true,
+    replyProbability: 50,
+    silentContext: true,
+    whitelistForAt: false,
+    whitelistForProbability: false,
+  }
+  const qqbotDecisionChannel = rules => ({ meta: { category: 'group', rules: { ...qqbotRulesBase, ...rules } } })
+  check('QQ 群聊规则：默认 @ 必定回复', qqbotService.rulesOf(qqbotDecisionChannel({})).mentionAlwaysReply !== false)
+  check(
+    'QQ 群聊规则：黑名单优先忽略',
+    qqbotService.decide(qqbotDecisionChannel({ blacklist: ['member-42'] }), { senderId: 'member-42', sessionType: 'group' }).ignore === true,
+  )
+  check(
+    'QQ 群聊规则：@ 机器人触发，白名单可限制',
+    qqbotService.decide(qqbotDecisionChannel({}), { senderId: 'member-42', sessionType: 'group', mentionedSelf: true }).trigger === true &&
+      qqbotService.decide(qqbotDecisionChannel({ whitelistForAt: true, whitelist: ['member-42'] }), {
+        senderId: 'member-99',
+        sessionType: 'group',
+        mentionedSelf: true,
+      }).trigger === false,
+  )
+  check(
+    'QQ 群聊规则：概率触发可配置',
+    qqbotService.decide(qqbotDecisionChannel({ requireAt: false, replyProbability: 100 }), {
+      senderId: 'member-42',
+      sessionType: 'group',
+      mentionedSelf: false,
+    }).trigger === true &&
+      qqbotService.decide(qqbotDecisionChannel({ requireAt: false, replyProbability: 0 }), {
+        senderId: 'member-42',
+        sessionType: 'group',
+        mentionedSelf: false,
+      }).trigger === false,
+  )
+  check(
+    'QQ 群聊规则：可关闭“被 @ 时必定回复”，@ 改走概率',
+    qqbotService.decide(qqbotDecisionChannel({ mentionAlwaysReply: false, replyProbability: 100 }), {
+      senderId: 'member-42',
+      sessionType: 'group',
+      mentionedSelf: true,
+    }).trigger === true &&
+      qqbotService.decide(qqbotDecisionChannel({ mentionAlwaysReply: false, replyProbability: 0 }), {
+        senderId: 'member-42',
+        sessionType: 'group',
+        mentionedSelf: true,
+      }).trigger === false,
+  )
+
+  const linkPermissions = { read: true, reply: true }
+  const linkChannelA = { id: 'smoke-qq-link-a', meta: { category: 'group', linkGroupId: 'smoke-link', linkAutoReply: true, linkMaxTurns: 1 } }
+  const linkMessage = { sessionType: 'group', linkedBot: true, senderId: 'qqbot-bot:other', senderName: '另一个角色', mentionedSelf: false }
+  const firstLinkDecision = qqbotService.linkDecide(linkChannelA, linkMessage, linkPermissions)
+  const secondLinkDecision = qqbotService.linkDecide(linkChannelA, linkMessage, linkPermissions)
+  check(
+    'QQ 多机器人联动：自动接话受轮数上限约束',
+    firstLinkDecision.trigger === true && secondLinkDecision.trigger === false,
+    JSON.stringify({ firstLinkDecision, secondLinkDecision }),
+  )
+  const linkChannelOff = { id: 'smoke-qq-link-b', meta: { category: 'group', linkGroupId: 'smoke-link', linkAutoReply: false, linkMaxTurns: 1 } }
+  check('QQ 多机器人联动：关闭自动接话只写上下文', qqbotService.linkDecide(linkChannelOff, linkMessage, linkPermissions).trigger === false)
 
   const smokeSessions = ctx.inject('session-service')
   const hiddenConversation = smokeSessions.create({ name: '隐藏渠道会话冒烟', meta: { hiddenFromSessionList: true } })
@@ -581,7 +648,12 @@ async function main() {
   const channelRegistry = ctx.inject('channel-registry')
   const plannedTypes = channelRegistry.plannedList().map(p => p.type)
   const registeredTypes = channelRegistry.typeList().map(t => t.id)
-  check('未实现渠道路径被明确标注 discord/email', plannedTypes.includes('discord') && plannedTypes.includes('email') && !plannedTypes.includes('wechat'), plannedTypes.join(','))
+  const channelListSource = await readFile(join(ROOT, 'plugins', 'views', 'channel-list', 'index.mjs'), 'utf8')
+  check(
+    '渠道列表不再保留“未实现”占位项',
+    plannedTypes.length === 0 && !channelListSource.includes('· 未实现'),
+    `planned=${plannedTypes.join(',')}`,
+  )
   check('微信clawbot 渠道类型已由插件注册', registeredTypes.includes('wechat-clawbot'), registeredTypes.join(','))
   const knownChannelTypes = new Set(['wechat-clawbot', 'qqbot', 'napcat'])
   check(
@@ -941,6 +1013,52 @@ async function main() {
   await sleep(40)
   let maskList = Array.from(document.body.querySelectorAll('.wc-mask'))
   let qqCreateDialog = maskList[maskList.length - 1]
+  const qqCategorySelect = qqCreateDialog.querySelector('[data-wc-category]')
+  const qqCategoryNote = qqCreateDialog.querySelector('[data-wc-category-note]')
+  const qqGroupRulesPanel = qqCreateDialog.querySelector('[data-wc-group-rules]')
+  qqCategorySelect.value = 'group'
+  qqCategorySelect.dispatchEvent({ type: 'change' })
+  check(
+    'QQ 添加渠道支持群聊分类并显示群规则',
+    qqGroupRulesPanel?.hidden === false && String(qqCategoryNote?.textContent || '').includes('群聊'),
+    `categoryNote=${qqCategoryNote?.textContent} rulesHidden=${qqGroupRulesPanel?.hidden}`,
+  )
+  check(
+    'QQ 添加渠道群聊时显示群规则与“群 openid”标签',
+    qqCreateDialog.querySelector('[data-wc-peer-label]')?.textContent === '群 openid',
+    qqCreateDialog.querySelector('[data-wc-peer-label]')?.textContent,
+  )
+  check(
+    'QQ 群聊设置包含跨机器人联动字段',
+    !!qqCreateDialog.querySelector('[data-wc-link-group]') &&
+      !!qqCreateDialog.querySelector('[data-wc-link-auto]') &&
+      !!qqCreateDialog.querySelector('[data-wc-link-max]'),
+  )
+  const qqQuoteToggle = qqCreateDialog.querySelector('[data-wc-rule-quote]')
+  const qqMentionToggle = qqCreateDialog.querySelector('[data-wc-rule-mention]')
+  check(
+    'QQ 群聊引用 / 艾特回复开关默认关闭且可配置',
+    !!qqQuoteToggle &&
+      !!qqMentionToggle &&
+      qqQuoteToggle.disabled !== true &&
+      qqMentionToggle.disabled !== true &&
+      qqQuoteToggle.checked === false &&
+      qqMentionToggle.checked === false,
+    `quote=${qqQuoteToggle?.checked} disabled=${qqQuoteToggle?.disabled} mention=${qqMentionToggle?.checked} disabled=${qqMentionToggle?.disabled}`,
+  )
+  const qqAlwaysReplyToggle = qqCreateDialog.querySelector('[data-wc-rule-mentionalways]')
+  check(
+    'QQ 群聊“被 @ 时必定回复”是可取消的开关',
+    !!qqAlwaysReplyToggle && qqAlwaysReplyToggle.disabled !== true,
+    `always=${qqAlwaysReplyToggle?.checked} disabled=${qqAlwaysReplyToggle?.disabled}`,
+  )
+  qqCategorySelect.value = 'private'
+  qqCategorySelect.dispatchEvent({ type: 'change' })
+  check(
+    'QQ 添加渠道切回私聊后隐藏群规则',
+    qqGroupRulesPanel?.hidden === true && String(qqCategoryNote?.textContent || '').includes('私聊'),
+    `categoryNote=${qqCategoryNote?.textContent} rulesHidden=${qqGroupRulesPanel?.hidden}`,
+  )
   qqCreateDialog.querySelector('[data-wc-role]').value = roleConv.id
   qqCreateDialog.querySelector('[data-wc-name]').value = 'QQ保存流程冒烟'
   qqCreateDialog.querySelector('[data-wc-save]')?.click()
@@ -1842,8 +1960,39 @@ async function main() {
     disabledGroupIngest?.ok === true && disabledGroupIngest?.skipped === true && disabledGroupIngest?.reason === 'group-summary-disabled',
     JSON.stringify(disabledGroupIngest).slice(0, 240),
   )
+  // 设置页写的是裸渠道 id，chat-store 传进来是带类型前缀的 id，必须同样命中。
   await backend.ctx.settings.update({
-    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': false } } },
+    preferences: { memory: { groupSummaryDisabled: { 'smoke-group-bare': true } } },
+  })
+  const bareDisabledIngest = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-group-bare',
+    roleName: '群聊裸 id 测试角色',
+    memoryScope: 'normal',
+    channelId: 'qqbot:smoke-group-bare',
+    conversationId: 'conv-smoke-group-bare',
+    sourceGroup: 'group',
+    windowSize: 20,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: [
+      {
+        id: 'round:smoke-group-bare-1',
+        channel_id: 'qqbot:smoke-group-bare',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-group-bare-m1', seq: 1, role: 'user', content: '裸 id 关闭也必须生效', sender_name: '群成员', timestamp: nowIso },
+          { message_id: 'smoke-group-bare-m2', seq: 2, role: 'assistant', content: '不会写入。', sender_name: '群聊裸 id 测试角色', timestamp: nowIso },
+        ],
+      },
+    ],
+  })
+  check(
+    '群聊逐渠道关闭兼容裸渠道 id 与带前缀 id',
+    bareDisabledIngest?.ok === true && bareDisabledIngest?.skipped === true && bareDisabledIngest?.reason === 'group-summary-disabled',
+    JSON.stringify(bareDisabledIngest).slice(0, 240),
+  )
+  await backend.ctx.settings.update({
+    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': false, 'smoke-group-bare': false } } },
   })
   // 知识库扩展不在内置插件里，冒烟通过替换 api.get 的 /knowledge 返回，
   // 验证知识库标签页的列表 / 全文渲染逻辑；真实 bridge 路由由后端测试和
@@ -1914,6 +2063,8 @@ async function main() {
   if (nameField) nameField.value = '冒烟角色'
   const personaField = document.querySelector('.char-persona')
   if (personaField) personaField.value = '你是冒烟测试人格，请简短回答。'
+  const backupField = document.querySelector('.char-backup')
+  if (backupField) backupField.value = 'off'
   document.querySelector('[data-char-save]')?.click()
   const characterConv = await waitFor(
     () => characterSessions.list().find(item => item.name === '冒烟角色'),
@@ -1925,6 +2076,7 @@ async function main() {
     JSON.stringify(characterConv?.meta),
   )
   check('角色模型默认可跟随全局', !characterConv?.meta?.model)
+  check('角色备用模型可选择“不启用”并写入角色 meta', characterConv?.meta?.backupModel === 'off', JSON.stringify(characterConv?.meta))
 
   document.getElementById('chatMoreBtn')?.click()
   await sleep(40)
@@ -1957,8 +2109,11 @@ async function main() {
     JSON.stringify(captured?.messages?.[0] || null),
   )
   check(
-    'chat-flow 传递独立的推理等级与 temperature',
-    captured?.options?.reasoningEffort === 'off' && Number(captured?.options?.temperature) === 1 && captured?.options?.preferModelParams === true,
+    'chat-flow 传递独立的推理等级、temperature 与角色备用模型设置',
+    captured?.options?.reasoningEffort === 'off' &&
+      Number(captured?.options?.temperature) === 1 &&
+      captured?.options?.preferModelParams === true &&
+      captured?.options?.backupModel === 'off',
     JSON.stringify(captured?.options || {}),
   )
 

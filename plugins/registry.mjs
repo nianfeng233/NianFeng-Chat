@@ -64,9 +64,9 @@ export const plugins = [
   },
   {
     "id": "qqbot",
-    "version": "1.2.1",
+    "version": "1.5.0",
     "displayName": "QQ官方机器人",
-    "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊绑定与被动回复。",
+    "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。",
     "author": "念风插件",
     "core": false,
     "enabled": true,
@@ -101,7 +101,12 @@ export const plugins = [
       "chat-store?",
       "plugin-manager?"
     ],
-    "provides": [],
+    "provides": [
+      {
+        "name": "qqbot-channel",
+        "type": "singleton"
+      }
+    ],
     "permissions": [
       "network"
     ],
@@ -507,9 +512,9 @@ export const plugins = [
   },
   {
     "id": "model-service",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "displayName": "模型服务",
-    "description": "业务服务 · 模型抽象接口与调度，具体由适配器插件实现。",
+    "description": "业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型，具体由适配器插件实现。",
     "author": "念风内核",
     "core": true,
     "enabled": true,
@@ -896,9 +901,9 @@ export const plugins = [
   },
   {
     "id": "character-editor",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "角色编辑",
-    "description": "功能插件 · 新建 / 编辑会话角色（人格、模型、头像）。",
+    "description": "功能插件 · 新建 / 编辑会话角色（人格、主模型、备用模型、头像）。",
     "author": "念风内核",
     "core": true,
     "enabled": true,
@@ -929,9 +934,9 @@ export const plugins = [
   },
   {
     "id": "chat-flow",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "displayName": "聊天流程",
-    "description": "业务功能 · 串联\"发送 → 存 → 工具循环 → 回显\"主链路。",
+    "description": "业务功能 · 串联\"发送 → 存 → 工具循环 → 回显\"主链路，支持角色级主模型 / 备用模型。",
     "author": "念风内核",
     "core": true,
     "enabled": true,

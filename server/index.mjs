@@ -51,6 +51,14 @@ async function collectBridgeFiles(root, depth = 0, out = []) {
   } catch (_) {
     return out
   }
+  const fileNames = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name))
+  // 找到插件根后停止递归：插件自带的 vendor/ 依赖里也可能有 bridge.mjs，
+  // 继续向下扫会把依赖包当插件后端桥重复加载。
+  const isPluginRoot = fileNames.has('manifest.json') || (depth > 0 && fileNames.has('index.mjs'))
+  if (isPluginRoot) {
+    if (fileNames.has('bridge.mjs')) out.push(join(root, 'bridge.mjs'))
+    return out
+  }
   for (const entry of entries) {
     if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'release' || entry.name === 'target') continue
     const full = join(root, entry.name)

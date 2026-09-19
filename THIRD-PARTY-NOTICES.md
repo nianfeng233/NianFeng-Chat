@@ -50,6 +50,18 @@ Node.js 主体使用 MIT 许可证；发行版中还包含 V8、OpenSSL、c-ares
 - 用途：QQ / 微信 Clawbot 登录二维码的本地渲染；不参与联网请求。
 
 分发时请随项目保留本声明与 `src/vendor/qrcode/` 中的版权/许可证注释。
+
+## 2.2 点歌台内置 SILK 编码器（silk-wasm）
+
+`extensions/media-post/vendor/silk-wasm/` 内置了 **silk-wasm** 的发布文件，
+用于把 PCM 编码为 QQ 官方机器人语音所需的 SILK：
+
+- Copyright (c) 2024 idranme
+- MIT License（<https://opensource.org/licenses/MIT>）
+- 上游：https://github.com/idranme/silk-wasm
+- 用途：点歌台 `media-post` 向 QQ 官方机器人发送语音时的本地编码；不联网。
+
+分发时请保留 `extensions/media-post/vendor/silk-wasm/` 中的 LICENSE 与版权声明。
 ## 3. Rust 桌面壳依赖
 
 Rust 依赖及许可证清单见 [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)，

@@ -714,8 +714,17 @@ export function apply(ctx, config = {}) {
     if (prefs.groupSummaryEnabled === false) return true
     const disabled = prefs.groupSummaryDisabled
     if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return false
-    const flag = disabled[String(channelId || '')]
-    return flag === true || flag === 'true'
+    const isDisabledValue = value => value === true || value === 'true'
+    const id = String(channelId || '').trim()
+    if (!id) return false
+    // 设置页写裸渠道 id，chat-store 传进来的可能是带类型前缀的 id，两种键都要认。
+    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+    if (isDisabledValue(disabled[id]) || (bare && isDisabledValue(disabled[bare]))) return true
+    for (const [key, value] of Object.entries(disabled)) {
+      if (!isDisabledValue(value)) continue
+      if (key === id || key === bare || key.endsWith(`:${id}`) || key.endsWith(`:${bare}`)) return true
+    }
+    return false
   }
   const embeddingConfig = () => {
     const prefs = memoryPreferences()

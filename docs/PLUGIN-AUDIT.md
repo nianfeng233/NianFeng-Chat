@@ -73,7 +73,7 @@
 | `knowledge-base` | 2.0.0 | 知识库条目存储与检索 | 前端 + bridge |
 | `media-post` | 2.0.0 | B站 / 抖音媒体点播 | 依赖 web-access |
 | `napcat-group-guard` | 2.0.0 | 入群审核、黑名单、不活跃清理、档案图 | 前端 + bridge |
-| `social-bridge` | 2.0.0 | 邮箱等社交桥 | 前端 + bridge |
+| `social-bridge` | 2.0.1 | 邮箱等社交桥（中文邮件编码修复） | 前端 + bridge |
 | `web-access` | 2.0.0 | 联网搜索 / 网页读取 / 站点解析 | media-post 的前置 |
 
 所有独立扩展已声明 `scope = 'both'`，并适配新的 WebUI / 后端终端运行范围：

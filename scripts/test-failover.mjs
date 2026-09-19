@@ -267,6 +267,85 @@ async function main() {
   }
 
 
+  console.log('\n⑨ 角色级指定备用模型（优先于全局）')
+  {
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onChunk, onDone }) => {
+          onChunk('role-a-ok')
+          onDone({})
+        },
+        'p/backup-b': ({ onChunk, onDone }) => {
+          onChunk('global-b')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a', 'p/backup-b'],
+      configValues: {
+        'model.failoverEnabled': false,
+        'model.failoverKeys': ['p/backup-b'],
+        'model.failoverPasses': 1,
+      },
+    })
+    const result = await harness.run({ model: 'p/primary', backupModel: 'p/backup-a' })
+    check(
+      '角色指定备用模型时，即使全局关闭也按角色配置降级',
+      result.done && JSON.stringify(harness.calls) === JSON.stringify(['p/primary', 'p/backup-a']) && result.text === 'role-a-ok',
+      JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
+  console.log('\n⑩ 角色级不启用备用模型（优先于全局）')
+  {
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onChunk, onDone }) => {
+          onChunk('不应该出现')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a'],
+      configValues: {
+        'model.failoverEnabled': true,
+        'model.failoverKeys': ['p/backup-a'],
+        'model.failoverPasses': 1,
+      },
+    })
+    const result = await harness.run({ model: 'p/primary', backupModel: 'off' })
+    check(
+      '角色选择“不启用”时，即使全局开启也不降级',
+      JSON.stringify(harness.calls) === JSON.stringify(['p/primary']) && !result.done,
+      JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
+  console.log('\n⑪ 角色级跟随全局')
+  {
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onChunk, onDone }) => {
+          onChunk('global-ok')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a'],
+      configValues: {
+        'model.failoverEnabled': true,
+        'model.failoverKeys': ['p/backup-a'],
+        'model.failoverPasses': 1,
+      },
+    })
+    const result = await harness.run({ model: 'p/primary', backupModel: 'global' })
+    check(
+      '角色选择“跟随全局”时使用全局备用列表',
+      result.done && JSON.stringify(harness.calls) === JSON.stringify(['p/primary', 'p/backup-a']) && result.text === 'global-ok',
+      JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
   summarize()
 }
 

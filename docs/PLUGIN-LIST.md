@@ -44,7 +44,7 @@
 |---|---|---|---|
 | `backend-client` | L1 | ✅ | WebUI ↔ 本地后端的唯一通道（REST / SSE / 健康检查） |
 | `wechat-clawbot` | L2.5 | ✅ | 微信 Clawbot 渠道：扫码接入、角色/分类/权限、typing 与聊天记录 |
-| `qqbot` | L2.5 | ✅ | QQ 官方机器人渠道：扫码/凭据接入、本地沙箱免白名单、user_openid 自动绑定、WebSocket/Webhook、仅私聊与被动回复 |
+| `qqbot` | L2.5 | ✅ | QQ 官方机器人渠道：扫码/凭据接入、本地沙箱免白名单、user_openid / group_openid 自动绑定、群成员 member_openid 身份与群昵称、群规则、多机器人联动（同群 bot 互见 / 自动接话）、SILK 语音、WebSocket/Webhook、私聊与群聊被动回复 |
 | `napcat` | L2.5 | ✅ | NapCatQQ / OneBot 11 渠道：私聊 / 群聊 / 隐私、多 QQ 连接复用、群聊规则与静默 20 条消息上下文 |
 | `image-service` | L2 | ✅ | 图片文件存储：消息只存 imageId，/api/images 读写、压缩与裁剪 |
 | `model-adapter-backend` | L5 | ✅ | 把后端提供商注册为前端模型（真实流式对话；OpenAI/DeepSeek/Claude/Gemini/Ollama 由后端适配器转换） |
@@ -97,7 +97,7 @@
 |---|---|
 | 登录 / 注册 / 官方模型 | 官方服务端由独立官网项目提供，本仓库是纯客户端；模型页已提供内置模型空状态 |
 | 多设备云同步 | 需要云端存储与冲突合并 |
-| Discord / 邮箱 / Telegram 渠道 | 协议与权限问题（添加渠道菜单标注原因）；微信渠道已由 `wechat-clawbot` 插件实现 |
+| Discord / 邮箱 / Telegram 渠道 | 协议与权限问题，暂未实现；「添加渠道」菜单只显示真实可用的渠道插件（QQ官方机器人 / NapCat / 微信 Clawbot） |
 | 插件市场 / 在线安装 | 需要服务端索引与签名校验 |
 | 代码运行器 | 缺少安全沙箱 |
 | 插件权限沙箱 | 插件与内核同进程运行，无法真正隔离；隐私页改为如实说明 |

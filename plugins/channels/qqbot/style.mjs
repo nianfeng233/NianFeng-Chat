@@ -11,7 +11,11 @@ export const QQBOT_CSS = `
   .wc-dialog .wc-sub{font-size:12px;color:var(--text-3);line-height:1.6;margin-top:-7px;}
   .wc-field{display:flex;flex-direction:column;gap:5px;font-size:12.5px;color:var(--text-3);}
   .wc-field input,.wc-field select{height:34px;padding:0 10px;border-radius:9px;border:1px solid var(--border);background:rgba(255,255,255,.75);color:var(--text);font-size:13px;outline:none;}
-  .wc-field input:focus,.wc-field select:focus{border-color:var(--accent);}
+  .wc-field textarea{padding:8px 10px;border-radius:9px;border:1px solid var(--border);background:rgba(255,255,255,.75);color:var(--text);font-size:12.5px;line-height:1.5;outline:none;resize:vertical;min-height:52px;font-family:inherit;}
+  .wc-field input:focus,.wc-field select:focus,.wc-field textarea:focus{border-color:var(--accent);}
+  .wc-field-help{font-size:11px;color:var(--text-4);line-height:1.65;}
+  details.wc-details[open]{display:flex;flex-direction:column;gap:9px;}
+  details.wc-details > summary{font-weight:500;}
   .wc-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .wc-access{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--text-2);}
   .wc-access label{display:flex;align-items:center;gap:6px;}

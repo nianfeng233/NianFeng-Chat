@@ -51,7 +51,7 @@ export function buildFailoverBlockHtml({ config, registry }) {
     .map(item => `<option value="${escapeHtml(item.key)}">${escapeHtml(label(item))}</option>`)
     .join('')
   return `<div class="model-failover-block" data-failover-host>
-      <div class="model-failover-title">备用模型列表<span>拖动调整顺序；失败时从上到下逐个尝试</span></div>
+      <div class="model-failover-title">备用模型列表<span>拖动调整顺序；失败时从上到下逐个尝试（单个角色可在「编辑角色 → 备用模型」里覆盖）</span></div>
       <table class="model-failover-table">
         <thead><tr><th class="model-failover-handle"></th><th class="model-failover-order">#</th><th>模型</th><th class="model-failover-ops">操作</th></tr></thead>
         <tbody data-failover-list>${

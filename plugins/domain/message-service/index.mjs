@@ -105,14 +105,14 @@ export function apply(ctx) {
      *  extra：结构化聊天记录字段（message_id / seq / channel_id / timestamp …），
      *  由 chat-store 等上层服务注入，普通 UI 调用不需要关心。
      */
-    add(convId, { role, content = '', time = nowTime(), status, kind = 'text', meta, streaming = false, extra } = {}) {
+    add(convId, { role, content = '', time = nowTime(), status, kind = 'text', meta, streaming = false, extra, withDivider = true } = {}) {
       const conv = sessions.get(convId)
       if (!conv) return null
       // 消息自身带 timestamp / createdAt 时（导入历史、测试注入等），时间戳分隔线也按该时间生成。
       const messageDate =
         toDate(extra?.timestamp ?? meta?.at ?? extra?.createdAt ?? null) || new Date()
       const messageAt = messageDate.getTime()
-      if (kind !== 'divider' && role !== 'system' && shouldInsertDivider(conv, messageAt)) insertDivider(convId, messageAt)
+      if (withDivider && kind !== 'divider' && role !== 'system' && shouldInsertDivider(conv, messageAt)) insertDivider(convId, messageAt)
       const message = {
         id: (extra && extra.id) || newId(),
         role,
@@ -132,8 +132,8 @@ export function apply(ctx) {
     },
 
     /** 用户消息：带 demo 的 已发送 → 已送达 → 已读 状态机 */
-    send(convId, content, { scheduleStatus = true, meta = undefined } = {}) {
-      const message = service.add(convId, { role: 'user', content, status: 'sent', meta })
+    send(convId, content, { scheduleStatus = true, meta = undefined, withDivider = true } = {}) {
+      const message = service.add(convId, { role: 'user', content, status: 'sent', meta, withDivider })
       if (!message) return null
       if (scheduleStatus) {
         ctx.setTimeout(() => {

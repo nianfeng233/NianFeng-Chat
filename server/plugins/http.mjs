@@ -639,6 +639,9 @@ export function apply(ctx, config = {}) {
       id: `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       conversationId,
       clientId: String(body?.clientId || '').slice(0, 120),
+      // WebUI 本地回显消息的 id。Worker 落库时复用它，SSE 回传后前端按 id 合并，
+      // 避免“本地一条 + 服务端一条”的重复气泡。
+      messageId: String(body?.clientMessageId || '').slice(0, 160),
       text: text.slice(0, 200000),
       images,
       userId: String(body?.userId || 'web-user').slice(0, 120),

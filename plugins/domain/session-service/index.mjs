@@ -109,6 +109,9 @@ export function apply(ctx) {
     return Number.isNaN(parsed) ? 0 : parsed
   }
 
+  /** WebUI 本地乐观回显的消息：落库交给后端代聊 Worker，session-service 不主动写回。 */
+  const isOptimisticMessage = message => message?.meta?.optimistic === true || message?.optimistic === true
+
   const maxSeqOf = list =>
     (Array.isArray(list) ? list : []).reduce((max, message) => Math.max(max, Number(message?.seq) || 0), 0)
 
@@ -443,6 +446,9 @@ export function apply(ctx) {
   /** 消息级写回：SQLite 后端每条消息独立 upsert，不再重写整个会话。 */
   const scheduleMessagePush = (conversationId, message, delay = 220) => {
     if (source !== 'server' || !api || !conversationId || !message?.id) return
+    // WebUI 乐观回显消息由后端代聊 Worker 用同一个 id 落库，浏览器不能抢先写回，
+    // 否则会绕过 Worker 的 seq / 时间戳 / 分隔线逻辑并与 agent=true 的正式写回重复。
+    if (isOptimisticMessage(message)) return
     const key = `${conversationId}:${message.id}`
     const pending = messagePushTimers.get(key) || { timer: null }
     if (pending.timer) clearTimeout(pending.timer)
@@ -486,6 +492,7 @@ export function apply(ctx) {
     if (remote && conv.localTruncated === true) {
       const remoteKeys = new Set(remoteMessages.map(messageIdentity))
       for (const message of conv.messages) {
+        if (isOptimisticMessage(message)) continue
         const key = messageIdentity(message)
         if (key && remoteKeys.has(key)) continue
         await api.addMessage(conv.id, message).catch(() => {})
@@ -494,7 +501,7 @@ export function apply(ctx) {
     }
     const remoteCount = remote ? Number(remote.messageCount ?? remoteMessages.length ?? 0) : 0
     if (remote && remoteCount === conv.messages.length && !isNewerConversation(conv, remote)) return
-    await api.replaceMessages(conv.id, conv.messages).catch(() => {})
+    await api.replaceMessages(conv.id, conv.messages.filter(message => !isOptimisticMessage(message))).catch(() => {})
   }
 
   /**
@@ -504,9 +511,10 @@ export function apply(ctx) {
   const pushLocalMessages = async (conv, { all = false } = {}) => {
     if (!api || !conv || !Array.isArray(conv.messages) || !conv.messages.length) return
     const pendingIds = new Set((Array.isArray(conv.pendingMessageIds) ? conv.pendingMessageIds : []).map(value => String(value || '')))
-    const targets = all
+    const targets = (all
       ? conv.messages
       : conv.messages.filter(message => pendingIds.has(String(message?.id || message?.message_id || '')))
+    ).filter(message => !isOptimisticMessage(message))
     for (const message of targets) {
       const id = String(message?.id || message?.message_id || '')
       if (!id) continue
@@ -559,6 +567,7 @@ export function apply(ctx) {
       if (!api) throw new Error('后端未连接')
       if (syncing) throw new Error('正在同步中')
       const wasLocal = source !== 'server'
+      const previousActiveId = data.activeId
       syncing = true
       try {
         const payload = await api.sessions({ compact: true })
@@ -603,6 +612,10 @@ export function apply(ctx) {
         persistLocal()
         ctx.emit('sessions:synced', { source, count: conversations.length })
         ctx.emit('conversation:sync', { conversations })
+        // 同步时如果自动选中了会话（首次进入 / 上次选中的会话已被删除后回退到第一个），
+        // 必须补发 switch。否则消息列表已挂载但 boundConversationId 仍为空，用户在
+        // 该会话里发送消息时 UI 不会本地回显，要等模型回复写入才突然整段出现。
+        if (activeId && activeId !== previousActiveId) ctx.emit('conversation:switch', { id: activeId })
         return { ok: true, count: conversations.length }
       } catch (err) {
         source = 'local'
@@ -819,7 +832,8 @@ export function apply(ctx) {
       const index = data.conversations.findIndex(c => c.id === id)
       if (index < 0) return false
       const [conv] = data.conversations.splice(index, 1)
-      if (data.activeId === id) data.activeId = data.conversations[0]?.id || null
+      const wasActive = data.activeId === id
+      if (wasActive) data.activeId = data.conversations[0]?.id || null
       const pending = pushTimers.get(id)
       if (pending?.timer) clearTimeout(pending.timer)
       pushTimers.delete(id)
@@ -830,6 +844,8 @@ export function apply(ctx) {
         api.deleteSession(id).catch(err => { if (!isTransientSyncError(err)) ctx.logger.warn(`删除后端会话失败：${err.message}`) })
       }
       ctx.emit('conversation:delete', { id, conversation: conv })
+      // 删除当前会话后可能回退到下一个会话，消息列表 / 头部需要跟随切换。
+      if (wasActive && data.activeId) ctx.emit('conversation:switch', { id: data.activeId })
       return true
     },
 
@@ -1050,6 +1066,11 @@ export function apply(ctx) {
     if (index >= 0) list[index] = { ...list[index], ...message }
     else list.push(message)
     conv.messages = sortConversationMessages(list)
+    // 已收到后端正式落库的同 id 消息：本地乐观回显不再需要补写。
+    const remoteId = String(message.message_id || message.id || '')
+    if (remoteId && Array.isArray(conv.pendingMessageIds) && conv.pendingMessageIds.length) {
+      conv.pendingMessageIds = conv.pendingMessageIds.filter(value => String(value) !== remoteId)
+    }
     conv.messageCount = Math.max(Number(conv.messageCount) || 0, conv.messages.length)
     conv.updatedAt = Math.max(Number(conv.updatedAt) || 0, messageAtOf(message) || 0, Date.now())
     persistLocal()
@@ -1184,6 +1205,7 @@ export function apply(ctx) {
       syncing = true
       try {
         const wasLocal = source !== 'server'
+        const previousActiveId = data.activeId
         const payload = await api.sessions({ compact: true })
         const compact = payload?.compact === true
         const server = (payload.conversations || []).filter(conv => conv?.id)
@@ -1196,6 +1218,8 @@ export function apply(ctx) {
         source = 'server'
         persistLocal()
         ctx.emit('conversation:sync', { conversations })
+        // 启动恢复上次会话 / 首次启动自动选中会话时也要通知 UI，消息列表才会绑定并本地回显。
+        if (activeId && activeId !== previousActiveId) ctx.emit('conversation:switch', { id: activeId })
 
         const queue = []
         for (const conv of conversations) {

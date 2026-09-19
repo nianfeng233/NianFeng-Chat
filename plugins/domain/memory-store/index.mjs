@@ -159,8 +159,18 @@ export function apply(ctx) {
     if (config.get('memory.groupSummaryEnabled', true) === false) return false
     const disabled = config.get('memory.groupSummaryDisabled', {})
     if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return true
-    const flag = disabled[String(channel.channelId || '')]
-    return !(flag === true || flag === 'true')
+    const isDisabledValue = value => value === true || value === 'true'
+    const id = String(channel.channelId || '').trim()
+    if (!id) return true
+    // 设置页写的是渠道注册中心的裸 id（如 chmu8bgkkclmz），
+    // 而 chat-store 里的渠道 id 可能带类型前缀（如 qqbot:chmu8bgkkclmz），两种写法都要能命中。
+    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+    if (isDisabledValue(disabled[id]) || (bare && isDisabledValue(disabled[bare]))) return false
+    for (const [key, value] of Object.entries(disabled)) {
+      if (!isDisabledValue(value)) continue
+      if (key === id || key === bare || key.endsWith(`:${id}`) || key.endsWith(`:${bare}`)) return false
+    }
+    return true
   }
 
   /** 群聊窗口按“最近 N 条消息”取值，包含未触发模型的静默上下文，和模型实际看到的一致。 */

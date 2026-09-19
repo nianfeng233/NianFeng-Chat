@@ -22,9 +22,9 @@
  * chat-flow 自己不认识 OpenAI / Ollama / 任何具体工具实现，只编排服务。
  */
 export const name = 'chat-flow'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const displayName = '聊天流程'
-export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路。'
+export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路，支持角色级主模型 / 备用模型。'
 export const author = '念风内核'
 export const icon = '🔀'
 export const core = true
@@ -268,6 +268,12 @@ export function apply(ctx) {
     if (maxOutputTokens > 0) options.maxTokens = maxOutputTokens
     const conversationModel = conv.meta?.model
     if (conversationModel) options.model = conversationModel
+    // 角色级备用模型：优先读角色会话上的配置；渠道会话通过 meta.roleId 回指角色。
+    // 'global' 跟随全局；'off' 不启用；其它值为指定备用模型。
+    const roleConv = conv.meta?.roleId ? sessions.get(conv.meta.roleId) : null
+    const backupOwn = roleConv?.meta?.backupModel !== undefined ? roleConv.meta.backupModel : conv.meta?.backupModel
+    const backupModel = String(backupOwn || '').trim()
+    if (backupModel) options.backupModel = backupModel
     // 全局 temperature 是默认值：用户在模型列表里单独设置过 temperature 时，
     // 模型级参数优先，避免“模型参数页设置了却永远不生效”。
     options.preferModelParams = true
@@ -546,7 +552,7 @@ export function apply(ctx) {
   // 通知统一由 chat-notify 插件基于 message:added / message:done 逐条发送，这里不再重复处理。
 
   /** 工具循环主路径 */
-  async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
+  async function runAgentTurn(conversationId, text, roleId, { skipUserAppend = false, images = [], messageId = '' } = {}) {
     const conv = sessions.get(conversationId)
     if (!conv) {
       // 渠道侧的“本轮结束”回调依赖 chat:request-done；会话不存在时也必须发一次，
@@ -618,6 +624,9 @@ export function apply(ctx) {
             name: String(image.name || '').slice(0, 80),
           }))
         userMessage = store.append(conversationId, {
+          // WebUI 代聊会在本地先回显一条同 id 的用户消息；这里复用 id 落库，
+          // SSE 回到前端后按 message_id 合并成同一条，不会出现重复气泡。
+          id: messageId || undefined,
           role: 'user',
           content: text,
           sender_id: who.identityUserId || who.userId,
@@ -1018,7 +1027,7 @@ export function apply(ctx) {
   }
 
   /** 兼容路径：工具链路被禁用或服务缺失时，保持旧版“直接流式回复”行为 */
-  async function runLegacy(conversationId, text, roleId, { skipUserAppend = false, images = [] } = {}) {
+  async function runLegacy(conversationId, text, roleId, { skipUserAppend = false, images = [], messageId = '' } = {}) {
     const conv = sessions.get(conversationId)
     if (!conv) {
       events.emit('chat:request-done', { conversationId, elapsed: 0, thinkingMs: 0, usage: null })
@@ -1052,6 +1061,7 @@ export function apply(ctx) {
       if (!skipUserAppend && store) {
         const legacyImages = (Array.isArray(images) ? images : []).slice(0, 4).filter(Boolean)
         userMessage = store.append(conversationId, {
+          id: messageId || undefined,
           role: 'user',
           content: text,
           sender_id: who.identityUserId || who.userId,
@@ -1065,6 +1075,10 @@ export function apply(ctx) {
         entry.protocol.push(userWire)
       } else if (!skipUserAppend) {
         userMessage = messages.send(conversationId, text, { meta: images.length ? { images } : undefined })
+        if (messageId && userMessage) {
+          userMessage.id = messageId
+          userMessage.message_id = messageId
+        }
         entry.protocol.push({ role: 'user', content: text })
       } else {
         const sessionMessages = sessions.messages(conversationId)
@@ -1133,6 +1147,8 @@ export function apply(ctx) {
   const onSend = payload => {
     const { conversationId, text } = payload || {}
     const images = Array.isArray(payload?.images) ? payload.images : []
+    // WebUI 代聊在本地先回显用户消息；把该消息 id 透传到 Worker 落库阶段复用。
+    const messageId = String(payload?.messageId || payload?.clientMessageId || '').trim()
     if (!conversationId || (!text && !images.length)) return
     if (payload.confirmHandled) return // 敏感确认已消费这次输入，不进入正常聊天
     const conv = sessions.get(conversationId)
@@ -1147,7 +1163,7 @@ export function apply(ctx) {
     const agent = toolsEnabled()
     // 渠道插件可以先把入站消息写入自己的渠道记录，再以 skipUserAppend=true
     // 触发模型轮次，避免 message:send 重复插入同一条用户消息。
-    const turnOptions = { skipUserAppend: payload.skipUserAppend === true, images }
+    const turnOptions = { skipUserAppend: payload.skipUserAppend === true, images, messageId }
     if (agent) store.channelForConversation(conversationId)
     const task = () => (agent ? runAgentTurn(conversationId, text, roleId, turnOptions) : runLegacy(conversationId, text, roleId, turnOptions))
 

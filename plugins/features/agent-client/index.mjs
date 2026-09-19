@@ -83,17 +83,48 @@ export function apply(ctx) {
     const text = String(payload.text || '')
     const images = Array.isArray(payload.images) ? payload.images : []
     if (!conversationId || (!text.trim() && !images.length)) return
+
+    // WebUI 不执行本地 chat-flow，但仍要在发送瞬间本地回显用户消息：
+    // 后端代聊 Worker 收到 agent/send 后还可能先补历史 / 预加载图片，随后才把
+    // 用户消息写入聊天记录并回传。若只等后端 SSE，输入框已经变成“停止”，
+    // 消息区却会空白一段时间——这正是本条 bug 的根因。
+    const normalizedImages = images
+      .slice(0, 4)
+      .map(image => (typeof image === 'string' ? { url: image } : image || {}))
+      .filter(image => image.id || image.url || image.dataUrl)
+      .map(image => ({
+        id: String(image.id || image.imageId || ''),
+        url: image.url || '',
+        dataUrl: image.dataUrl || '',
+        mime: image.mime || '',
+        name: String(image.name || '').slice(0, 80),
+      }))
+    const localMessage = messages.send(conversationId, text, {
+      // optimistic 标记让 session-service 不要把这条件 <260ms 的本地回显直接写回后端；
+      // 真正的落库完全由后端代聊 Worker 完成，浏览器只负责按同一 id 合并。
+      meta: { ...(normalizedImages.length ? { images: normalizedImages } : {}), optimistic: true },
+      // 时间戳分隔线由后端 Worker 落库时统一插入并通过 SSE 回传，本地不插，
+      // 否则 Worker 再插一条会冒出两个一样的时间分隔线。
+      withDivider: false,
+    })
+    const localMessageId = String(localMessage?.id || '')
+    const failLocal = error => {
+      if (!localMessageId) return
+      try { messages.fail(conversationId, localMessageId, error) } catch (_) { /* ignore */ }
+    }
+
+    const conversation = sessions?.get?.(conversationId) || null
     if (!api?.supports?.('server-agent')) {
-      toast?.warn?.('服务端代聊尚未就绪：请确认后端终端已启动，且没有使用 --no-agent 关闭代聊。')
+      const error = new Error('服务端代聊尚未就绪：请确认后端终端已启动，且没有使用 --no-agent 关闭代聊。')
+      failLocal(error)
+      toast?.warn?.(error.message)
       events.emit('chat:request-done', { conversationId, elapsed: 0, reason: 'agent-offline', remote: true })
       return
     }
 
     const clientId = makeClientId()
-    const conversation = sessions?.get?.(conversationId) || null
-    const imageIds = images
-      .map(image => image?.id || image?.imageId || '')
-      .map(id => String(id || '').trim())
+    const imageIds = normalizedImages
+      .map(image => String(image.id || '').trim())
       .filter(Boolean)
       .slice(0, 4)
 
@@ -104,6 +135,7 @@ export function apply(ctx) {
     events.emit('chat:request-start', {
       conversationId,
       clientId,
+      messageId: localMessageId,
       text: text.slice(0, 160),
       senderName: String(config?.get?.('ui.nickname', '') || '').trim() || '用户',
       channelName: conversation?.name || '',
@@ -115,16 +147,22 @@ export function apply(ctx) {
       .post('/agent/send', {
         conversationId,
         clientId,
+        clientMessageId: localMessageId,
         text,
         images: imageIds,
         userId: String(config?.get?.('chat.userId', 'web-user') || 'web-user'),
         userName: String(config?.get?.('ui.nickname', '') || '').trim() || '用户',
       })
       .then(result => {
-        if (result?.ok === false) finish(conversationId, 'rejected')
+        if (result?.ok === false) {
+          failLocal(new Error(result?.error || '后端代聊拒绝了这条消息'))
+          finish(conversationId, 'rejected')
+        }
       })
       .catch(err => {
-        toast?.error?.(`发送到后端代聊失败：${err?.message || err}`)
+        const error = err instanceof Error ? err : new Error(String(err))
+        failLocal(error)
+        toast?.error?.(`发送到后端代聊失败：${error.message}`)
         finish(conversationId, 'error')
       })
   }

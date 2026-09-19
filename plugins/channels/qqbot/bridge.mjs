@@ -8,11 +8,14 @@
  *   - WebSocket 网关：GET /gateway/bot -> { url, shards }，op 2 Identify / op 1 Heartbeat / op 0 Dispatch
  *   - 发送消息：POST /v2/users/{openid}/messages（私聊）
  *                POST /v2/groups/{group_openid}/messages（群聊）
+ *   - 富媒体上传：POST /v2/users/{openid}/files 或 /v2/groups/{group_openid}/files
+ *                file_type=1 图片、3 SILK 语音；发送用 msg_type=7 + media.file_info
  *   - Webhook：POST <本机>/api/qqbot/webhook，op=13 回调校验（Ed25519），op=12 ACK
  *
  * 会话判定（官方事件类型，不是猜的）：
  *   C2C_MESSAGE_CREATE       私聊：author.user_openid / author.id
- *   GROUP_AT_MESSAGE_CREATE  群聊：group_openid + author.member_openid（仅 @机器人 时触发）
+ *   GROUP_AT_MESSAGE_CREATE  群聊：group_openid + author.member_openid（@机器人 时触发；群昵称 best-effort）
+ *   GROUP_MESSAGE_CREATE     群聊全量消息：群管理员开启「机器人可获取群内全部消息」后，未 @ 的消息也走这里
  *   AT_MESSAGE_CREATE        频道：channel_id + author.id
  *   DIRECT_MESSAGE_CREATE    频道私信：guild_id + author.id
  *   intents：1<<25 群/C2C、1<<30 公域频道消息、1<<12 频道私信
@@ -41,9 +44,9 @@ import {
 } from 'node:crypto'
 
 export const name = 'qqbot-bridge'
-export const version = '1.2.1'
+export const version = '1.5.0'
 export const displayName = 'QQ 官方机器人后端桥'
-export const description = '渠道后端 · QQ 官方机器人登录、WebSocket / Webhook 事件、绑定过滤与消息发送。'
+export const description = '渠道后端 · QQ 官方机器人登录、WebSocket / Webhook 事件、私聊 / 群聊绑定过滤、群成员昵称、多机器人联动、SILK 语音与消息发送。'
 export const core = false
 export const inject = ['settings', 'hub', 'httpApi']
 export const provides = [{ name: 'qqbot', type: 'singleton' }]
@@ -74,8 +77,30 @@ const SESSION_LABEL = { c2c: '私聊', group: '群聊', guild: '频道', 'guild-
 const EVENT_SESSION = {
   C2C_MESSAGE_CREATE: 'c2c',
   GROUP_AT_MESSAGE_CREATE: 'group',
+  // 群聊全量消息事件：QQ 群开启「机器人可获取群内全部消息」后推送未 @ 的消息。
+  GROUP_MESSAGE_CREATE: 'group',
   AT_MESSAGE_CREATE: 'guild',
   DIRECT_MESSAGE_CREATE: 'guild-dm',
+}
+/**
+ * 事件类型 -> 会话类型。
+ *
+ * 优先用官方事件名；群聊全量消息在不同 SDK / 文档版本里可能叫
+ * GROUP_MESSAGE_CREATE / GROUP_MESSAGE_CREATE_V2 等，先按前缀兜底；
+ * 最后再用 payload 结构兜底，避免 QQ 改名后整类消息被直接丢弃。
+ */
+const sessionTypeForEvent = (eventType, payload) => {
+  const type = String(eventType || '')
+  if (EVENT_SESSION[type]) return EVENT_SESSION[type]
+  if (/^GROUP_.*(?:MESSAGE|MSG).*CREATE$/.test(type)) return 'group'
+  if (payload && typeof payload === 'object') {
+    const data = payload.message && typeof payload.message === 'object' ? payload.message : payload
+    const author = data.author || data.member || data.sender || payload.author || {}
+    const hasId = data.id !== undefined || data.message_id !== undefined || payload.id !== undefined
+    const groupId = data.group_openid || data.group_id || payload.group_openid
+    if (hasId && groupId && (author.member_openid || author.user_openid || author.id)) return 'group'
+  }
+  return ''
 }
 const LIFECYCLE_EVENTS = new Set([
   'GROUP_ADD_ROBOT',
@@ -147,6 +172,17 @@ function publicInbound(message) {
     peerName: message.peerName || '',
     senderId: message.senderId || '',
     senderName: message.senderName || '',
+    senderNickname: message.senderName || '',
+    senderNameResolved: message.senderNameResolved === true,
+    senderOpenid: message.senderId || '',
+    groupOpenid: message.sessionType === 'group' ? message.peerId : '',
+    mentionedSelf: message.mentionedSelf === true,
+    fullGroupMessage: message.fullGroupMessage === true,
+    parseFallback: message.parseFallback === true,
+    eventType: message.eventType || '',
+    linkedBot: message.linkedBot === true,
+    linkFromAccountId: message.linkFromAccountId || '',
+    linkFromChannelId: message.linkFromChannelId || '',
     text: message.text || '',
     media: !!message.media,
     images: Array.isArray(message.images) ? message.images : [],
@@ -304,6 +340,13 @@ export function apply(ctx) {
     account.accountId = String(account.accountId || account.appId || '')
     account.channels = account.channels && typeof account.channels === 'object' ? account.channels : {}
     account.discovered = Array.isArray(account.discovered) ? account.discovered : []
+  // 旧版本把群聊标记为“暂不支持群聊”；升级后群聊已支持，清掉这个历史标记，
+  // 否则「发现会话」里的群会一直显示为禁用。
+  for (const item of account.discovered) {
+    if (item && item.sessionType === 'group' && typeof item.unsupported === 'string' && item.unsupported.includes('暂不支持群聊')) {
+      delete item.unsupported
+    }
+  }
     account.inbox = Array.isArray(account.inbox) ? account.inbox : []
     account.seen = Array.isArray(account.seen) ? account.seen : []
     account.sent = account.sent && typeof account.sent === 'object' ? account.sent : {}
@@ -391,6 +434,13 @@ export function apply(ctx) {
       cfg.trustedUserIds = Array.isArray(cfg.trustedUserIds) ? cfg.trustedUserIds.map(String).filter(Boolean) : []
       // disabled 只停用当前渠道的消息路由，不删除本机登录凭据；点「接入」重连时恢复。
       cfg.disabled = cfg.disabled === true
+      // 同群多机器人联动。linkGroupId 由用户在两个渠道上填成同一个值；
+      // sendMessage 会把群内出站消息镜像给同标识的其它机器人渠道。
+      cfg.linkGroupId = String(cfg.linkGroupId || '').trim()
+      cfg.channelName = String(cfg.channelName || '').slice(0, 80)
+      cfg.linkAutoReply = cfg.linkAutoReply !== false
+      const linkMax = Number(cfg.linkMaxTurns)
+      cfg.linkMaxTurns = Number.isFinite(linkMax) && linkMax >= 0 ? Math.min(5, Math.floor(linkMax)) : 1
     }
     return cfg || null
   }
@@ -561,6 +611,8 @@ export function apply(ctx) {
       conflicts: rt?.conflicts || [],
       pending: account?.inbox?.filter(item => !channelId || item.channelId === channelId).length || 0,
       lastInbound,
+      bridgeVersion: version,
+      lastGatewayEvent: account?.lastGatewayEvent || null,
       qr: qr
         ? {
             id: qr.id || '',
@@ -794,49 +846,125 @@ export function apply(ctx) {
 
   /* ---------------- 事件归一化 / 路由 ---------------- */
 
+/**
+ * 判断群聊全量消息是否 @ 了机器人。
+ *
+ * GROUP_AT_MESSAGE_CREATE 天然代表 @；GROUP_MESSAGE_CREATE 这类全量事件
+ * 需要从 mentions / 正文里尽力判断。拿不准时按“未 @”处理——默认只静默写入
+ * 本群上下文，不会误触发回复；用户可以在群规则里关闭“仅 @ 时回复”后按概率触发。
+ */
+function detectGroupMention(account, input) {
+  const root = input || {}
+  const d = root.message && typeof root.message === 'object' ? root.message : root
+  const candidates = new Set(
+    [account?.bot?.id, account?.appId, account?.bot?.username]
+      .map(value => String(value || '').trim())
+      .filter(Boolean),
+  )
+  if (!candidates.size) return false
+  const flagSources = [d, root]
+  const flags = flagSources.flatMap(source => [
+    source?.mentioned,
+    source?.mentioned_self,
+    source?.mentionedSelf,
+    source?.is_at,
+    source?.at_me,
+    source?.atMe,
+    source?.at_bot,
+  ])
+  if (flags.some(value => value === true)) return true
+  const mentions = Array.isArray(d?.mentions) ? d.mentions : Array.isArray(root?.mentions) ? root.mentions : []
+  for (const item of mentions) {
+    if (!item || typeof item !== 'object') continue
+    // AstrBot / qq-botpy 的群消息 mentions 项带 is_you，最可靠。
+    if (item.is_you === true || item.isYou === true) return true
+    const values = [item.id, item.user_openid, item.member_openid, item.union_openid, item.openid, item.name, item.username]
+    if (values.some(value => value !== undefined && value !== null && candidates.has(String(value)))) return true
+  }
+  const content = String(d?.content ?? d?.text ?? root?.content ?? '')
+  for (const value of candidates) {
+    if (content.includes(`<@!${value}>`) || content.includes(`<@${value}>`) || content.includes(`@${value}`)) return true
+  }
+  return false
+}
+
+
   function normalizeInbound(account, eventType, sessionType, payload, raw) {
-    const d = payload || {}
-    const author = d.author || {}
-    const timestamp = parseEventTime(d.timestamp)
+    const root = payload || {}
+    // 不同版本 / 不同事件名可能把消息体放在 d 或 d.message 里，这里都兼容。
+    const d = root.message && typeof root.message === 'object' ? root.message : root
+    const author = d.author || d.member || d.sender || root.author || {}
+    const timestamp = parseEventTime(d.timestamp ?? root.timestamp)
     const botName = account?.bot?.username || ''
     let peerId = ''
     let senderId = ''
     let senderName = ''
+    let senderNameResolved = false
     let text = ''
     if (sessionType === 'c2c') {
-      peerId = String(author.user_openid || author.id || '')
+      peerId = String(author.user_openid || author.openid || author.id || d.user_openid || '')
       senderId = peerId
       // 新版权消息事件会带 author.username；没有就继续用 openid 兜底。
       senderName = String(author.username || author.nickname || '')
     } else if (sessionType === 'group') {
-      peerId = String(d.group_openid || '')
-      senderId = String(author.member_openid || author.id || '')
-      senderName = memberNameFor(account, peerId, senderId)
+      peerId = String(d.group_openid || d.group_id || d.openid || root.group_openid || '')
+      // author.member_openid 是官方接口在群内给出的成员专属 id；没有它时回退 author.id。
+      senderId = String(author.member_openid || author.user_openid || author.id || d.member_openid || '')
+      // 群昵称：新版事件可能直接带 nickname / nick / member_name；否则用缓存，
+      // 都没有时落库后由 routeInbound 调群成员信息接口补齐。
+      const explicitGroupName = String(author.nick || author.nickname || author.member_name || d.member_name || '').trim()
+      const cachedGroupName = memberNameFor(account, peerId, senderId)
+      senderName = explicitGroupName || cachedGroupName || String(author.username || '').trim()
+      senderNameResolved = !!(explicitGroupName || cachedGroupName)
     } else if (sessionType === 'guild') {
-      peerId = String(d.channel_id || '')
+      peerId = String(d.channel_id || root.channel_id || '')
       senderId = String(author.id || '')
       senderName = String(author.username || '')
     } else if (sessionType === 'guild-dm') {
-      peerId = String(d.guild_id || '')
+      peerId = String(d.guild_id || root.guild_id || '')
       senderId = String(author.id || '')
       senderName = String(author.username || '')
     }
-    text = normalizeEventText(d.content, botName)
-    const attachmentImages = extractAttachments(d.attachments)
-    const media = attachmentImages.length > 0 || (Array.isArray(d.attachments) && d.attachments.length > 0)
+    const rawContent = d.content ?? d.text ?? root.content ?? ''
+    const rawAttachments = d.attachments || root.attachments || []
+    text = normalizeEventText(rawContent, botName)
+    const attachmentImages = extractAttachments(rawAttachments)
+    const media = attachmentImages.length > 0 || (Array.isArray(rawAttachments) && rawAttachments.length > 0)
     // QQ 官方图片消息的 content 可能是空串，真实图片在 d.attachments 里；
     // 这里必须使用已抽取的 attachmentImages，不能引用未定义的 images（否则图片事件直接异常）。
     if (!text && attachmentImages.length) text = '[图片]'
     else if (!text && media) text = '[QQ 媒体消息]'
-    if (!peerId || (!text && !media)) return null
-    const qqMessageId = String(d.id || '')
+    if (!peerId) return null
+    const qqMessageId = String(d.id || d.message_id || root.id || '')
+    // 事件名 / payload 结构对，但正文和附件都解析不出来时，生成一条占位消息，
+    // 保证它至少能路由到渠道并写入聊天记录，同时标记 parseFallback 便于排查。
+    let parseFallback = false
+    if (!text && !media) {
+      const looksLikeMessage = /(?:MESSAGE|MSG).*CREATE|CREATE.*(?:MESSAGE|MSG)/i.test(String(eventType || ''))
+      if (looksLikeMessage && (qqMessageId || senderId || author.member_openid || author.user_openid)) {
+        text = '[QQ 消息：插件无法解析正文，请把 runtime 日志里的 payload keys 反馈]'
+        parseFallback = true
+      } else {
+        return null
+      }
+    }
     const eventId = String(raw?.id || '')
+    const atBotEvent = String(eventType || '') === 'GROUP_AT_MESSAGE_CREATE'
+    const mentionedSelf = sessionType === 'group' ? atBotEvent || detectGroupMention(account, d) : false
     return {
       id: messageKey(sessionType, peerId, qqMessageId, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
       sessionType,
       peerId,
       senderId: senderId || peerId,
       senderName,
+      senderNameResolved,
+      mentionedSelf,
+      fullGroupMessage: sessionType === 'group' && !atBotEvent,
+      eventType: String(eventType || ''),
+      parseFallback,
+      memberOpenid: sessionType === 'group' ? senderId : '',
+      unionOpenid: String(author.union_openid || author.unionOpenid || ''),
+      groupOpenid: sessionType === 'group' ? peerId : '',
       text,
       media,
       images: [],
@@ -881,9 +1009,10 @@ export function apply(ctx) {
   }
 
   /**
-   * 群成员昵称：AstrBot 4.10 / botpy 4.10 的官方 v2 SDK 里没有群成员资料接口，
-   * 消息事件也只给 member_openid。这里做 best-effort：依次尝试几个可能存在的
-   * 只读端点，成功就缓存；全部失败则继续使用备注 / 「QQ成员·尾号」。
+   * 群成员昵称（群昵称）：QQ 官方群消息事件通常只给 member_openid。
+   * 这里做 best-effort：优先请求官方可能提供的群成员信息只读端点，
+   * 兼容 nick / nickname / member_name 等常见字段；拿到后缓存并广播，
+   * WebUI 会把「QQ成员·尾号」回填成真实群昵称。全部失败则沿用兜底称呼。
    */
   async function fetchMemberName(account, groupOpenid, memberOpenid) {
     if (!groupOpenid || !memberOpenid) return ''
@@ -896,12 +1025,14 @@ export function apply(ctx) {
     const candidates = [
       `/v2/groups/${encodeURIComponent(groupOpenid)}/members/${encodeURIComponent(memberOpenid)}`,
       `/v2/groups/${encodeURIComponent(groupOpenid)}/members/${encodeURIComponent(memberOpenid)}/info`,
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/member/${encodeURIComponent(memberOpenid)}`,
       `/v2/users/${encodeURIComponent(memberOpenid)}`,
     ]
     for (const path of candidates) {
       const result = await apiRequest(account, path)
       if (!result || result._error || (result.code && Number(result.code) !== 0)) continue
-      const name = String(result.username || result.nickname || result.name || result.member_name || '').trim()
+      const body = result.data && typeof result.data === 'object' ? result.data : result
+      const name = String(body.member_name || body.nick || body.nickname || body.name || body.username || body.memberName || '').trim()
       if (name) {
         account.memberNames[key] = { name, at: Date.now() }
         account.updatedAt = Date.now()
@@ -977,7 +1108,7 @@ export function apply(ctx) {
     const entries = Object.entries(account.unboundNoticeAt).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 200)
     account.unboundNoticeAt = Object.fromEntries(entries)
     schedulePersist()
-    const text = `这条 QQ 私聊还没有绑定到念心Chat渠道。请打开「渠道 → QQ官方机器人 → 发现会话」，复制 openid：${peerId}，点「绑定到本渠道」后再发消息。`
+    const text = `这条 QQ 私聊还没有绑定到念风Chat渠道。请打开「渠道 → QQ官方机器人 → 发现会话」，复制 openid：${peerId}，点「绑定到本渠道」后再发消息。`
     const result = await apiRequest(account, `/v2/users/${encodeURIComponent(peerId)}/messages`, {
       method: 'POST',
       body: {
@@ -994,7 +1125,7 @@ export function apply(ctx) {
 
   function routeInbound(account, message) {
     if (!account || !message) return
-    if (message.sessionType !== 'c2c') return
+    if (message.sessionType !== 'c2c' && message.sessionType !== 'group') return
     if (touchSeen(account, message.id)) return
     const rt = runtimeFor(account.accountId)
     const key = `${message.sessionType}:${message.peerId}`
@@ -1004,8 +1135,13 @@ export function apply(ctx) {
         const cfg = account.channels[channelIdKey]
         if (!cfg || cfg.disabled === true) return false
         if (!cfg?.autoBind) return false
-        // 渠道自身的会话类型（来自「渠道分类」）必须匹配，避免群聊渠道抢走私聊消息
-        if (cfg.sessionType && cfg.sessionType !== message.sessionType) return false
+        // 渠道自身的会话类型（来自「渠道分类」）必须匹配，避免群聊渠道抢走私聊消息。
+        // 群聊必须显式声明 group：旧数据没有 sessionType 时不能被群消息自动绑定。
+        if (message.sessionType === 'group') {
+          if (cfg.sessionType !== 'group') return false
+        } else if (cfg.sessionType && cfg.sessionType !== message.sessionType) {
+          return false
+        }
         return !(cfg.bindings || []).some(binding => binding.sessionType === message.sessionType)
       })
       // 只有唯一候选时才自动绑定；多个未绑定渠道时交给用户在详情页显式选择，避免串线。
@@ -1019,6 +1155,7 @@ export function apply(ctx) {
     const discovery = upsertDiscover(account, message)
     if (channelId) {
       message.channelId = channelId
+      ctx.logger.debug(`[qqbot] ${message.sessionType} 消息路由到渠道 ${channelId}（peer=${message.peerId}）`)
       pushInbox(account, message)
       account.lastInbound[channelId] = {
         sessionType: message.sessionType,
@@ -1032,30 +1169,45 @@ export function apply(ctx) {
       account.updatedAt = Date.now()
       schedulePersist()
       hub.broadcast('qqbot:message', { channelId, message: publicInbound(message) })
-      // 群成员昵称是 best-effort：拉到后回填 inbox 并广播 meta，界面可更新显示名。
-      if (message.sessionType === 'group' && message.senderId && !message.senderName) {
-        fetchMemberName(account, message.peerId, message.senderId)
-          .then(name => {
-            if (!name) return
-            const item = account.inbox.find(entry => entry.id === message.id)
-            if (item) item.senderName = name
-            schedulePersist()
-            hub.broadcast('qqbot:member', {
-              channelId,
-              accountId: account.accountId,
-              groupId: message.peerId,
-              memberId: message.senderId,
-              name,
+      // 群昵称是 best-effort：事件带昵称 / 缓存命中时直接记下；否则请求群成员信息
+      // 端点补齐，拉到后回填 inbox 并广播，WebUI 会把消息显示名更新成群昵称。
+      if (message.sessionType === 'group' && message.senderId) {
+        if (message.senderNameResolved && message.senderName) {
+          account.memberNames[`group:${message.peerId}:${message.senderId}`] = { name: message.senderName, at: Date.now() }
+          schedulePersist()
+        } else {
+          fetchMemberName(account, message.peerId, message.senderId)
+            .then(name => {
+              if (!name) return
+              const item = account.inbox.find(entry => entry.id === message.id)
+              if (item) {
+                item.senderName = name
+                item.senderNameResolved = true
+              }
+              schedulePersist()
+              hub.broadcast('qqbot:member', {
+                channelId,
+                accountId: account.accountId,
+                groupId: message.peerId,
+                memberId: message.senderId,
+                name,
+              })
             })
-          })
-          .catch(() => {})
+            .catch(() => {})
+        }
       }
     } else {
+      ctx.logger.warn(
+        `[qqbot] ${message.sessionType} 消息未匹配绑定：peer=${message.peerId}（已进入「发现会话」，请到渠道详情绑定正确会话）`,
+      )
       account.updatedAt = Date.now()
       schedulePersist()
       hub.broadcast('qqbot:discover', { accountId: account.accountId, item: { ...discovery } })
-      // 未绑定 / 多候选时自动回一条提示，避免 QQ 用户发完消息后没有任何反馈。
-      notifyUnboundPeer(account, message).catch(err => ctx.logger?.warn?.(`[qqbot] 未绑定提示失败：${err?.message || err}`))
+      // 未绑定私聊时自动回一条提示，避免 QQ 用户发完消息后没有任何反馈；
+      // 群聊不主动刷屏，只进入「发现会话」等待用户手动绑定群。
+      if (message.sessionType === 'c2c') {
+        notifyUnboundPeer(account, message).catch(err => ctx.logger?.warn?.(`[qqbot] 未绑定提示失败：${err?.message || err}`))
+      }
     }
   }
 
@@ -1089,19 +1241,50 @@ export function apply(ctx) {
 
   async function handleGatewayEvent(account, eventType, payload, raw) {
     if (!account || closed) return
-    const sessionType = EVENT_SESSION[eventType]
+    account.lastGatewayEvent = {
+      type: String(eventType || ''),
+      at: Date.now(),
+      keys: Object.keys(payload || {}).slice(0, 16),
+    }
+    const knownEvent = !!EVENT_SESSION[eventType]
+    const sessionType = sessionTypeForEvent(eventType, payload)
+    if (sessionType && !knownEvent) {
+      ctx.logger.info(`[qqbot] 通过事件结构识别消息：${eventType} → ${sessionType}`)
+    }
     if (sessionType) {
       const message = normalizeInbound(account, eventType, sessionType, payload, raw)
-      if (!message) return
-      // 按最新范围：QQ 官方机器人只做私聊。群聊/频道消息不进入任何渠道，
-      // 只在「发现会话」里显示并标注暂不支持，避免用户误绑群后串线。
-      if (sessionType !== 'c2c') {
+      if (!message) {
+        if (sessionType === 'group') {
+          ctx.logger.warn(`[qqbot] 群事件 ${eventType} 解析失败并丢弃：payload keys=${Object.keys(payload || {}).join(',')}`)
+        }
+        return
+      }
+      if (message.parseFallback) {
+        ctx.logger.warn(
+          `[qqbot] ${eventType} 正文解析失败，已生成占位消息：payload keys=${Object.keys(payload || {}).join(',')}`,
+        )
+      }
+      // QQ 官方机器人渠道支持私聊（C2C）与群聊（GROUP_AT_MESSAGE_CREATE /
+      // GROUP_MESSAGE_CREATE 全量消息）；频道 / 频道私信只进入「发现会话」并标注暂不支持。
+      if (sessionType !== 'c2c' && sessionType !== 'group') {
         const discovery = upsertDiscover(account, message)
-        discovery.unsupported = '暂不支持群聊'
+        discovery.unsupported = sessionType === 'guild' || sessionType === 'guild-dm' ? '频道消息暂不支持' : '暂不支持该会话类型'
         account.updatedAt = Date.now()
         schedulePersist()
         hub.broadcast('qqbot:discover', { accountId: account.accountId, item: { ...discovery } })
         return
+      }
+      if (sessionType === 'group') {
+        // 便于用户在日志里确认群全量消息权限是否真的生效，以及事件名 / @ 判定结果。
+        // 30 秒内只打一条 info，其余降到 debug，避免群消息刷屏又让用户看得见诊断信息。
+        const now = Date.now()
+        const line = `[qqbot] 群事件 ${eventType} group=${message.peerId} member=${message.senderId} mentioned=${message.mentionedSelf === true}`
+        if (now - Number(account.lastGroupEventLogAt || 0) > 30 * 1000) {
+          account.lastGroupEventLogAt = now
+          ctx.logger.info(line)
+        } else {
+          ctx.logger.debug(line)
+        }
       }
       await hydrateQqImages(account, message)
       routeInbound(account, message)
@@ -1125,7 +1308,11 @@ export function apply(ctx) {
       routeLifecycleEvent(account, eventType, payload, raw)
       return
     }
-    ctx.logger.debug(`[qqbot] 未处理事件 ${eventType}`)
+    if (String(eventType).startsWith('GROUP_')) {
+      ctx.logger.info(`[qqbot] 未处理群事件 ${eventType}，payload keys=${Object.keys(payload || {}).join(',')}`)
+    } else {
+      ctx.logger.debug(`[qqbot] 未处理事件 ${eventType}`)
+    }
   }
 
   /* ---------------- WebSocket 网关 ---------------- */
@@ -1346,6 +1533,12 @@ export function apply(ctx) {
     if (!account || closed) return Promise.resolve()
     const rt = runtimeFor(account.accountId)
     rt.stopping = false
+    // 进程重启后不要 RESUMED 旧会话：让网关重新 Identify 一次，
+    // 确保 QQ 群刚授权的新权限 / 新事件类型立即生效（AstrBot 每次启动也是重新 Identify）。
+    if (!rt.started) {
+      account.wsSessionId = ''
+      account.wsLastSeq = 0
+    }
     if (account.transport === 'webhook') return startWebhookAccount(account)
     if (rt.wsTask && !rt.wsTask.done) return rt.wsTask
     return wsLoop(account).catch(err => {
@@ -1924,6 +2117,134 @@ export function apply(ctx) {
     return { ok: true, media: { file_uuid: result.file_uuid || '', file_info: result.file_info, ttl: Number(result.ttl) || 0 } }
   }
 
+  function looksLikeSilkBuffer(buffer) {
+    if (!buffer || buffer.length < 8) return false
+    const head = buffer.subarray(0, 16).toString('latin1')
+    return head.includes('SILK')
+  }
+
+  /** voice: dataUrl / base64 / url / file；QQ 官方语音要求 SILK 格式。 */
+  async function resolveVoiceBytes(voice) {
+    if (!voice) return null
+    const source = typeof voice === 'string' ? voice : voice.dataUrl || voice.url || voice.base64 || voice.file || ''
+    if (!source) return null
+    if (/^data:/i.test(source)) {
+      const match = String(source).match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
+      if (!match) return null
+      const mime = voice.mime || match[1] || 'audio/silk'
+      const base64 = match[2] ? match[3].replace(/\s+/g, '') : Buffer.from(decodeURIComponent(match[3]), 'utf8').toString('base64')
+      if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
+      return { base64, mime, bytes: Buffer.from(base64, 'base64') }
+    }
+    if (/^https?:/i.test(source)) {
+      const buffer = await downloadBinary(source, { maxBytes: MAX_MEDIA_BYTES })
+      if (!buffer) return null
+      return { base64: buffer.toString('base64'), mime: voice.mime || 'audio/silk', bytes: buffer }
+    }
+    const base64 = String(source).replace(/\s+/g, '')
+    if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
+    return { base64, mime: voice.mime || 'audio/silk', bytes: Buffer.from(base64, 'base64') }
+  }
+
+  async function uploadQqVoice(account, target, voice) {
+    const media = await resolveVoiceBytes(voice)
+    if (!media) return { ok: false, code: 'VOICE_INVALID', error: '语音数据为空、超过大小限制或下载失败' }
+    if (!looksLikeSilkBuffer(media.bytes)) {
+      return {
+        ok: false,
+        code: 'VOICE_FORMAT_INVALID',
+        error: 'QQ 官方机器人语音需要 SILK 格式；请先用 ffmpeg + silk-wasm 转码后再发送',
+      }
+    }
+    const path =
+      target.sessionType === 'group'
+        ? `/v2/groups/${encodeURIComponent(target.peerId)}/files`
+        : target.sessionType === 'c2c'
+          ? `/v2/users/${encodeURIComponent(target.peerId)}/files`
+          : ''
+    if (!path) return { ok: false, code: 'UNSUPPORTED', error: `会话类型 ${target.sessionType} 暂不支持语音` }
+    const body = { file_data: media.base64, file_type: 3, srv_send_msg: false }
+    if (target.sessionType === 'group') body.group_openid = target.peerId
+    else body.openid = target.peerId
+    const result = await apiRequest(account, path, { method: 'POST', body })
+    if (result?._error) return { ok: false, code: 'VOICE_UPLOAD_FAILED', error: result._error }
+    if (!result?.file_info) {
+      return { ok: false, code: 'VOICE_UPLOAD_FAILED', error: result?.message || result?.errmsg || 'QQ 文件上传接口没有返回 file_info', raw: result }
+    }
+    return { ok: true, media: { file_uuid: result.file_uuid || '', file_info: result.file_info, ttl: Number(result.ttl) || 0 } }
+  }
+
+  /** 只镜像 image-service 里的图片引用，避免把 base64 / data URL 写进对方聊天记录。 */
+  function mirrorImageRefs(images) {
+    const list = []
+    for (const image of Array.isArray(images) ? images : []) {
+      if (image && typeof image === 'object' && image.id) {
+        list.push({
+          id: String(image.id),
+          mime: String(image.mime || ''),
+          width: Number(image.width) || 0,
+          height: Number(image.height) || 0,
+          size: Number(image.size) || 0,
+        })
+      }
+    }
+    return list.slice(0, MAX_IMAGES_PER_MESSAGE)
+  }
+
+  /**
+   * 同群多机器人联动：把本渠道刚发出的群消息镜像给填了同一个 linkGroupId 的其它
+   * QQ 官方机器人渠道。镜像只写入对方本机 inbox / SSE，不调用 QQ 接口；对方前端
+   * 按 message.linkedBot 决定只写入上下文，还是按联动规则自动接话。
+   */
+  function mirrorOutboundToLinkedChannels(account, channelId, target, payload = {}) {
+    if (!account || target?.sessionType !== 'group') return 0
+    const sourceCfg = channelConfig(account, channelId, false)
+    const linkGroupId = String(sourceCfg?.linkGroupId || '').trim()
+    if (!linkGroupId) return 0
+    const text = String(payload.text || '').trim().slice(0, MAX_MESSAGE_CHARS)
+    const images = mirrorImageRefs(payload.images)
+    if (!text && !images.length) return 0
+    const senderName = String(sourceCfg?.channelName || account.bot?.username || '另一个角色').trim() || '另一个角色'
+    let mirrored = 0
+    for (const [targetAccountId, targetAccount] of Object.entries(data.accounts || {})) {
+      if (!targetAccount || targetAccount === account) continue
+      for (const [targetChannelId, cfg] of Object.entries(targetAccount.channels || {})) {
+        if (!cfg || cfg.disabled === true || cfg.sessionType !== 'group') continue
+        if (String(cfg.linkGroupId || '').trim() !== linkGroupId) continue
+        const binding = (cfg.bindings || []).find(item => item.sessionType === 'group' && String(item.peerId || '').trim())
+        if (!binding) continue
+        const message = {
+          id: `qq-link-${channelId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          channelId: targetChannelId,
+          sessionType: 'group',
+          peerId: String(binding.peerId),
+          peerName: String(cfg.channelName || ''),
+          senderId: `qqbot-bot:${account.accountId}`,
+          senderName,
+          senderNameResolved: true,
+          text: text || '[图片]',
+          media: false,
+          images,
+          mentionedSelf: false,
+          linkedBot: true,
+          linkFromAccountId: String(account.accountId || ''),
+          linkFromChannelId: String(channelId || ''),
+          qqMessageId: '',
+          eventId: '',
+          timestamp: Date.now(),
+          receivedAt: Date.now(),
+        }
+        pushInbox(targetAccount, message)
+        targetAccount.updatedAt = Date.now()
+        schedulePersist()
+        hub.broadcast('qqbot:message', { channelId: targetChannelId, message: publicInbound(message) })
+        mirrored += 1
+      }
+    }
+    if (mirrored) ctx.logger?.debug?.(`[qqbot] 联动镜像 ${channelId} → ${mirrored} 个渠道`)
+    return mirrored
+  }
+
   async function sendMessage(account, body = {}) {
     const channelId = String(body.channelId || '').trim()
     if (!channelId) return { ok: false, code: 'BAD_REQUEST', error: '缺少 channelId' }
@@ -1931,18 +2252,23 @@ export function apply(ctx) {
     if (!target) return { ok: false, code: 'NO_BINDING', error: '该渠道还没有绑定 QQ 会话，请先在渠道详情里绑定一个私聊/群聊' }
     const text = String(body.text || '').trim().slice(0, MAX_MESSAGE_CHARS)
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES_PER_MESSAGE) : []
-    if (!text && !images.length) return { ok: false, code: 'EMPTY', error: '回复内容为空' }
+    const voice = body.voice && typeof body.voice === 'object' ? body.voice : body.audio && typeof body.audio === 'object' ? body.audio : null
+    if (!text && !images.length && !voice) return { ok: false, code: 'EMPTY', error: '回复内容为空' }
     if (!messagePathFor(target)) return { ok: false, code: 'UNSUPPORTED', error: `未知会话类型 ${target.sessionType}` }
 
     // 被动 vs 主动：默认总是带 msg_id 走被动；QQ 接口返回过期/无效时由前端决定是否改发主动。
-    const passive = body.active === true ? false : String(body.msgId || account.lastInbound?.[channelId]?.qqMessageId || '').trim()
+    // quote === false 且是群聊时，允许调用方明确要求“不引用”，走主动消息。
+    // 实际前端会同时传 active；这里兜底保证 QQ 官方服务接口也遵守同一语义。
+    const quoteDisabled = body.quote === false && target.sessionType === 'group'
+    const passive = body.active === true || quoteDisabled ? false : String(body.msgId || account.lastInbound?.[channelId]?.qqMessageId || '').trim()
+    // 和 AstrBot 一致：被动回复只带 msg_id + msg_seq；主动消息不带 msg_id。
+    // 是否引用由前端决定带不带 msg_id（群聊 quote 开关），不再额外塞 message_reference / event_id。
     const basePayload = { content: text, msg_type: 0 }
     if (passive) {
       const seqInfo = nextPassiveSeq(account, target, passive)
       if (!seqInfo.ok) return seqInfo
       basePayload.msg_id = passive
       basePayload.msg_seq = seqInfo.seq
-      if (body.eventId) basePayload.event_id = String(body.eventId)
     }
     const results = []
     const path = messagePathFor(target)
@@ -1972,6 +2298,46 @@ export function apply(ctx) {
         return { ok: false, code, error: result?._error || result?.message || 'QQ 图片发送失败', raw: result, sent: results }
       }
       results.push({ kind: 'image', id: String(result?.id || ''), mode: passive ? 'passive' : 'active', msgSeq: payload.msg_seq || 0 })
+    }
+    if (voice) {
+      const uploaded = await uploadQqVoice(account, target, voice)
+      if (!uploaded.ok) return { ok: false, ...uploaded, sent: results }
+      const voicePassive = passive ? nextPassiveSeq(account, target, passive) : null
+      if (passive && !voicePassive.ok) return { ok: false, ...voicePassive, sent: results }
+      const payload = { content: '', msg_type: 7, media: uploaded.media }
+      if (passive) {
+        payload.msg_id = passive
+        payload.msg_seq = voicePassive.seq
+      }
+      const result = await apiRequest(account, path, { method: 'POST', body: payload })
+      const failed = result?._error || (result?.code && Number(result.code) !== 0 && !result.id)
+      if (failed) {
+        const code = result?._error ? 'API_ERROR' : isPassiveExpired(result) ? 'PASSIVE_EXPIRED' : String(result.code)
+        return { ok: false, code, error: result?._error || result?.message || 'QQ 语音发送失败', raw: result, sent: results }
+      }
+      results.push({
+        kind: 'voice',
+        // 不同 QQ 接口版本 / 消息类型回传的 id 字段可能不同，全部兜底，避免工具层把“没拿到 id”误判成发送失败。
+        id: String(result?.id || result?.message_id || result?.messageId || result?.data?.id || ''),
+        mode: passive ? 'passive' : 'active',
+        msgSeq: payload.msg_seq || 0,
+      })
+    }
+    // 同群多机器人联动：发送成功后，把消息镜像给填了同一个 linkGroupId 的其它机器人渠道。
+    const mirroredImages = results.some(item => item.kind === 'image') ? images : []
+    const mirroredText = results.some(item => item.kind === 'text')
+      ? text
+      : results.some(item => item.kind === 'voice')
+        ? '[语音]'
+        : mirroredImages.length
+          ? '[图片]'
+          : ''
+    if (mirroredText || mirroredImages.length) {
+      try {
+        mirrorOutboundToLinkedChannels(account, channelId, target, { text: mirroredText, images: mirroredImages })
+      } catch (err) {
+        ctx.logger?.warn?.(`[qqbot] 联动镜像写入失败：${err?.message || err}`)
+      }
     }
     account.updatedAt = Date.now()
     schedulePersist()
@@ -2056,6 +2422,11 @@ export function apply(ctx) {
           account.updatedAt = Date.now()
           rebuildRoutes(account)
           schedulePersist()
+          if (body.force === true) {
+            // 群权限 / intents 变化后，QQ 有时要重新 Identify 才会开始推新事件。
+            stopAccount(account)
+            await sleep(120)
+          }
           startAccount(account)
           return httpApi.sendJson(res, 200, { ok: true, ...publicStatus(account, channelId) })
         }
@@ -2275,18 +2646,30 @@ export function apply(ctx) {
           if (!account) return httpApi.sendJson(res, 200, { ok: false, code: 'NO_ACCOUNT', error: '后端没有该 AppID 的登录信息' })
         }
         const intentsBefore = accountIntents(account)
+        const transportBefore = account.transport
         const cfg = channelConfig(account, channelId, true)
-          cfg.disabled = false
+        cfg.disabled = false
+        // 渠道里选择的连接方式要同步到账号：否则从 Webhook 切回 WebSocket 不会真正生效。
+        if (['ws', 'webhook'].includes(String(body.transport || ''))) account.transport = String(body.transport)
         if (body.autoBind !== undefined) cfg.autoBind = body.autoBind === true
         if (SESSION_TYPES.includes(String(body.sessionType || ''))) cfg.sessionType = String(body.sessionType)
         if (Number.isFinite(Number(body.intents))) cfg.intents = Number(body.intents)
+        if (body.channelName !== undefined) cfg.channelName = String(body.channelName || '').trim().slice(0, 80)
+        if (body.linkGroupId !== undefined) cfg.linkGroupId = String(body.linkGroupId || '').trim()
+        if (body.linkAutoReply !== undefined) cfg.linkAutoReply = body.linkAutoReply !== false
+        if (body.linkMaxTurns !== undefined) {
+          const maxTurns = Number(body.linkMaxTurns)
+          cfg.linkMaxTurns = Number.isFinite(maxTurns) && maxTurns >= 0 ? Math.min(5, Math.floor(maxTurns)) : 1
+        }
         if (Array.isArray(body.trustedUserIds)) {
           cfg.trustedUserIds = body.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean)
         }
         if (Array.isArray(body.bindings)) {
           cfg.bindings = []
+          const claimed = new Set()
           for (const binding of body.bindings) {
             if (!SESSION_TYPES.includes(binding?.sessionType) || !String(binding?.peerId || '').trim()) continue
+            const key = `${binding.sessionType}:${String(binding.peerId)}`
             cfg.bindings.push({
               sessionType: binding.sessionType,
               peerId: String(binding.peerId),
@@ -2295,6 +2678,19 @@ export function apply(ctx) {
               auto: binding.auto === true,
               boundAt: Number(binding.boundAt) || Date.now(),
             })
+            claimed.add(key)
+          }
+          // 一个会话只允许属于一个渠道：前端保存哪个渠道，就从其它渠道移除同样的绑定，
+          // 避免 route 被旧的重复绑定抢走或产生 conflicts。
+          if (claimed.size) {
+            for (const [otherId, otherCfg] of Object.entries(account.channels || {})) {
+              if (otherId === channelId || !otherCfg) continue
+              const before = Array.isArray(otherCfg.bindings) ? otherCfg.bindings.length : 0
+              otherCfg.bindings = (Array.isArray(otherCfg.bindings) ? otherCfg.bindings : []).filter(
+                item => !claimed.has(`${item.sessionType}:${String(item.peerId)}`),
+              )
+              if (otherCfg.bindings.length !== before) otherCfg.updatedAt = Date.now()
+            }
           }
           cfg.updatedAt = Date.now()
         }
@@ -2305,9 +2701,12 @@ export function apply(ctx) {
           removeBinding(account, channelId, body.remove.sessionType, body.remove.peerId)
         }
         rebuildRoutes(account)
-        // 新增频道渠道会改变 intents；已连接时重启一次网关，让新权限立即生效。
+        // 新增频道渠道会改变 intents；连接方式变化会改变网关形态。
+        // 已连接时重启一次，确保新权限 / 新连接方式立即生效。
         const intentsAfter = accountIntents(account)
-        if (intentsBefore !== intentsAfter && account.transport !== 'webhook') {
+        const transportChanged = transportBefore !== account.transport
+        const intentsChanged = intentsBefore !== intentsAfter
+        if (transportChanged || (intentsChanged && account.transport !== 'webhook')) {
           stopAccount(account)
           startAccount(account)
         } else if (account.appId && (account.secret || account.accessToken)) {
@@ -2320,6 +2719,45 @@ export function apply(ctx) {
       }),
     ),
   )
+
+    routes.push(
+      httpApi.route(
+        'POST',
+        '/api/qqbot/channels/reconcile',
+        wrap(async (req, res) => {
+          const body = await httpApi.readBody(req)
+          const keep = new Set(
+            (Array.isArray(body.channelIds) ? body.channelIds : [])
+              .map(value => String(value || '').trim())
+              .filter(Boolean),
+          )
+          let removed = 0
+          for (const account of Object.values(data.accounts || {})) {
+            let accountChanged = false
+            for (const channelId of Object.keys(account.channels || {})) {
+              if (keep.has(channelId)) continue
+              delete account.channels[channelId]
+              if (account.lastInbound) delete account.lastInbound[channelId]
+              account.inbox = (account.inbox || []).filter(item => item.channelId !== channelId)
+              account.discovered = (account.discovered || []).map(item =>
+                item.channelId === channelId ? { ...item, channelId: '' } : item,
+              )
+              if (account.channelBindings) delete account.channelBindings[channelId]
+              removed += 1
+              accountChanged = true
+            }
+            if (!accountChanged) continue
+            rebuildRoutes(account)
+            account.updatedAt = Date.now()
+            schedulePersist()
+            const hasActive = Object.values(account.channels || {}).some(cfg => cfg && cfg.disabled !== true)
+            if (!hasActive) stopAccount(account)
+          }
+          return httpApi.sendJson(res, 200, { ok: true, removed })
+        }),
+      ),
+    )
+
 
   routes.push(
     httpApi.route(
@@ -2450,9 +2888,13 @@ export function apply(ctx) {
         const account = findAccountForChannel(channelId)
         if (!account) return httpApi.sendJson(res, 200, { ok: true, discovered: [] })
         const cfg = channelConfig(account, channelId, false)
-        const types = new Set((cfg?.bindings || []).map(item => item.sessionType))
+        const preferred = String(cfg?.sessionType || '')
         const discovered = account.discovered
-          .filter(item => (!item.channelId || (types.size === 0 && item.channelId === channelId)) && (item.sessionType === 'c2c' || item.unsupported))
+          .filter(item => {
+            if (item.channelId && item.channelId !== channelId) return false
+            if (preferred && item.sessionType !== preferred && !item.unsupported) return false
+            return item.sessionType === 'c2c' || item.sessionType === 'group' || !!item.unsupported
+          })
           .slice(-MAX_DISCOVER)
           .reverse()
         return httpApi.sendJson(res, 200, { ok: true, discovered })
@@ -2574,6 +3016,41 @@ export function apply(ctx) {
         /* ignore */
       }
     }
+  })
+
+  // 给其它后端插件（如点歌台 media-post）使用的稳定接口：
+  // 查询渠道信息 / 直接发送文本、图片、语音。
+  ctx.provide('qqbot', {
+    name: 'qqbot',
+    version,
+    ready: () => ready,
+    supportsVoice: () => true,
+    voiceFormat: () => 'silk',
+    channelInfo: channelId => {
+      const raw = String(channelId || '').replace(/^qqbot:/, '')
+      if (!raw) return null
+      const account = findAccountForChannel(raw)
+      const cfg = account ? channelConfig(account, raw, false) : null
+      if (!account || !cfg) return null
+      const binding = (cfg.bindings || [])[0] || null
+      return {
+        channelId: raw,
+        accountId: account.accountId,
+        sessionType: cfg.sessionType || binding?.sessionType || '',
+        peerId: binding?.peerId || '',
+        bindings: (cfg.bindings || []).map(item => ({ ...item })),
+        disabled: cfg.disabled === true,
+        transport: account.transport || 'ws',
+        bot: account.bot || null,
+      }
+    },
+    send: body =>
+      ready.then(() => {
+        const rawChannelId = String(body?.channelId || '').replace(/^qqbot:/, '')
+        const account = resolveAccountForPayload({ ...body, channelId: rawChannelId }) || findAccountForChannel(rawChannelId)
+        if (!account) return { ok: false, code: 'NO_ACCOUNT', error: '该渠道还没有绑定 QQ 官方机器人账号' }
+        return sendMessage(account, { ...body, channelId: rawChannelId })
+      }),
   })
 
   boot().catch(err => ctx.logger.error(`[qqbot] 初始化失败：${err?.message || err}`))

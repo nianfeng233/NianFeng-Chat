@@ -282,21 +282,10 @@ export function apply(ctx) {
     }
     const onAdd = e => {
       const types = channels.typeList()
-      const planned = channels.plannedList()
       const rect = addBtn.getBoundingClientRect()
       const items = []
       if (types.length) {
         items.push(...types.map(type => ({ label: `${type.icon || '＋'} ${type.name}`, action: () => createChannel(type.id) })))
-      }
-      if (planned.length) {
-        if (items.length) items.push({ separator: true })
-        items.push(
-          ...planned.map(item => ({
-            label: `${item.name} · 未实现`,
-            disabled: true,
-            action: () => toast.info(item.reason),
-          })),
-        )
       }
       if (!items.length) items.push({ label: '暂无可用的渠道类型插件', disabled: true })
       menu.open(rect.left, rect.bottom + 4, items)

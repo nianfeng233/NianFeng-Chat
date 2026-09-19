@@ -30,14 +30,12 @@ const KEY = 'data'
 const TABS = ['private', 'group', 'privacy']
 
 /**
- * 已知但未实现的渠道类型：明确标注，不用假数据填充。
- * 微信 Clawbot 已由独立插件 plugins/channels/wechat-clawbot 实现，
- * 不再放在这里占位；插件未安装时菜单里不会出现“微信clawbot”。
+ * 渠道类型完全由插件注册后出现在「添加渠道」菜单里。
+ *
+ * 这里不再保留 Discord / 邮箱之类的“未实现”占位条目：菜单里只显示
+ * 真正可用的渠道，避免用户点到一个永远无法创建的选项。
+ * plannedList() 仍保留为空实现，供旧代码/外部插件兼容调用。
  */
-const PLANNED = [
-  { type: 'discord', name: 'Discord', color: '#5865f2', reason: '未实现：需要 Discord Bot Gateway 长连接与完整权限申请流程' },
-  { type: 'email', name: '邮箱', color: '#8b5cf6', reason: '未实现：需要 IMAP/SMTP 凭据与邮件线程解析' },
-]
 
 export function apply(ctx) {
   const storage = ctx.inject('storage')
@@ -139,7 +137,6 @@ export function apply(ctx) {
   })
 
   const types = new Map()
-  const planned = new Map(PLANNED.map(item => [item.type, item]))
   const nextGroupId = () => `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
   const nextChannelId = () => `ch${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
 
@@ -147,8 +144,8 @@ export function apply(ctx) {
     name: 'channel-registry',
     tabs: () => [...TABS],
 
-    /** 已知但未实现的渠道类型 */
-    plannedList: () => [...planned.values()],
+    /** 旧的“未实现类型”扩展点：占位条目已移除，固定返回空列表。 */
+    plannedList: () => [],
 
     /* -------- 渠道类型 -------- */
     registerType(id, definition = {}) {

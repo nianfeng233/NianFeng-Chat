@@ -9,14 +9,15 @@
  * 新建会话时先填写「角色名 / 人格设定 / 使用模型 / 头像颜色」，
  * 会话头部「更多 → 编辑角色」可以随时再打开修改。
  *
- * 数据落在会话对象的 name / avatar / c1 / c2 / meta.persona / meta.model：
+ * 数据落在会话对象的 name / avatar / c1 / c2 / meta.persona / meta.model / meta.backupModel：
  *   - meta.persona 由 chat-flow 作为 system 段落注入模型上下文
  *   - meta.model 是 `${providerId}/${modelId}`，为空则跟随全局模型
+ *   - meta.backupModel 是 'global'（跟随全局）/ 'off'（不启用）/ 指定模型 key
  */
 export const name = 'character-editor'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '角色编辑'
-export const description = '功能插件 · 新建 / 编辑会话角色（人格、模型、头像）。'
+export const description = '功能插件 · 新建 / 编辑会话角色（人格、主模型、备用模型、头像）。'
 export const author = '念风内核'
 export const icon = '🎭'
 export const core = true
@@ -68,6 +69,16 @@ export function apply(ctx) {
     const meta = source?.meta || {}
     let [c1, c2] = [source?.c1 || PALETTE[0][0], source?.c2 || PALETTE[0][1]]
     let avatarImage = meta.avatarImage || ''
+    const modelList = registry.list()
+    const backupModel = String(meta.backupModel || 'global')
+    const backupModelList = modelList.slice()
+    if (
+      backupModel !== 'global' &&
+      backupModel !== 'off' &&
+      !backupModelList.some(item => (item.key || `${item.provider}/${item.id}`) === backupModel)
+    ) {
+      backupModelList.push({ key: backupModel, id: backupModel, name: `${backupModel}（当前不可用）`, provider: '', providerName: '' })
+    }
 
     overlay = document.createElement('div')
     overlay.className = 'char-mask'
@@ -106,8 +117,7 @@ export function apply(ctx) {
             <span>使用模型 <em>留空则跟随全局当前模型</em></span>
             <select class="setting-select char-model" data-char-model>
               <option value="">跟随全局模型</option>
-              ${registry
-                .list()
+              ${modelList
                 .map(item => {
                   const key = item.key || `${item.provider}/${item.id}`
                   const label = `${item.name || item.id}（${item.providerName || item.provider}）`
@@ -116,7 +126,21 @@ export function apply(ctx) {
                 .join('')}
             </select>
           </label>
-          <div class="char-note">人格只保存在本机会话数据里；换用哪个提供商都不会被自动上传。</div>
+          <label class="char-field">
+            <span>备用模型 <em>主模型失败时自动切换；角色级设置优先于全局</em></span>
+            <select class="setting-select char-backup" data-char-backup>
+              <option value="global" ${backupModel === 'global' ? 'selected' : ''}>跟随全局模型设置（默认）</option>
+              <option value="off" ${backupModel === 'off' ? 'selected' : ''}>不启用备用模型</option>
+              ${backupModelList
+                .map(item => {
+                  const key = item.key || `${item.provider}/${item.id}`
+                  const label = `${item.name || item.id}（${item.providerName || item.provider}）`
+                  return `<option value="${escapeHtml(key)}" ${backupModel === key ? 'selected' : ''}>${escapeHtml(label)}</option>`
+                })
+                .join('')}
+            </select>
+          </label>
+          <div class="char-note">人格与模型只保存在本机会话数据里；角色级备用模型优先于全局失败转移设置。</div>
         </div>
         <div class="char-foot">
           <button class="outline-btn" data-char-cancel>取消</button>
@@ -129,6 +153,7 @@ export function apply(ctx) {
     const nameInput = overlay.querySelector('[data-char-name]')
     const personaInput = overlay.querySelector('[data-char-persona]')
     const modelSelect = overlay.querySelector('[data-char-model]')
+    const backupSelect = overlay.querySelector('[data-char-backup]')
     const preview = overlay.querySelector('[data-char-preview]')
 
     const syncPreview = () => {
@@ -223,13 +248,14 @@ export function apply(ctx) {
       const name = String(nameInput.value || '').trim() || '新的角色'
       const persona = String(personaInput.value || '').trim()
       const model = modelSelect ? modelSelect.value : ''
+      const nextBackupModel = backupSelect ? backupSelect.value || 'global' : 'global'
       if (editing) {
         sessions.update(conversation.id, {
           name,
           avatar: name.slice(0, 1),
           c1,
           c2,
-          meta: { ...(source?.meta || {}), persona, model, avatarImage },
+          meta: { ...(source?.meta || {}), persona, model, backupModel: nextBackupModel, avatarImage },
         })
         toast.success(`角色「${name}」已更新`)
       } else {
@@ -239,7 +265,7 @@ export function apply(ctx) {
           c1,
           c2,
           preview: persona ? `${persona.slice(0, 40)}` : '',
-          meta: { persona, model, avatarImage },
+          meta: { persona, model, backupModel: nextBackupModel, avatarImage },
         })
         sessions.activate(conv.id)
         toast.success(`已创建角色「${name}」，开始聊天吧`)

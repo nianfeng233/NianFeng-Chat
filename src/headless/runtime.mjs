@@ -117,6 +117,8 @@ export async function startHeadlessRuntime(options = {}) {
         if (data.clientId) pendingClientIds.set(conversationId, String(data.clientId))
         agentEvents.emit('message:send', {
           conversationId,
+          // 复用 WebUI 本地已回显消息的 id，落库后前端按 id 合并，避免重复气泡。
+          messageId: String(data.messageId || ''),
           text: String(data.text || ''),
           images: (Array.isArray(data.images) ? data.images : []).map(id => ({ id: String(id || '') })).filter(item => item.id),
           senderId: data.userId || 'web-user',
