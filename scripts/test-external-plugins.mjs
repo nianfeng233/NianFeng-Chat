@@ -125,6 +125,24 @@ if (scopeService?.setRole && toolsService?.definitions) {
     scopeService.reset('github-hub')
     channelService.removeChannel?.('group', channel.id)
   }
+
+  // 内核层事件拦截回归：旧版外部插件即使没接中心配置，事件也会被跳过。
+  scopeService.setDefault('github-hub', 'none')
+  scopeService.setRole('github-hub', 'scope-event-off', 'none')
+  check(
+    '事件级范围：关闭角色会跳过该插件的事件监听',
+    app.pluginScopeAllowsEvent('plugin:github-hub', { conversationId: 'scope-conv', roleId: 'scope-event-off' }) === false,
+  )
+  scopeService.setRole('github-hub', 'scope-event-off', 'all')
+  check(
+    '事件级范围：开启角色后放行事件监听',
+    app.pluginScopeAllowsEvent('plugin:github-hub', { conversationId: 'scope-conv', roleId: 'scope-event-off' }) === true,
+  )
+  check(
+    '事件级范围：核心 / 未配置插件不受影响',
+    app.pluginScopeAllowsEvent('plugin:chat-tools', { conversationId: 'scope-conv', roleId: 'scope-event-off' }) === true,
+  )
+  scopeService.reset('github-hub')
 }
 
 try {

@@ -20,7 +20,7 @@ import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.2.0-preview.3'
+export const VERSION = '2.2.0-preview.4'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -215,6 +215,46 @@ export class App {
 
   /* ================= 事件兼容层 ================= */
 
+  /**
+   * 事件级插件启用范围判断。
+   * 外部插件注册在事件上的能力（例如 GitHub 链接预览）不一定走 tool-registry，
+   * 但事件 payload 通常带 conversationId / channel_id / role_id，可以在内核层
+   * 按同一份「插件启用」配置跳过监听器，旧版外部插件也能生效。
+   */
+  pluginScopeAllowsEvent(owner, payload) {
+    const pluginId = String(owner || '').trim().replace(/^plugin:/, '')
+    if (!pluginId) return true
+    const service = this.services.get('plugin-scope')?.value
+    if (typeof service?.allows !== 'function') return true
+    const payloadObject = payload && typeof payload === 'object' ? payload : {}
+    const message = payloadObject.message && typeof payloadObject.message === 'object' ? payloadObject.message : {}
+    const conversationId =
+      payloadObject.conversationId ||
+      payloadObject.conversation_id ||
+      message.conversationId ||
+      message.conversation_id ||
+      ''
+    const roleId =
+      payloadObject.roleId ||
+      payloadObject.role_id ||
+      message.role_id ||
+      message.meta?.roleId ||
+      ''
+    const channelId =
+      payloadObject.channelId ||
+      payloadObject.channel_id ||
+      message.channel_id ||
+      message.channelId ||
+      ''
+    if (!conversationId && !roleId && !channelId) return true
+    try {
+      return service.allows(pluginId, { conversationId, roleId, channelId }) !== false
+    } catch (err) {
+      this.reportError(err, { event: 'plugin-scope', plugin: pluginId })
+      return true
+    }
+  }
+
   onCompat(ctx, name, listener, options = {}, owner = ctx.fiber?.name || 'anonymous') {
     if (typeof listener !== 'function') throw new TypeError(`事件 ${name} 的监听器必须是函数`)
     const record = {
@@ -229,6 +269,12 @@ export class App {
     if (!record.interceptor) {
       record.wrapped = payload => {
         if (this.trace) this.trace('dispatch', name, payload, owner)
+        // 统一按「插件启用」范围拦外部插件的事件监听：旧版外部插件即使自己
+        // 没有读中心配置，只要事件带会话 / 角色 / 渠道上下文，也会在这里被跳过。
+        if (!this.pluginScopeAllowsEvent(owner, payload)) {
+          if (this.trace) this.trace('scope-skip', name, payload, owner)
+          return
+        }
         try {
           listener(payload, { event: name, plugin: owner })
         } catch (err) {
