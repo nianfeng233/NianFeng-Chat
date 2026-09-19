@@ -21,7 +21,7 @@
  * 所有提供商配置都落在本机后端当前数据目录（默认 user_data/config.json），API Key 不回传浏览器。
  */
 export const name = 'settings-item-model'
-export const version = '4.1.0'
+export const version = '4.2.0'
 export const displayName = '设置项 · 模型'
 export const description = '设置页 · 内置模型开关与自定义提供商管理。'
 export const author = '念风内核'
@@ -176,8 +176,8 @@ export function apply(ctx) {
         const channelId = String(channel.id || '')
         return row(
           `群聊渠道 · ${escapeHtml(channel.name || channelId)}`,
-          `只控制这个群聊渠道（${escapeHtml(channelId)}）：关闭后它绝不生成新记忆；已存记忆仍可检索。`,
-          switchBtn(`memory.groupSummaryDisabled.${channelId}`, false),
+          `只控制这个群聊渠道（${escapeHtml(channelId)}）：开启后才会生成新记忆；总开关关闭时全部不生成，已存记忆仍可检索。`,
+          switchBtn(`memory.groupChannelSummaryEnabled.${channelId}`, false),
         )
       })
       .join('')
@@ -234,7 +234,7 @@ export function apply(ctx) {
           ) +
           row(
             '群聊记忆总结',
-            '群聊默认不按轮次，而是按最近 N 条消息组成窗口来总结；总开关关闭后所有群聊都不再生成新记忆，逐渠道开关仍保留。',
+            '群聊默认按最近 N 条消息组成窗口总结。总开关关闭后所有群聊都不再生成；开启后还需要在下面单独打开对应群聊渠道，未开启的渠道不生成新记忆。',
             switchBtn('memory.groupSummaryEnabled', true),
           ) +
           groupChannelRows,
@@ -282,6 +282,9 @@ export function apply(ctx) {
       /** 「获取模型列表」拉到的远端候选：临时态，不写配置；离开本页/切提供商会清空 */
       let discoveredProviderId = ''
       let discoveredModels = []
+      /** 模型搜索框内容：跨重渲染保留，方便连续添加多个远端模型 */
+      let modelFilter = ''
+      let pendingFilterFocus = false
       let unbindConfig = null
       let unbindSliderConfig = null
       let disposed = false
@@ -569,7 +572,7 @@ export function apply(ctx) {
             }
           </div>
           <div class="model-list-filter" style="display:flex;align-items:center;gap:8px;margin:8px 0 10px;flex-wrap:wrap">
-            <input class="setting-input" style="flex:1;min-width:220px" data-model-filter placeholder="搜索模型 ID / 名称，快速过滤下面的模型" autocomplete="off" spellcheck="false" />
+            <input class="setting-input" style="flex:1;min-width:220px" data-model-filter placeholder="搜索模型 ID / 名称，快速过滤下面的模型" value="${escapeHtml(modelFilter)}" autocomplete="off" spellcheck="false" />
             <span class="model-list-sub" data-model-filter-count>${models.length} 个</span>
           </div>
           ${
@@ -844,6 +847,13 @@ export function apply(ctx) {
         const useBuiltin = !!official && config.get('model.useBuiltin', true) !== false
         const backendOnline = !!health
         const staleBackend = backendOnline && ['provider-crud', 'provider-model-discover', 'embeddings'].some(name => !(health?.capabilities || []).includes(name))
+        // 重渲染会重建整个设置页 DOM：先记下搜索框状态，渲染完再恢复，
+        // 否则「获取模型列表 → 搜索 → 添加」时刚输入的关键词会丢，连续添加很受罪。
+        const previousFilter = container.querySelector('[data-model-filter]')
+        const filterCaret = Number.isInteger(previousFilter?.selectionStart) ? previousFilter.selectionStart : null
+        const restoreFilterFocus =
+          !!modelFilter && (pendingFilterFocus || (typeof document !== 'undefined' && previousFilter && document.activeElement === previousFilter))
+        pendingFilterFocus = false
         unbindConfig?.()
         unbindSliderConfig?.()
         container.innerHTML = page(
@@ -896,6 +906,18 @@ export function apply(ctx) {
         }
         bindFailoverControls({ containerNode: container, config, refreshBlock: refreshFailover })
         bindCompactSliders()
+        if (restoreFilterFocus) {
+          const nextFilter = container.querySelector('[data-model-filter]')
+          if (nextFilter) {
+            try {
+              nextFilter.focus()
+              const end = Math.max(0, Math.min(Number.isInteger(filterCaret) ? filterCaret : modelFilter.length, modelFilter.length))
+              nextFilter.setSelectionRange?.(end, end)
+            } catch (_) {
+              /* 某些极简 DOM 垫片不支持 focus / setSelectionRange，不影响过滤本身 */
+            }
+          }
+        }
       }
 
       /* ---------------- 数据加载 ---------------- */
@@ -1069,10 +1091,12 @@ export function apply(ctx) {
           await api.addModel(provider.id, { id: item?.id || modelId, name: item?.name || modelId })
           if (item) item.installed = true
           toast.success(`已添加模型「${item?.name || modelId}」`)
+          pendingFilterFocus = !!modelFilter
           await syncAndReload()
         } catch (err) {
           if (err?.status === 409) {
             if (item) item.installed = true
+            pendingFilterFocus = !!modelFilter
             render()
             toast.info('该模型已在模型列表中')
             return
@@ -1109,14 +1133,15 @@ export function apply(ctx) {
             addDiscoveredModel(el.dataset.discoverAdd)
           })
         })
-        const modelFilter = container.querySelector('[data-model-filter]')
-        if (modelFilter) {
+        const filterInput = container.querySelector('[data-model-filter]')
+        if (filterInput) {
+          filterInput.value = modelFilter
           const rows = [...container.querySelectorAll('[data-model-row], [data-discover-row]')]
           const countEl = container.querySelector('[data-model-filter-count]')
           const emptyEl = container.querySelector('[data-model-filter-empty]')
           const total = rows.length
           const applyFilter = () => {
-            const keyword = String(modelFilter.value || '').trim().toLowerCase()
+            const keyword = String(filterInput.value || '').trim().toLowerCase()
             let visible = 0
             for (const row of rows) {
               const hit = !keyword || String(row.dataset.searchText || '').includes(keyword)
@@ -1127,7 +1152,10 @@ export function apply(ctx) {
             if (countEl) countEl.textContent = keyword ? `${visible}/${total} 个` : `${total} 个`
             if (emptyEl) emptyEl.style.display = keyword && visible === 0 ? 'flex' : 'none'
           }
-          modelFilter.addEventListener('input', applyFilter)
+          filterInput.addEventListener('input', () => {
+            modelFilter = filterInput.value
+            applyFilter()
+          })
           applyFilter()
         }
         container.querySelectorAll('[data-active-model]').forEach(select => {

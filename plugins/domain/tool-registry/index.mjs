@@ -13,7 +13,7 @@
 import { sanitizeToolSchema } from '../../../src/util/tool-schema.mjs'
 
 export const name = 'tool-registry'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '工具注册表'
 export const description = '业务服务 · OpenAI function-calling 工具的注册、编目与执行调度。'
 export const author = '念风内核'
@@ -30,6 +30,37 @@ export function apply(ctx) {
   const events = ctx.inject('event-bus')
   /** name -> { name, definition, handler } */
   const tools = new Map()
+
+  /**
+   * scope 判定统一收敛：没有声明 scope 的工具始终可用；声明了 scope 但判定
+   * 抛错时按不可用处理，避免坏规则把“限制”悄悄失效。
+   * 只有调用方显式传入 context 时才参与过滤，旧调用 definitions() 保持全量
+   * 返回，兼容设置页 / 自检 / 测试等不关心渠道的读取场景。
+   */
+  const scopeAllows = (record, context) => {
+    if (typeof record?.scope !== 'function') return true
+    try {
+      return record.scope(context) !== false
+    } catch (err) {
+      ctx.logger.warn(`工具 ${record.name} 的作用域判定失败，已按不可用处理：${err?.message || err}`)
+      return false
+    }
+  }
+
+  /** 中心化插件启用范围：owner 为注册该工具的插件 id，无服务时不限制。 */
+  const pluginScopeAllows = (record, context) => {
+    if (!record?.owner || context === undefined || context === null) return true
+    try {
+      const scope = ctx.registry.get('plugin-scope')
+      if (typeof scope?.allows !== 'function') return true
+      return scope.allows(record.owner, context) !== false
+    } catch (err) {
+      ctx.logger.warn(`工具 ${record.name} 的插件启用范围判定失败，暂按可用处理：${err?.message || err}`)
+      return true
+    }
+  }
+
+  const allows = (record, context) => scopeAllows(record, context) && pluginScopeAllows(record, context)
 
   const toDefinition = (name, definition = {}) => {
     // 允许传 { description, parameters }、function 本体，或完整 { type, function } 定义
@@ -55,12 +86,15 @@ export function apply(ctx) {
      * @param {string} name
      * @param {{description?:string, parameters?:object, function?:object}} definition
      * @param {(args:object, context:object)=>any} handler
+     * @param {{scope?:(context?:object)=>boolean, owner?:string}} [options] scope 用于按角色 / 渠道动态过滤工具
      * @returns {Function} dispose
      */
-    register(name, definition, handler) {
+    register(name, definition, handler, options = {}) {
       if (tools.has(name)) throw new Error(`工具已注册：${name}`)
       if (typeof handler !== 'function') throw new Error(`工具「${name}」缺少执行函数`)
-      const record = { name, definition: toDefinition(name, definition), handler }
+      const scope = typeof options?.scope === 'function' ? options.scope : null
+      const owner = String(options?.owner || '').trim().replace(/^plugin:/, '')
+      const record = { name, definition: toDefinition(name, definition), handler, scope, owner }
       tools.set(name, record)
       events.emit('tool:registered', { name, description: record.definition.function.description })
       ctx.logger.debug(`工具已注册：${name}`)
@@ -83,8 +117,15 @@ export function apply(ctx) {
         parameters: record.definition.function.parameters,
       })),
 
-    /** 交给模型的 tools 数组（OpenAI / Ollama 兼容格式） */
-    definitions: () => [...tools.values()].map(record => structuredClone(record.definition)),
+    /**
+     * 交给模型的 tools 数组（OpenAI / Ollama 兼容格式）。
+     * 传入 context（conversationId / roleId / channelId）时按注册 scope 与
+     * 中心化「插件启用范围」过滤；不传 context 时保持旧行为，返回全部工具。
+     */
+    definitions: context =>
+      [...tools.values()]
+        .filter(record => context === undefined || allows(record, context))
+        .map(record => structuredClone(record.definition)),
 
     /**
      * 执行工具。参数可以是模型给的 JSON 字符串或已解析对象。
@@ -102,6 +143,9 @@ export function apply(ctx) {
         }
       }
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {}
+      if (!allows(record, context)) {
+        return { ok: false, code: 'TOOL_SCOPE_DENIED', error: `工具「${name}」未在当前角色 / 渠道启用。` }
+      }
       try {
         const result = await record.handler(parsed, context)
         return result === undefined ? { ok: true } : result

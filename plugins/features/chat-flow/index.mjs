@@ -22,7 +22,7 @@
  * chat-flow 自己不认识 OpenAI / Ollama / 任何具体工具实现，只编排服务。
  */
 export const name = 'chat-flow'
-export const version = '2.1.0'
+export const version = '2.2.0'
 export const displayName = '聊天流程'
 export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路，支持角色级主模型 / 备用模型。'
 export const author = '念风内核'
@@ -269,21 +269,46 @@ export function apply(ctx) {
     const conversationModel = conv.meta?.model
     if (conversationModel) options.model = conversationModel
     // 角色级备用模型：优先读角色会话上的配置；渠道会话通过 meta.roleId 回指角色。
-    // 'global' 跟随全局；'off' 不启用；其它值为指定备用模型。
+    // 兼容三种数据形态：
+    //   backupMode = 'global' 跟随全局；'off' 不启用；'custom' 使用 backupModels 列表；
+    //   旧数据没有 backupMode 时，按 backupModel 的 'global' / 'off' / 单个模型 key 处理。
     const roleConv = conv.meta?.roleId ? sessions.get(conv.meta.roleId) : null
-    const backupOwn = roleConv?.meta?.backupModel !== undefined ? roleConv.meta.backupModel : conv.meta?.backupModel
-    const backupModel = String(backupOwn || '').trim()
-    if (backupModel) options.backupModel = backupModel
+    const roleMeta = roleConv?.meta || {}
+    const backupOwnMeta =
+      roleMeta.backupMode !== undefined || roleMeta.backupModels !== undefined || roleMeta.backupModel !== undefined
+        ? roleMeta
+        : conv.meta || {}
+    const backupMode = String(backupOwnMeta.backupMode || '').trim()
+    const backupModels = Array.isArray(backupOwnMeta.backupModels) ? backupOwnMeta.backupModels : null
+    const backupModel = String(backupOwnMeta.backupModel || '').trim()
+    if (backupMode === 'custom' || (!backupMode && backupModels)) {
+      const list = []
+      const source = backupModels || (backupModel && backupModel !== 'global' && backupModel !== 'off' ? [backupModel] : [])
+      for (const value of source) {
+        const key = String(value || '').trim()
+        if (key && !list.includes(key)) list.push(key)
+      }
+      options.backupModels = list
+    } else if (backupMode === 'off' || (!backupMode && backupModel === 'off')) {
+      options.backupModel = 'off'
+    } else if (backupModel && backupModel !== 'global') {
+      options.backupModel = backupModel
+    }
     // 全局 temperature 是默认值：用户在模型列表里单独设置过 temperature 时，
     // 模型级参数优先，避免“模型参数页设置了却永远不生效”。
     options.preferModelParams = true
     return options
   }
 
-  const toolOptions = conv => {
+  const toolOptions = (conv, context = {}) => {
     const options = generationOptions(conv)
     if (toolsEnabled()) {
-      options.tools = tools.definitions()
+      options.tools = tools.definitions({
+        conversationId: conv.id,
+        roleId: conv.meta?.roleId || conv.id,
+        channelId: context.channelId || conv.meta?.channelId || `nova:web:${conv.id}`,
+        ...context,
+      })
       const choice = config.get('chat.toolChoice', 'required')
       if (choice === 'auto' || choice === 'required' || choice === 'none') options.toolChoice = choice
     }
@@ -690,7 +715,8 @@ export function apply(ctx) {
         channelId,
         currentMessageId: userMessage?.message_id || userMessage?.id || null,
       })
-      const options = toolOptions(conv)
+      const toolContext = { conversationId, roleId, channelId }
+      const options = toolOptions(conv, toolContext)
       if (api?.configured?.() && typeof api.supports === 'function' && !api.supports('tools') && !warnedLegacyBackend) {
         warnedLegacyBackend = true
         ctx.logger.warn('后端未上报 tools 能力（可能是未重启的旧进程），将按文本工具协议兼容运行')
@@ -718,7 +744,7 @@ export function apply(ctx) {
         config.get('chat.toolChoice', 'required') !== 'none'
       const replyToolDefinitions = () => {
         try {
-          return (tools.definitions?.() || []).filter(tool => STRICT_REPLY_TOOLS.has(tool?.function?.name || tool?.name))
+          return (tools.definitions?.(toolContext) || []).filter(tool => STRICT_REPLY_TOOLS.has(tool?.function?.name || tool?.name))
         } catch (_) {
           return []
         }

@@ -321,6 +321,8 @@ export function apply(ctx) {
       trustedConfirmIds: Array.isArray(channel.meta?.trustedUserIds) ? channel.meta.trustedUserIds : [],
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
+      backupMode: role?.meta?.backupMode ?? conv?.meta?.backupMode ?? 'global',
+      backupModels: role?.meta?.backupModels ?? conv?.meta?.backupModels ?? [],
       backupModel: role?.meta?.backupModel ?? conv?.meta?.backupModel ?? 'global',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
     }

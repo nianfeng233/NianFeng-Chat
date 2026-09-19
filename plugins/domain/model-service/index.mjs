@@ -9,7 +9,7 @@
  * chat-flow 只认这个服务，不认任何具体适配器。
  */
 export const name = 'model-service'
-export const version = '1.2.0'
+export const version = '1.3.0'
 export const displayName = '模型服务'
 export const description = '业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型，具体由适配器插件实现。'
 export const author = '念风内核'
@@ -50,16 +50,30 @@ export function apply(ctx) {
       const startedAt = Date.now()
       const elapsed = () => Date.now() - startedAt
       // 角色级备用模型：
-      //   'global'（默认）跟随全局失败转移设置；
-      //   'off' 显式不启用备用模型；
-      //   其它值 = 指定一个备用模型 key。
+      //   options.backupModels = [...] 有序列表（新角色编辑页），空数组表示不启用；
+      //   options.backupModel = 'global'（默认）跟随全局 / 'off' 不启用 / 单个模型 key（旧版）。
       // 角色编辑页的设置优先于全局设置。
+      const normalizeKeys = raw => {
+        const out = []
+        for (const item of Array.isArray(raw) ? raw : []) {
+          const key = String(item || '').trim()
+          if (key && !out.includes(key)) out.push(key)
+        }
+        return out
+      }
+      const backupList = Array.isArray(options.backupModels) ? normalizeKeys(options.backupModels) : null
       const backupSetting = String(options.backupModel || '').trim()
-      const backupMode = !backupSetting || backupSetting === 'global' ? 'global' : backupSetting === 'off' ? 'off' : 'custom'
+      const legacyBackupMode = !backupSetting || backupSetting === 'global' ? 'global' : backupSetting === 'off' ? 'off' : 'custom'
+      const backupMode = backupList ? (backupList.length ? 'list' : 'off') : legacyBackupMode
       const failoverEnabled =
-        backupMode === 'custom' ? true : backupMode === 'global' ? config.get('model.failoverEnabled', false) === true : false
+        backupMode === 'list' || backupMode === 'custom'
+          ? true
+          : backupMode === 'global'
+            ? config.get('model.failoverEnabled', false) === true
+            : false
       const configuredKeys = (() => {
         if (backupMode === 'off') return []
+        if (backupMode === 'list') return backupList
         if (backupMode === 'custom') return [backupSetting]
         const raw = config.get('model.failoverKeys', [])
         const list = Array.isArray(raw) ? raw : []
@@ -78,7 +92,8 @@ export function apply(ctx) {
       // failoverPasses = 备用列表循环几轮；旧版 failoverRetries 继续兼容读取。
       // 角色级指定备用模型时只尝试一轮，避免用户预期的“指定那个模型”变成反复重试。
       const passesRaw = config.get('model.failoverPasses', config.get('model.failoverRetries', 1))
-      const passes = backupMode === 'custom' ? 1 : Math.max(1, Math.min(3, Math.floor(Number(passesRaw) || 1)))
+      const passes =
+        backupMode === 'custom' || backupMode === 'list' ? 1 : Math.max(1, Math.min(3, Math.floor(Number(passesRaw) || 1)))
       const fallbackQueue = []
       if (failoverEnabled) {
         for (let pass = 0; pass < passes; pass++) {

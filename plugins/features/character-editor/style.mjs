@@ -33,6 +33,22 @@ export const CHARACTER_CSS = `
   .char-color{width:22px;height:22px;border-radius:7px;border:2px solid transparent;background:linear-gradient(135deg,var(--c1),var(--c2));cursor:pointer;padding:0;box-shadow:0 1px 3px rgba(0,0,0,.12)}
   .char-color.active{border-color:#fff;box-shadow:0 0 0 2px var(--accent),0 1px 3px rgba(0,0,0,.16)}
   .char-model{width:100%}
+  .char-backup-panel{display:flex;flex-direction:column;gap:7px;padding:8px;border:1px solid rgba(0,0,0,.07);border-radius:10px;background:rgba(0,0,0,.018)}
+  html[data-theme="dark"] .char-backup-panel{border-color:rgba(255,255,255,.09);background:rgba(255,255,255,.035)}
+  .char-backup-list{display:flex;flex-direction:column;gap:5px}
+  .char-backup-row{display:flex;align-items:center;gap:8px;padding:6px 7px;border-radius:8px;background:rgba(255,255,255,.78);border:1px solid rgba(0,0,0,.05)}
+  html[data-theme="dark"] .char-backup-row{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.08)}
+  .char-backup-order{flex:0 0 auto;width:18px;text-align:center;font-size:11px;color:var(--text-4)}
+  .char-backup-name{flex:1;min-width:0;font-size:12px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .char-backup-ops{display:inline-flex;align-items:center;gap:4px}
+  .char-backup-op{height:22px;min-width:24px;padding:0 6px;border:1px solid rgba(0,0,0,.08);border-radius:7px;background:transparent;color:var(--text-3);font:inherit;font-size:11px;cursor:pointer}
+  .char-backup-op:hover:not(:disabled){background:rgba(0,0,0,.05);color:var(--text)}
+  .char-backup-op:disabled{opacity:.4;cursor:not-allowed}
+  .char-backup-op.danger{color:#d9534f}
+  .char-backup-empty{font-size:11.5px;color:var(--text-3);padding:4px 2px}
+  .char-backup-add{display:flex;gap:6px;align-items:center}
+  .char-backup-add select{flex:1;min-width:0}
+  .char-backup-add-btn{flex:0 0 auto}
   .char-note{font-size:11px;line-height:1.6;color:var(--text-3);background:rgba(0,0,0,.025);border-radius:9px;padding:9px 11px}
   html[data-theme="dark"] .char-note{background:rgba(255,255,255,.05)}
   .char-foot{display:flex;justify-content:flex-end;gap:9px;padding:12px 18px 16px;border-top:1px solid rgba(0,0,0,.05)}

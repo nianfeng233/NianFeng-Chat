@@ -9,13 +9,14 @@
  * 新建会话时先填写「角色名 / 人格设定 / 使用模型 / 头像颜色」，
  * 会话头部「更多 → 编辑角色」可以随时再打开修改。
  *
- * 数据落在会话对象的 name / avatar / c1 / c2 / meta.persona / meta.model / meta.backupModel：
+ * 数据落在会话对象的 name / avatar / c1 / c2 / meta.persona / meta.model / meta.backupMode / meta.backupModels：
  *   - meta.persona 由 chat-flow 作为 system 段落注入模型上下文
  *   - meta.model 是 `${providerId}/${modelId}`，为空则跟随全局模型
- *   - meta.backupModel 是 'global'（跟随全局）/ 'off'（不启用）/ 指定模型 key
+ *   - meta.backupMode 是 'global'（跟随全局）/ 'off'（不启用）/ 'custom'（角色级列表）
+ *   - meta.backupModels 是角色级备用模型有序列表；同时写 meta.backupModel 兼容旧版读取
  */
 export const name = 'character-editor'
-export const version = '1.1.0'
+export const version = '1.2.0'
 export const displayName = '角色编辑'
 export const description = '功能插件 · 新建 / 编辑会话角色（人格、主模型、备用模型、头像）。'
 export const author = '念风内核'
@@ -55,6 +56,17 @@ export function apply(ctx) {
   let overlay = null
   let closeCurrent = null
 
+  const modelKeyOf = item => item?.key || `${item?.provider || ''}/${item?.id || ''}`.replace(/^\/+/, '')
+  const modelLabelOf = item => `${item?.name || item?.id || ''}（${item?.providerName || item?.provider || ''}）`
+  const normalizeBackupKeys = raw => {
+    const out = []
+    for (const value of Array.isArray(raw) ? raw : []) {
+      const key = String(value || '').trim()
+      if (key && !out.includes(key)) out.push(key)
+    }
+    return out
+  }
+
   const close = () => {
     closeCurrent?.()
     closeCurrent = null
@@ -70,14 +82,25 @@ export function apply(ctx) {
     let [c1, c2] = [source?.c1 || PALETTE[0][0], source?.c2 || PALETTE[0][1]]
     let avatarImage = meta.avatarImage || ''
     const modelList = registry.list()
-    const backupModel = String(meta.backupModel || 'global')
-    const backupModelList = modelList.slice()
-    if (
-      backupModel !== 'global' &&
-      backupModel !== 'off' &&
-      !backupModelList.some(item => (item.key || `${item.provider}/${item.id}`) === backupModel)
-    ) {
-      backupModelList.push({ key: backupModel, id: backupModel, name: `${backupModel}（当前不可用）`, provider: '', providerName: '' })
+    const modelByKey = new Map(modelList.map(item => [modelKeyOf(item), item]))
+    const legacyBackup = String(meta.backupModel || '').trim()
+    const hasBackupList = Array.isArray(meta.backupModels)
+    let backupMode = hasBackupList || String(meta.backupMode || '').trim() === 'custom'
+      ? 'custom'
+      : legacyBackup === 'off'
+        ? 'off'
+        : legacyBackup && legacyBackup !== 'global'
+          ? 'custom'
+          : 'global'
+    let backupModels = []
+    if (backupMode === 'custom') {
+      backupModels = normalizeBackupKeys(
+        hasBackupList
+          ? meta.backupModels
+          : legacyBackup && legacyBackup !== 'global' && legacyBackup !== 'off'
+            ? [legacyBackup]
+            : [],
+      )
     }
 
     overlay = document.createElement('div')
@@ -126,20 +149,22 @@ export function apply(ctx) {
                 .join('')}
             </select>
           </label>
-          <label class="char-field">
+          <div class="char-field">
             <span>备用模型 <em>主模型失败时自动切换；角色级设置优先于全局</em></span>
             <select class="setting-select char-backup" data-char-backup>
-              <option value="global" ${backupModel === 'global' ? 'selected' : ''}>跟随全局模型设置（默认）</option>
-              <option value="off" ${backupModel === 'off' ? 'selected' : ''}>不启用备用模型</option>
-              ${backupModelList
-                .map(item => {
-                  const key = item.key || `${item.provider}/${item.id}`
-                  const label = `${item.name || item.id}（${item.providerName || item.provider}）`
-                  return `<option value="${escapeHtml(key)}" ${backupModel === key ? 'selected' : ''}>${escapeHtml(label)}</option>`
-                })
-                .join('')}
+              <option value="global" ${backupMode === 'global' ? 'selected' : ''}>跟随全局模型设置（默认）</option>
+              <option value="off" ${backupMode === 'off' ? 'selected' : ''}>不启用备用模型</option>
+              <option value="custom" ${backupMode === 'custom' ? 'selected' : ''}>自定义备用模型列表</option>
             </select>
-          </label>
+            <div class="char-backup-panel" data-char-backup-panel>
+              <div class="char-backup-list" data-char-backup-list></div>
+              <div class="char-backup-add">
+                <select class="setting-select" data-char-backup-add></select>
+                <button type="button" class="outline-btn char-backup-add-btn" data-char-backup-add-btn>添加</button>
+              </div>
+            </div>
+            <div class="char-note char-backup-hint" data-char-backup-hint></div>
+          </div>
           <div class="char-note">人格与模型只保存在本机会话数据里；角色级备用模型优先于全局失败转移设置。</div>
         </div>
         <div class="char-foot">
@@ -173,6 +198,84 @@ export function apply(ctx) {
       }
     }
     const onName = () => syncPreview()
+
+    /* ---------------- 备用模型列表（与设置页同一套增删排序语义） ---------------- */
+    const backupPanel = overlay.querySelector('[data-char-backup-panel]')
+    const backupListHost = overlay.querySelector('[data-char-backup-list]')
+    const backupAddSelect = overlay.querySelector('[data-char-backup-add]')
+    const backupAddButton = overlay.querySelector('[data-char-backup-add-btn]')
+    const backupHint = overlay.querySelector('[data-char-backup-hint]')
+
+    const moveBackup = (from, to) => {
+      if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= backupModels.length || to >= backupModels.length) return
+      const [moved] = backupModels.splice(from, 1)
+      backupModels.splice(to, 0, moved)
+      renderBackupPanel()
+    }
+
+    const renderBackupPanel = () => {
+      const custom = backupSelect?.value === 'custom'
+      if (backupPanel) backupPanel.style.display = custom ? 'flex' : 'none'
+      if (backupHint) {
+        backupHint.textContent =
+          backupSelect?.value === 'off'
+            ? '主模型失败时不再自动切换，直接按错误处理。'
+            : backupSelect?.value === 'custom'
+              ? '按下面列表从上到下逐个尝试，每个模型只尝试一轮；可用 ↑ ↓ 调整顺序。'
+              : '跟随「设置 → 模型 → 备用模型列表」与列表循环轮数；如需角色单独配置，请选择“自定义备用模型列表”。'
+      }
+      if (!custom) return
+
+      if (backupListHost) {
+        const rows = backupModels
+          .map((key, index) => {
+            const item = modelByKey.get(key)
+            const label = item ? modelLabelOf(item) : `${key}（当前不可用）`
+            return `<div class="char-backup-row">
+              <span class="char-backup-order">${index + 1}</span>
+              <span class="char-backup-name" title="${escapeHtml(key)}">${escapeHtml(label)}</span>
+              <span class="char-backup-ops">
+                <button type="button" class="char-backup-op" data-backup-up="${index}" ${index === 0 ? 'disabled' : ''} title="上移">↑</button>
+                <button type="button" class="char-backup-op" data-backup-down="${index}" ${index === backupModels.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+                <button type="button" class="char-backup-op danger" data-backup-remove="${index}" title="移除">移除</button>
+              </span>
+            </div>`
+          })
+          .join('')
+        backupListHost.innerHTML =
+          rows || '<div class="char-backup-empty">还没有备用模型：从下方下拉框选择后点「添加」。</div>'
+        backupListHost.querySelectorAll('[data-backup-up]').forEach(button => {
+          button.addEventListener('click', () => moveBackup(Number(button.dataset.backupUp), Number(button.dataset.backupUp) - 1))
+        })
+        backupListHost.querySelectorAll('[data-backup-down]').forEach(button => {
+          button.addEventListener('click', () => moveBackup(Number(button.dataset.backupDown), Number(button.dataset.backupDown) + 1))
+        })
+        backupListHost.querySelectorAll('[data-backup-remove]').forEach(button => {
+          button.addEventListener('click', () => {
+            const index = Number(button.dataset.backupRemove)
+            if (index < 0 || index >= backupModels.length) return
+            backupModels.splice(index, 1)
+            renderBackupPanel()
+          })
+        })
+      }
+
+      const candidates = modelList.filter(item => !backupModels.includes(modelKeyOf(item)))
+      if (backupAddSelect) {
+        backupAddSelect.innerHTML = candidates.length
+          ? candidates.map(item => `<option value="${escapeHtml(modelKeyOf(item))}">${escapeHtml(modelLabelOf(item))}</option>`).join('')
+          : '<option value="">（没有可添加的模型）</option>'
+      }
+      if (backupAddButton) backupAddButton.disabled = !candidates.length
+    }
+
+    backupAddButton?.addEventListener('click', () => {
+      const key = String(backupAddSelect?.value || '').trim()
+      if (!key || backupModels.includes(key)) return
+      backupModels.push(key)
+      renderBackupPanel()
+    })
+    backupSelect?.addEventListener('change', renderBackupPanel)
 
     /* 头像图片：本机压缩成 128×128 后存进会话 meta.avatarImage */
     const pickAvatar = () => overlay.querySelector('[data-char-avatar-file]')?.click()
@@ -248,14 +351,28 @@ export function apply(ctx) {
       const name = String(nameInput.value || '').trim() || '新的角色'
       const persona = String(personaInput.value || '').trim()
       const model = modelSelect ? modelSelect.value : ''
-      const nextBackupModel = backupSelect ? backupSelect.value || 'global' : 'global'
+      const nextBackupMode = backupSelect ? backupSelect.value || 'global' : 'global'
+      const nextBackupModels = nextBackupMode === 'custom' ? normalizeBackupKeys(backupModels) : []
+      const nextBackupModel =
+        nextBackupMode === 'off' || (nextBackupMode === 'custom' && !nextBackupModels.length)
+          ? 'off'
+          : nextBackupMode === 'custom'
+            ? nextBackupModels[0]
+            : 'global'
+      const modelMeta = {
+        model,
+        backupMode: nextBackupMode,
+        backupModels: nextBackupModels,
+        // 兼容旧版本 / 旧服务端读取单一 backupModel 字段。
+        backupModel: nextBackupModel,
+      }
       if (editing) {
         sessions.update(conversation.id, {
           name,
           avatar: name.slice(0, 1),
           c1,
           c2,
-          meta: { ...(source?.meta || {}), persona, model, backupModel: nextBackupModel, avatarImage },
+          meta: { ...(source?.meta || {}), persona, ...modelMeta, avatarImage },
         })
         toast.success(`角色「${name}」已更新`)
       } else {
@@ -265,7 +382,7 @@ export function apply(ctx) {
           c1,
           c2,
           preview: persona ? `${persona.slice(0, 40)}` : '',
-          meta: { persona, model, backupModel: nextBackupModel, avatarImage },
+          meta: { persona, ...modelMeta, avatarImage },
         })
         sessions.activate(conv.id)
         toast.success(`已创建角色「${name}」，开始聊天吧`)
@@ -294,6 +411,7 @@ export function apply(ctx) {
     }
     setTimeout(() => nameInput?.focus(), 30)
     syncPreview()
+    renderBackupPanel()
   }
 
   const service = {

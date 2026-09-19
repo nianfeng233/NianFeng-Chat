@@ -708,23 +708,41 @@ export function apply(ctx, config = {}) {
     ).trim()
     return provider && model ? { provider, model } : null
   }
-  /** 群聊概括总开关 / 逐渠道关闭在服务端也做一次兜底，旧前端或其它调用方同样不可能绕过。 */
+  const isObjectValue = value => !!value && typeof value === 'object' && !Array.isArray(value)
+  const truthyFlag = value => value === true || value === 'true'
+  const channelIdVariants = channelId => {
+    const id = String(channelId || '').trim()
+    if (!id) return []
+    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+    return [...new Set([id, bare].filter(Boolean))]
+  }
+  const lookupChannelFlag = (map, channelId) => {
+    if (!isObjectValue(map)) return null
+    const variants = channelIdVariants(channelId)
+    if (!variants.length) return null
+    for (const key of variants) {
+      if (Object.prototype.hasOwnProperty.call(map, key)) return map[key]
+    }
+    for (const [key, value] of Object.entries(map)) {
+      if (variants.some(variant => key === variant || key.endsWith(`:${variant}`) || variant.endsWith(`:${key}`))) return value
+    }
+    return null
+  }
+
+  /**
+   * 群聊概括总开关 / 逐渠道显式开启在服务端也做一次兜底。
+   * 新语义：总开关开启后，只有 groupChannelSummaryEnabled.<channelId>=true 的渠道才会生成；
+   * 未显式开启的渠道默认不生成。旧 groupSummaryDisabled.<channelId> 继续兼容迁移期调用。
+   */
   const groupSummaryDisabledByPreference = channelId => {
     const prefs = memoryPreferences()
     if (prefs.groupSummaryEnabled === false) return true
-    const disabled = prefs.groupSummaryDisabled
-    if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return false
-    const isDisabledValue = value => value === true || value === 'true'
-    const id = String(channelId || '').trim()
-    if (!id) return false
-    // 设置页写裸渠道 id，chat-store 传进来的可能是带类型前缀的 id，两种键都要认。
-    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
-    if (isDisabledValue(disabled[id]) || (bare && isDisabledValue(disabled[bare]))) return true
-    for (const [key, value] of Object.entries(disabled)) {
-      if (!isDisabledValue(value)) continue
-      if (key === id || key === bare || key.endsWith(`:${id}`) || key.endsWith(`:${bare}`)) return true
-    }
-    return false
+    const enabled = lookupChannelFlag(prefs.groupChannelSummaryEnabled, channelId)
+    if (enabled !== null) return !truthyFlag(enabled)
+    const legacy = lookupChannelFlag(prefs.groupSummaryDisabled, channelId)
+    if (legacy !== null) return truthyFlag(legacy)
+    // 新语义默认逐渠道关闭：必须显式开启才会总结。
+    return true
   }
   const embeddingConfig = () => {
     const prefs = memoryPreferences()

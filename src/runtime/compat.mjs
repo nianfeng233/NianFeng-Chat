@@ -157,6 +157,19 @@ export function createCompat(app, ctx, { id, meta = {} } = {}) {
           return typeof value === 'function' ? value.bind(target) : value
         },
       })
+    } else if (name === 'tool-registry') {
+      facade = new Proxy(service, {
+        get(target, prop) {
+          if (prop === 'register') {
+            // 自动给工具打上注册者插件 id：中心化「插件启用范围」据此按角色 / 渠道过滤，
+            // 第三方插件无需改一行代码。
+            return (toolName, definition, handler, options = {}) =>
+              bindDisposable(target.register(toolName, definition, handler, { owner: overrides.id, ...options }))
+          }
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
     }
 
     lifecycleFacades.set(name, facade)

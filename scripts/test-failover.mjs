@@ -346,6 +346,57 @@ async function main() {
     )
   }
 
+  console.log('\n⑫ 角色级备用模型列表（backupModels）')
+  {
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onError }) => queueMicrotask(() => onError(new Error('backup-a down'))),
+        'p/backup-b': ({ onChunk, onDone }) => {
+          onChunk('role-list-ok')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a', 'p/backup-b'],
+      configValues: {
+        'model.failoverEnabled': false,
+        'model.failoverKeys': [],
+        'model.failoverPasses': 2,
+      },
+    })
+    const result = await harness.run({ model: 'p/primary', backupModels: ['p/backup-a', 'p/backup-b'] })
+    check(
+      '角色列表按顺序降级且只跑一轮（不受全局轮数 / 开关影响）',
+      result.done && JSON.stringify(harness.calls) === JSON.stringify(['p/primary', 'p/backup-a', 'p/backup-b']) && result.text === 'role-list-ok',
+      JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
+  console.log('\n⑬ 角色级空列表 = 不启用备用模型')
+  {
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onChunk, onDone }) => {
+          onChunk('不应该出现')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a'],
+      configValues: {
+        'model.failoverEnabled': true,
+        'model.failoverKeys': ['p/backup-a'],
+        'model.failoverPasses': 1,
+      },
+    })
+    const result = await harness.run({ model: 'p/primary', backupModels: [] })
+    check(
+      '角色列表为空时不降级',
+      JSON.stringify(harness.calls) === JSON.stringify(['p/primary']) && !result.done,
+      JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
   summarize()
 }
 

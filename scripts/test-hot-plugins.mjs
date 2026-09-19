@@ -139,7 +139,7 @@ async function main() {
     check('已删除插件从 records 移除', ['hot-alpha', 'hot-beta', 'hot-broken'].every(id => !app.get(id)))
     check('对应服务全部释放', !app.services.get('hot-alpha-service') && !app.services.get('hot-beta-service') && !app.services.get('hot-broken-service'))
 
-    console.log('\n⑦ 旧版插件依赖版本不匹配必须标红并阻止激活')
+    console.log('\n⑦ 依赖版本不匹配只标黄，仍按最佳努力加载')
     const legacyApi = await writePlugin(root, { id: 'hot-legacy-api', version: '1.0.0' })
     const needsV2 = await writePlugin(root, {
       id: 'hot-needs-v2',
@@ -152,25 +152,52 @@ async function main() {
       optionalDepends: { 'hot-legacy-api': '^2.0.0' },
     })
     await app.syncEntries([legacyApi, needsV2, optionalV2], state())
-    await wait(100)
+    await wait(120)
     const requiredRecord = app.list().find(record => record.id === 'hot-needs-v2')
     const optionalRecord = app.list().find(record => record.id === 'hot-optional-v2')
     check(
-      '必须依赖版本不匹配时插件不会激活',
-      requiredRecord?.status === 'inactive' && /版本|实际 1\.0\.0/.test(requiredRecord?.reason || ''),
+      '必须依赖版本不匹配时插件仍激活',
+      requiredRecord?.status === 'active',
       JSON.stringify({ status: requiredRecord?.status, reason: requiredRecord?.reason }),
     )
     check(
-      '必须依赖版本不匹配标记为 error',
-      requiredRecord?.dependencyHealth === 'error' &&
-        requiredRecord?.dependencyIssues?.some(item => item.required && item.status === 'version-mismatch' && item.severity === 'error'),
+      '必须依赖版本不匹配标记为 warning',
+      requiredRecord?.dependencyHealth === 'warning' &&
+        requiredRecord?.dependencyIssues?.some(item => item.required && item.status === 'version-mismatch' && item.severity === 'warning'),
       JSON.stringify(requiredRecord?.dependencyIssues),
+    )
+    check(
+      '版本不匹配的必须依赖在 selfCheck 中标黄',
+      app.selfCheck().some(issue => issue.id === 'hot-needs-v2' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
+      JSON.stringify(app.selfCheck().filter(issue => issue.id === 'hot-needs-v2')),
     )
     check(
       '可选依赖版本不匹配保持 warning，不阻止激活',
       optionalRecord?.status === 'active' && optionalRecord?.dependencyHealth === 'warning' &&
         optionalRecord?.dependencyIssues?.every(item => !item.required || item.severity !== 'error'),
       JSON.stringify({ status: optionalRecord?.status, health: optionalRecord?.dependencyHealth }),
+    )
+
+    console.log('\n⑦b apply 抛错的插件标红，不拖垮其它插件')
+    const applyBroken = await writePlugin(root, {
+      id: 'hot-apply-broken',
+      version: '1.0.0',
+      source: "throw new Error('boom-apply')",
+    })
+    await app.syncEntries([legacyApi, needsV2, optionalV2, applyBroken], state())
+    await wait(180)
+    check(
+      'apply 抛错插件明确标红并带原因',
+      app.get('hot-apply-broken')?.status === 'error' && /boom-apply/.test(app.get('hot-apply-broken')?.reason || ''),
+      `${app.get('hot-apply-broken')?.status} · ${app.get('hot-apply-broken')?.reason || ''}`,
+    )
+    check(
+      '坏插件不会阻止其它插件继续激活',
+      app.get('hot-legacy-api')?.status === 'active' && app.get('hot-needs-v2')?.status === 'active',
+      JSON.stringify({
+        legacy: app.get('hot-legacy-api')?.status,
+        needsV2: app.get('hot-needs-v2')?.status,
+      }),
     )
 
     console.log('\n⑧ ctx.effect(() => () => cleanup) 在热更新时必须执行旧实例清理')

@@ -6,13 +6,13 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 96 个插件，按目录名排序；真正的加载顺序由
+ * 共 98 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
   {
     "id": "napcat",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "NapCat",
     "description": "渠道插件 · NapCatQQ / OneBot 11：私聊、群聊、隐私、连接复用与群聊规则。",
     "author": "念风插件",
@@ -116,7 +116,7 @@ export const plugins = [
   },
   {
     "id": "wechat-clawbot",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "微信clawbot",
     "description": "渠道插件 · 微信 Clawbot 扫码接入、消息收发与 typing 状态。",
     "author": "念风插件",
@@ -408,7 +408,7 @@ export const plugins = [
   },
   {
     "id": "memory-store",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "长期记忆库",
     "description": "业务服务 · 每 10 轮概括、向量语义 + 关键词 + 时间混合检索。",
     "author": "念风内核",
@@ -512,7 +512,7 @@ export const plugins = [
   },
   {
     "id": "model-service",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "displayName": "模型服务",
     "description": "业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型，具体由适配器插件实现。",
     "author": "念风内核",
@@ -581,9 +581,44 @@ export const plugins = [
     "dir": "plugins/domain/plugin-manager"
   },
   {
-    "id": "search-service",
+    "id": "plugin-scope",
     "version": "1.0.0",
-    "displayName": "全局搜索",
+    "displayName": "插件启用范围",
+    "description": "业务服务 · 按角色 / 渠道统一管理外部插件的启用范围。",
+    "author": "念风内核",
+    "core": true,
+    "enabled": true,
+    "icon": "🎛️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "config": "^1.0.0",
+      "event-bus": "*",
+      "session-service": "^2.0.0",
+      "channel-registry": "^1.0.0"
+    },
+    "optionalDepends": {},
+    "inject": [
+      "config",
+      "event-bus",
+      "session-service",
+      "channel-registry"
+    ],
+    "provides": [
+      {
+        "name": "plugin-scope",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/domain/plugin-scope/index.mjs",
+    "dir": "plugins/domain/plugin-scope"
+  },
+  {
+    "id": "search-service",
+    "version": "1.0.1",
+    "displayName": "全局搜索服务",
     "description": "业务服务 · 跨会话 / 渠道 / 插件的全局搜索。",
     "author": "念风内核",
     "core": false,
@@ -649,7 +684,7 @@ export const plugins = [
   },
   {
     "id": "tool-registry",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "工具注册表",
     "description": "业务服务 · OpenAI function-calling 工具的注册、编目与执行调度。",
     "author": "念风内核",
@@ -901,7 +936,7 @@ export const plugins = [
   },
   {
     "id": "character-editor",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "displayName": "角色编辑",
     "description": "功能插件 · 新建 / 编辑会话角色（人格、主模型、备用模型、头像）。",
     "author": "念风内核",
@@ -934,7 +969,7 @@ export const plugins = [
   },
   {
     "id": "chat-flow",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "displayName": "聊天流程",
     "description": "业务功能 · 串联\"发送 → 存 → 工具循环 → 回显\"主链路，支持角色级主模型 / 备用模型。",
     "author": "念风内核",
@@ -1021,7 +1056,7 @@ export const plugins = [
   },
   {
     "id": "chat-tools",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "聊天工具集",
     "description": "业务功能 · read_messages / chat_send / send_document / read_document。",
     "author": "念风内核",
@@ -1202,7 +1237,7 @@ export const plugins = [
   },
   {
     "id": "config",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "displayName": "配置中心",
     "description": "基础服务 · 用户偏好持久化（本地 + 后端 preferences），支持点号路径与 watch。",
     "author": "念风内核",
@@ -2612,7 +2647,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-about",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "设置项 · 关于",
     "description": "设置页 · 版本与插件系统信息。",
     "author": "念风内核",
@@ -2868,7 +2903,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-model",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "displayName": "设置项 · 模型",
     "description": "设置页 · 内置模型开关与自定义提供商管理。",
     "author": "念风内核",
@@ -2980,8 +3015,38 @@ export const plugins = [
     "dir": "plugins/views/settings-item-notifications"
   },
   {
+    "id": "settings-item-plugin-scope",
+    "version": "1.0.0",
+    "displayName": "设置项 · 插件启用",
+    "description": "设置页 · 按角色 / 渠道控制外部插件的启用范围。",
+    "author": "念风内核",
+    "core": true,
+    "enabled": true,
+    "icon": "🎛️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "plugin-manager": "^1.0.0",
+      "plugin-scope": "^1.0.0",
+      "settings-container": "^1.0.0",
+      "toast-host": ">=1.0.0"
+    },
+    "optionalDepends": {},
+    "inject": [
+      "settings-container",
+      "plugin-manager",
+      "plugin-scope",
+      "toast"
+    ],
+    "provides": [],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/views/settings-item-plugin-scope/index.mjs",
+    "dir": "plugins/views/settings-item-plugin-scope"
+  },
+  {
     "id": "settings-item-plugins",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "displayName": "设置项 · 插件",
     "description": "设置页 · 插件自检、健康状态、启停与详情。",
     "author": "念风内核",
@@ -2994,6 +3059,7 @@ export const plugins = [
       "backend-client": ">=1.0.0",
       "modal-host": ">=1.0.0",
       "plugin-manager": "^1.0.0",
+      "plugin-scope": "^1.0.0",
       "settings-container": "^1.0.0",
       "toast-host": ">=1.0.0"
     },
@@ -3001,6 +3067,7 @@ export const plugins = [
     "inject": [
       "settings-container",
       "plugin-manager",
+      "plugin-scope",
       "toast",
       "modal",
       "api"

@@ -14,7 +14,7 @@
  *  - 禁用 / 启用 / 卸载（运行时生效，无需重启）
  */
 export const name = 'settings-item-plugins'
-export const version = '3.0.0'
+export const version = '3.1.0'
 export const displayName = '设置项 · 插件'
 export const description = '设置页 · 插件自检、健康状态、启停与详情。'
 export const author = '念风内核'
@@ -24,11 +24,12 @@ export const depends = {
   'backend-client': '>=1.0.0',
   'modal-host': '>=1.0.0',
   'plugin-manager': '^1.0.0',
+  'plugin-scope': '^1.0.0',
   'settings-container': '^1.0.0',
   'toast-host': '>=1.0.0',
 }
 export const optionalDepends = {}
-export const inject = ['settings-container', 'plugin-manager', 'toast', 'modal', 'api']
+export const inject = ['settings-container', 'plugin-manager', 'plugin-scope', 'toast', 'modal', 'api']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'
 import { useStyle } from '../../../src/util/style.mjs'
@@ -47,6 +48,7 @@ const STATUS_TAG = {
 export function apply(ctx) {
   const pages = ctx.inject('settings-container')
   const manager = ctx.inject('plugin-manager')
+  const scope = ctx.inject('plugin-scope')
   const toast = ctx.inject('toast')
   const modal = ctx.inject('modal')
 
@@ -54,6 +56,9 @@ export function apply(ctx) {
 
   let sortKey = 'status'
   let sortOrder = 'asc'
+  /** 本次页面会话里用户点了“稍后设置”的插件，避免反复弹选择框。 */
+  const scopePromptLater = new Set()
+  let scopePromptOpen = false
 
   pages.register({
     id: 'plugins',
@@ -305,6 +310,7 @@ export function apply(ctx) {
           }`
         bindActionButtons()
         loadPluginDirs()
+        ctx.setTimeout(() => promptNewPluginScopes(), 180)
       }
 
       /* 运行期热同步 / 其它设备启停 / 安装卸载后，当前打开的插件页会通过
@@ -384,6 +390,49 @@ export function apply(ctx) {
       }
       render()
       return result
+    }
+
+    /**
+     * 新安装的外部插件还没有启用范围配置时，弹一次“全体启用 / 全体关闭”。
+     * 后续可在「设置 → 插件启用」里按角色 / 渠道细调；点“稍后设置”则本次会话不再打扰。
+     */
+    const pendingScopePromptPlugins = () =>
+      manager
+        .list({ includeCore: false })
+        .filter(plugin => plugin.external && !plugin.removed && plugin.status === 'active' && !scope.has(plugin.id) && !scopePromptLater.has(plugin.id))
+
+    const promptNewPluginScopes = () => {
+      if (scopePromptOpen || ctx.__settingsSearchIndexing === true) return
+      const plugin = pendingScopePromptPlugins()[0]
+      if (!plugin) return
+      scopePromptOpen = true
+      const overlay = document.createElement('div')
+      overlay.className = 'plugin-scope-prompt-mask'
+      overlay.innerHTML = `
+        <div class="plugin-scope-prompt" role="dialog" aria-modal="true">
+          <div class="plugin-scope-prompt-title">新插件「${escapeHtml(plugin.name || plugin.id)}」</div>
+          <div class="plugin-scope-prompt-desc">请选择这个插件在所有角色下的默认启用策略。之后可以在「设置 → 插件启用」里按角色 / 渠道单独调整，这里只影响默认值。</div>
+          <div class="plugin-scope-prompt-actions">
+            <button class="plugin-action-btn primary" data-plugin-scope-pick="all">默认为全体角色启用</button>
+            <button class="plugin-action-btn" data-plugin-scope-pick="none">默认为全体角色关闭</button>
+            <button class="plugin-action-btn" data-plugin-scope-pick="later">稍后设置</button>
+          </div>
+        </div>`
+      document.body.appendChild(overlay)
+      const finish = pick => {
+        if (pick === 'all' || pick === 'none') {
+          scope.setDefault(plugin.id, pick)
+          toast.success(pick === 'all' ? `已默认对全体角色启用「${plugin.name || plugin.id}」` : `已默认对全体角色关闭「${plugin.name || plugin.id}」`)
+        } else {
+          scopePromptLater.add(plugin.id)
+        }
+        overlay.remove()
+        scopePromptOpen = false
+        ctx.setTimeout(promptNewPluginScopes, 120)
+      }
+      overlay.querySelectorAll('[data-plugin-scope-pick]').forEach(button => {
+        button.addEventListener('click', () => finish(String(button.dataset.pluginScopePick || 'later')))
+      })
     }
     const renderPluginDirs = () => {
       if (!dirsEl) return

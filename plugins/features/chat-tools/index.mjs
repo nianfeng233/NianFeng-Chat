@@ -16,7 +16,7 @@
  * 本插件只负责“把业务能力包装成工具”，权限、存储、上下文都是注入的独立服务。
  */
 export const name = 'chat-tools'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '聊天工具集'
 export const description = '业务功能 · read_messages / chat_send / send_document / read_document。'
 export const author = '念风内核'
@@ -1215,7 +1215,7 @@ export function apply(ctx) {
 
   const service = {
     name: 'chat-tools',
-    definitions: () => registry.definitions(),
+    definitions: context => registry.definitions(context),
     names: () => registry.names(),
     execute: (name, args, context) => registry.execute(name, args, context),
     /** 文本工具调用兼容解析（模型不支持原生 function calling 时使用） */

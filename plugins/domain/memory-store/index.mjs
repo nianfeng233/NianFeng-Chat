@@ -17,7 +17,7 @@
  * 浏览器 / 服务端代聊共用同一条链路，换设备也能读到同一份角色记忆。
  */
 export const name = 'memory-store'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '长期记忆库'
 export const description = '业务服务 · 每 10 轮概括、向量语义 + 关键词 + 时间混合检索。'
 export const author = '念风内核'
@@ -149,28 +149,66 @@ export function apply(ctx) {
     return Math.max(2, Math.min(MAX_WINDOW_MESSAGES, Math.floor(raw) || 20))
   }
 
+  const isObjectValue = value => !!value && typeof value === 'object' && !Array.isArray(value)
+  const truthyFlag = value => value === true || value === 'true'
+
+  /** 渠道注册表用的是裸 id，chat-store 里可能带类型前缀；两种形式都要能命中配置键。 */
+  const channelIdVariants = channel => {
+    const id = String(channel?.channelId || '').trim()
+    if (!id) return []
+    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
+    return [...new Set([id, bare].filter(Boolean))]
+  }
+
+  const lookupChannelFlag = (map, channel) => {
+    if (!isObjectValue(map)) return null
+    const variants = channelIdVariants(channel)
+    if (!variants.length) return null
+    for (const key of variants) {
+      if (Object.prototype.hasOwnProperty.call(map, key)) return map[key]
+    }
+    for (const [key, value] of Object.entries(map)) {
+      if (variants.some(variant => key === variant || key.endsWith(`:${variant}`) || variant.endsWith(`:${key}`))) return value
+    }
+    return null
+  }
+
   /**
-   * 群聊记忆总开关 + 逐渠道开关。
-   * - memory.groupSummaryEnabled=false：所有群聊都不再生成新记忆；
-   * - memory.groupSummaryDisabled.<channelId>=true：对应的那个群聊绝不总结（已存记忆仍可检索）。
+   * 旧版 groupSummaryDisabled 迁移到新版「显式开启」：
+   *   - 旧值 true（曾禁用）-> 新表 false / 不开启；
+   *   - 旧值 false（曾显式允许）-> 新表 true。
+   * 清空旧字段，避免设置页再次显示两套语义。
+   */
+  const migrateGroupSummaryFlags = () => {
+    const legacy = config.get('memory.groupSummaryDisabled', null)
+    if (!isObjectValue(legacy) || !Object.keys(legacy).length) return
+    const current = config.get('memory.groupChannelSummaryEnabled', {})
+    const next = isObjectValue(current) ? { ...current } : {}
+    for (const [key, value] of Object.entries(legacy)) {
+      const id = String(key || '').trim()
+      if (!id || Object.prototype.hasOwnProperty.call(next, id)) continue
+      next[id] = !truthyFlag(value)
+    }
+    config.set('memory.groupChannelSummaryEnabled', next)
+    config.set('memory.groupSummaryDisabled', {})
+  }
+  migrateGroupSummaryFlags()
+
+  /**
+   * 群聊记忆总开关 + 逐渠道显式开启：
+   *   - memory.groupSummaryEnabled=false：所有群聊都不再生成新记忆；
+   *   - memory.groupChannelSummaryEnabled.<channelId>=true：该群聊渠道生成新记忆；
+   *   - 未显式开启的群聊渠道默认不生成（已存记忆仍可检索）。
    */
   const groupSummaryAllowed = channel => {
     if (!channel || channel.group !== 'group') return true
     if (config.get('memory.groupSummaryEnabled', true) === false) return false
-    const disabled = config.get('memory.groupSummaryDisabled', {})
-    if (!disabled || typeof disabled !== 'object' || Array.isArray(disabled)) return true
-    const isDisabledValue = value => value === true || value === 'true'
-    const id = String(channel.channelId || '').trim()
-    if (!id) return true
-    // 设置页写的是渠道注册中心的裸 id（如 chmu8bgkkclmz），
-    // 而 chat-store 里的渠道 id 可能带类型前缀（如 qqbot:chmu8bgkkclmz），两种写法都要能命中。
-    const bare = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id
-    if (isDisabledValue(disabled[id]) || (bare && isDisabledValue(disabled[bare]))) return false
-    for (const [key, value] of Object.entries(disabled)) {
-      if (!isDisabledValue(value)) continue
-      if (key === id || key === bare || key.endsWith(`:${id}`) || key.endsWith(`:${bare}`)) return false
-    }
-    return true
+    const enabled = lookupChannelFlag(config.get('memory.groupChannelSummaryEnabled', {}), channel)
+    if (enabled !== null) return truthyFlag(enabled)
+    // 兼容迁移未跑到的旧配置：true = 曾禁用，false = 曾显式允许。
+    const legacy = lookupChannelFlag(config.get('memory.groupSummaryDisabled', {}), channel)
+    if (legacy !== null) return !truthyFlag(legacy)
+    return false
   }
 
   /** 群聊窗口按“最近 N 条消息”取值，包含未触发模型的静默上下文，和模型实际看到的一致。 */

@@ -22,7 +22,7 @@ import { NAPCAT_CSS } from './style.mjs'
 import { createOutboundPlanner } from './outbound.mjs'
 
 export const name = 'napcat'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = 'NapCat'
 export const description = '渠道插件 · NapCatQQ / OneBot 11：私聊、群聊、隐私、连接复用与群聊规则。'
 export const author = '念风插件'
@@ -453,6 +453,8 @@ export function apply(ctx) {
       napcatBotName: instance?.login?.nickname || '',
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
+      backupMode: role?.meta?.backupMode ?? conv?.meta?.backupMode ?? 'global',
+      backupModels: role?.meta?.backupModels ?? conv?.meta?.backupModels ?? [],
       backupModel: role?.meta?.backupModel ?? conv?.meta?.backupModel ?? 'global',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
     }

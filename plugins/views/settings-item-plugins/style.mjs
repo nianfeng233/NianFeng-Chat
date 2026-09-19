@@ -141,5 +141,11 @@ export const PLUGIN_PAGE_CSS = `
     .plugin-dirs .setting-control.plugin-dir-controls{flex:1 1 auto;width:100%;justify-content:flex-start;}
   }
   html[data-theme="dark"] .plugin-chip{background:rgba(255,255,255,.06);}
+  /* ---------- 新插件：默认启用范围选择 ---------- */
+  .plugin-scope-prompt-mask{position:fixed;inset:0;z-index:1160;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(18,28,38,.34);backdrop-filter:blur(2px);}
+  .plugin-scope-prompt{width:min(520px,94vw);padding:18px 20px;border-radius:16px;background:var(--panel-solid,#fff);box-shadow:0 24px 70px rgba(20,40,60,.3);display:flex;flex-direction:column;gap:12px;}
+  .plugin-scope-prompt-title{font-size:15px;font-weight:650;color:var(--text);}
+  .plugin-scope-prompt-desc{font-size:12.5px;line-height:1.7;color:var(--text-3);}
+  .plugin-scope-prompt-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;}
 "
 `

@@ -13,7 +13,7 @@
 import { flattenValues, getPath, hasPath, removePath, setPath } from '../../../src/shared/object-path.mjs'
 
 export const name = 'config'
-export const version = '1.2.0'
+export const version = '1.3.0'
 export const displayName = '配置中心'
 export const description = '基础服务 · 用户偏好持久化（本地 + 后端 preferences），支持点号路径与 watch。'
 export const author = '念风内核'
@@ -137,13 +137,15 @@ const DEFAULTS = {
   'chat.groupMessages': 20,
   'chat.readTokens': 1500,
   // 长期记忆（参考 MemMachine）：私聊 / 隐私每 summaryRounds 轮完整对话压缩成一段短概括并向量化；
-  // 群聊默认按最近 N 条消息窗口概括，可用 groupSummaryEnabled 总开关或
-  // groupSummaryDisabled.<channelId> 逐群关闭。存储与检索都在后端完成，
-  // 设置页「模型 → 记忆模型」选择向量 / 概括模型。
+  // 群聊默认按最近 N 条消息窗口概括：
+  //   - groupSummaryEnabled=false 时全部群聊都不生成；
+  //   - 总开关开启时，还必须给对应群聊渠道显式打开 groupChannelSummaryEnabled.<channelId>。
+  // 旧版 groupSummaryDisabled.<channelId> 会在 memory-store 启动时迁移。
   'memory.enabled': true,
   'memory.autoSummarize': true,
   'memory.summaryRounds': 10,
   'memory.groupSummaryEnabled': true,
+  'memory.groupChannelSummaryEnabled': {},
   'memory.embeddingProvider': '',
   'memory.embeddingModel': '',
   'memory.embeddingDimension': 0,

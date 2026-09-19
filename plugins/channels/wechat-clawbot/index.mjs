@@ -19,7 +19,7 @@ import { WECHAT_CLAWBOT_CSS } from './style.mjs'
 import { renderQrSvg, isQrImageContent } from './qrcode.mjs'
 
 export const name = 'wechat-clawbot'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = '微信clawbot'
 export const description = '渠道插件 · 微信 Clawbot 扫码接入、消息收发与 typing 状态。'
 export const author = '念风插件'
@@ -222,6 +222,8 @@ export function apply(ctx) {
       sensitiveConfirm: permissionsOf(channel).confirm !== false,
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
+      backupMode: role?.meta?.backupMode ?? conv?.meta?.backupMode ?? 'global',
+      backupModels: role?.meta?.backupModels ?? conv?.meta?.backupModels ?? [],
       backupModel: role?.meta?.backupModel ?? conv?.meta?.backupModel ?? 'global',
       avatarImage: role?.meta?.avatarImage ?? conv?.meta?.avatarImage ?? '',
     }

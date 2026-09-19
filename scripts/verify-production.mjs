@@ -94,6 +94,12 @@ async function main() {
   check('package.json 版本号有效', /^\d+\.\d+\.\d+/.test(pkg.version), pkg.version)
   check('package-lock.json 根版本与 package.json 一致', lock.version === pkg.version, `${lock.version} != ${pkg.version}`)
   check('桌面壳 Cargo.toml 版本与 package.json 一致', cargoVersion === pkg.version, `${cargoVersion} != ${pkg.version}`)
+  const runtimeVersion = (await readText('src', 'runtime', 'app.mjs')).match(/export const VERSION = '([^']+)'/)?.[1] || ''
+  check(
+    '关于页 / 运行时 VERSION 与 package.json 一致',
+    runtimeVersion === pkg.version,
+    `src/runtime/app.mjs = ${runtimeVersion}，package.json = ${pkg.version}`,
+  )
   const registrySync = await checkRegistryVersionSync()
   check(
     `插件源码 version 与 plugins/registry.mjs 同步（${registrySync.checked} 个插件）`,

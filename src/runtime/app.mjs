@@ -20,7 +20,7 @@ import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.0.3'
+export const VERSION = '2.2.0-preview.2'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -676,25 +676,33 @@ export class App {
 
     for (const record of this.orderedRecords()) {
       if (record.status !== STATUS.PENDING) continue
+      const skipIfUnavailable = () => {
+        const compatibilityIssues = this.compatibilityIssues(record)
+        if (compatibilityIssues.length) {
+          record.status = STATUS.INACTIVE
+          record.reason = `不兼容：${compatibilityIssues.join('、')}`
+          this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: compatibilityIssues })
+          return true
+        }
+        const hardIssues = this.hardDependsIssues(record)
+        if (hardIssues.length) {
+          record.status = STATUS.INACTIVE
+          record.reason = `依赖不满足：${hardIssues.join('、')}`
+          this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: hardIssues })
+          return true
+        }
+        return false
+      }
+      // 允许的条目元数据里已经有 depends / legacy 时先判掉，避免为了加载一个注定标红的插件
+      // 也去 import 模块、执行顶层代码，把启动过程拖慢甚至带崩。
+      if (skipIfUnavailable()) continue
       if (!record.module) {
         await this.importRecord(record, { force: record.reloadPending })
         record.reloadPending = false
       }
       if (record.status !== STATUS.PENDING) continue
-      const compatibilityIssues = this.compatibilityIssues(record)
-      if (compatibilityIssues.length) {
-        record.status = STATUS.INACTIVE
-        record.reason = `不兼容：${compatibilityIssues.join('、')}`
-        this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: compatibilityIssues })
-        continue
-      }
-      const hardIssues = this.hardDependsIssues(record)
-      if (hardIssues.length) {
-        record.status = STATUS.INACTIVE
-        record.reason = `依赖不满足：${hardIssues.join('、')}`
-        this.emit('plugin:inactive', { id: record.id, reason: record.reason, missing: hardIssues })
-        continue
-      }
+      // import 之后 manifest 才是最终版，再判一次（外部插件的 depends 可能只有模块里才写全）。
+      if (skipIfUnavailable()) continue
       await this.activate(record)
     }
 
@@ -836,7 +844,7 @@ export class App {
         record.reason = ''
         record.error = null
       } else if (state === FIBER.FAILED) {
-        const err = record.error || record.fiberError
+        const err = record.error || record.fiberError || record.fiber?._error
         record.conflict = err?.name === 'ConflictError'
         record.status = record.conflict ? STATUS.INACTIVE : STATUS.ERROR
         record.reason = record.reason || err?.message || '插件执行失败'
@@ -915,19 +923,19 @@ export class App {
     return [reason]
   }
 
-  /** 硬依赖问题：缺失 / 加载失败 / 未激活 / 版本不匹配；后几类都会阻止插件激活。 */
+  /**
+   * 真正阻止插件激活的硬依赖问题：缺失 / 已卸载 / 加载失败 / 未激活 / 被禁用。
+   * 版本不匹配不再阻止激活，只在插件页标黄提示（可能还能跑，但没按声明的范围来）。
+   */
   hardDependsIssues(record) {
     const issues = []
-    for (const [dep, range] of Object.entries(record.manifest.depends || {})) {
+    for (const [dep] of Object.entries(record.manifest.depends || {})) {
       const target = this.records.get(dep)
-      if (!target) issues.push(`${dep}${range ? '@' + range : ''}`)
+      if (!target) issues.push(`${dep}`)
       else if (target.manifest?.removed) issues.push(`${dep}(已卸载)`)
       else if (target.status === STATUS.ERROR) issues.push(`${dep}(加载失败)`)
       else if (target.status === STATUS.INACTIVE) issues.push(`${dep}(未激活)`)
       else if (target.status === STATUS.DISABLED) issues.push(`${dep}(已被禁用)`)
-      else if (range && range !== '*' && !satisfies(target.manifest.version, range)) {
-        issues.push(`${dep}@${range}(实际 ${target.manifest.version})`)
-      }
     }
     return [...new Set(issues)]
   }
@@ -935,8 +943,8 @@ export class App {
   /**
    * 结构化依赖报告（插件管理页直接消费）。
    * status: ok | pending | missing | version-mismatch | error | inactive | disabled | removed
-   * severity: ok | warning | error；必须依赖缺失 / 失效 / 版本不匹配为 error，
-   * 可选依赖任何异常都只做 warning。
+   * severity: ok | warning | error；必须依赖缺失 / 加载失败为 error；
+   * 版本不匹配只标黄（仍会尝试加载），可选依赖任何异常都只做 warning。
    */
   dependencyReportFor(record, kind = DEPENDENCY_KIND.REQUIRED) {
     if (!record) return []
@@ -987,8 +995,9 @@ export class App {
       } else if (range !== '*' && !satisfies(installedVersion, range)) {
         report.status = 'version-mismatch'
         report.satisfied = false
-        report.severity = optional ? 'warning' : 'error'
-        report.reason = `版本不匹配（需要 ${range}，实际 ${installedVersion}）`
+        // 版本不匹配只标黄：插件仍会加载，但没按声明的最佳版本组合运行。
+        report.severity = 'warning'
+        report.reason = `版本不匹配（声明 ${range}，实际 ${installedVersion}）；可能仍可运行`
       } else if (target.status === STATUS.PENDING) {
         report.status = STATUS.PENDING
         report.reason = '加载中'
@@ -1244,11 +1253,9 @@ export class App {
         if (item.status === 'version-mismatch') {
           push(
             id,
-            required ? 'error' : 'warning',
+            'warning',
             `${required ? '依赖版本不匹配' : '可选依赖版本不匹配'}：${item.name}@${item.range}（实际 ${item.installedVersion}）`,
-            required
-              ? '请在「设置 → 插件」中升级 / 降级依赖插件到声明范围内；旧版插件需要升级到与之匹配的版本'
-              : '可选依赖已安装但版本不同，相关扩展能力可能不可用；升级 / 降级后会自动恢复',
+            '已继续加载，但没有按声明的最佳版本组合运行；建议在「设置 → 插件」里升级 / 降级依赖插件到声明范围',
           )
           continue
         }
@@ -1395,25 +1402,18 @@ export class App {
 
   detectSemanticConflicts() {
     this.warnings = []
+    // 每次都从干净状态重算，避免热同步 / 反复 selfCheck 后同一条提示叠很多行。
+    for (const record of this.records.values()) record.warnings = []
     const warn = (record, message, severity = 'info') => {
       if (!record) return
-      record.warnings = record.warnings || []
+      if (record.warnings.some(item => item.message === message)) return
       record.warnings.push({ message, severity })
       this.warnings.push({ id: record.id, message, severity })
       this.emit('plugin:warning', { id: record.id, message, severity })
     }
 
-    const slots = this.services.get('slots')?.value
-    if (slots?.listSlots) {
-      for (const slot of slots.listSlots()) {
-        const owners = [...new Set((slot.entries || []).map(e => e.owner).filter(Boolean))]
-        if (owners.length >= 2 && !slot.meta?.silent) {
-          for (const owner of owners) {
-            warn(this.records.get(String(owner).replace(/^plugin:/, '')), `插槽「${slot.id}」已有 ${owners.length} 个插件挂载内容，可能拥挤`)
-          }
-        }
-      }
-    }
+    // 多个插件挂同一个 UI 插槽是设计允许的行为（例如 rail:bottom 同时放设置与搜索），
+    // 不再产出“可能拥挤”这类噪音提示。
 
     for (const record of this.records.values()) {
       if (record.status !== STATUS.ACTIVE) continue

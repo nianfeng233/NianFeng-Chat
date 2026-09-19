@@ -80,6 +80,28 @@ check(
   `${toolCountBefore} -> ${toolCountAfter}`,
 )
 
+// 中心「插件启用」回归：按角色关闭外部插件后，模型侧不应该再拿到它的工具定义。
+const scopeService = app.services.get('plugin-scope')?.value
+check('中心插件启用范围服务激活', !!scopeService?.allows && !!scopeService?.roleTree)
+const settingsService = app.services.get('settings-container')?.value
+check(
+  '设置页注册了「插件启用」',
+  !!settingsService?.list?.().some?.(page => page.id === 'plugin-scope'),
+  JSON.stringify(settingsService?.list?.().map?.(page => page.id) || []),
+)
+if (scopeService?.setRole && toolsService?.definitions) {
+  scopeService.setRole('github-hub', 'scope-role-off', 'none')
+  const hidden = toolsService
+    .definitions({ conversationId: 'scope-role-off', roleId: 'scope-role-off' })
+    .some(tool => String(tool?.function?.name || tool?.name).startsWith('github_'))
+  check('按角色关闭后不再下发 GitHub 工具定义', hidden === false, String(hidden))
+  scopeService.reset('github-hub')
+  const restored = toolsService
+    .definitions({ conversationId: 'scope-role-off', roleId: 'scope-role-off' })
+    .some(tool => String(tool?.function?.name || tool?.name).startsWith('github_'))
+  check('恢复默认后重新下发 GitHub 工具定义', restored === true, String(restored))
+}
+
 try {
   await app.cordis.stop?.()
 } catch (_) {

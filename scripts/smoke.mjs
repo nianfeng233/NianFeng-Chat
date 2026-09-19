@@ -420,8 +420,7 @@ async function main() {
   const removeRes = await fetch(`${backend.url}/api/plugins/external/smoke-external`, { method: 'DELETE' })
   check('外部插件删除接口生效', removeRes.ok, `HTTP ${removeRes.status}`)
 
-  // depends 版本不匹配：加载前标记未激活并进入 selfCheck 错误，而不是悄悄按旧版本启动。
-  // 旧版外部插件未升级时，必须依赖版本不匹配会直接阻止激活并标红。
+  // depends 版本不匹配：插件仍会加载，只在自检里标黄，提示没有按声明的最佳版本组合运行。
   const providerDir = join(externalRoot, 'views', 'smoke-dep-provider')
   const versionDir = join(externalRoot, 'views', 'smoke-version')
   await mkdir(providerDir, { recursive: true })
@@ -463,10 +462,46 @@ async function main() {
   const versionRecord = versionApp.records.get('smoke-version')
   const versionIssues = versionApp.selfCheck()
   check(
-    '插件 depends 版本不匹配被标记错误且不激活',
-    versionRecord?.status === 'inactive' &&
-      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'error' && issue.message.includes('版本不匹配')),
+    '插件 depends 版本不匹配仍激活并标黄',
+    versionRecord?.status === 'active' &&
+      versionIssues.some(issue => issue.id === 'smoke-version' && issue.severity === 'warning' && issue.message.includes('版本不匹配')),
     `${versionRecord?.status} · ${(versionIssues.find(issue => issue.id === 'smoke-version')?.message || '')}`,
+  )
+
+  // 严重运行错误：apply 抛错的插件必须标红并附原因，但不能拖垮其它插件 / 整个程序。
+  const brokenDir = join(externalRoot, 'views', 'smoke-apply-error')
+  await mkdir(brokenDir, { recursive: true })
+  const brokenFile = join(brokenDir, 'index.mjs')
+  await writeFile(
+    brokenFile,
+    [
+      "export const name = 'smoke-apply-error'",
+      "export const version = '1.0.0'",
+      "export const displayName = '启动抛错插件'",
+      "export function apply() { throw new Error('boom-apply-smoke') }",
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  const brokenApp = new App({ baseUrl: new URL('../', import.meta.url) })
+  await brokenApp.loadAll(
+    [
+      { id: 'smoke-dep-provider', version: '2.0.0', displayName: '版本依赖提供者', path: pathToFileURL(providerFile).href, external: true },
+      { id: 'smoke-apply-error', version: '1.0.0', displayName: '启动抛错插件', path: pathToFileURL(brokenFile).href, external: true },
+    ],
+    {},
+  )
+  const brokenRecord = brokenApp.records.get('smoke-apply-error')
+  const healthyRecord = brokenApp.records.get('smoke-dep-provider')
+  check(
+    'apply 抛错的插件被标红并带原因',
+    brokenRecord?.status === 'error' && /boom-apply-smoke/.test(brokenRecord?.reason || ''),
+    `${brokenRecord?.status} · ${brokenRecord?.reason || ''}`,
+  )
+  check(
+    '坏插件不会阻止其它插件继续加载',
+    healthyRecord?.status === 'active',
+    `${healthyRecord?.status} · ${healthyRecord?.reason || ''}`,
   )
 
   // 可选依赖：缺失时插件照常运行，只在自检里标黄；必须依赖缺失仍然标红。
@@ -1327,23 +1362,29 @@ async function main() {
     await sleep(20)
   }
   const memoryGroupToggle = smokeGroupChannel
-    ? document.querySelector(`.settings-content [data-config-toggle="memory.groupSummaryDisabled.${smokeGroupChannel.id}"]`)
+    ? document.querySelector(`.settings-content [data-config-toggle="memory.groupChannelSummaryEnabled.${smokeGroupChannel.id}"]`)
     : null
   check(
-    '群聊记忆分区能列出逐渠道关闭开关',
+    '群聊记忆分区能列出逐渠道开启开关',
     !smokeGroupChannel || !!memoryGroupToggle,
     String(modelContent?.querySelector('.setting-row')?.textContent || '').slice(0, 160),
   )
   if (memoryGroupToggle) {
+    check('逐渠道开关默认关闭（未显式开启不总结）', !memoryGroupToggle.classList.contains('on'))
+    memoryGroupToggle.click()
+    await sleep(20)
+    check(
+      '逐渠道开启开关可写回配置',
+      ctx.inject('config').get(`memory.groupChannelSummaryEnabled.${smokeGroupChannel.id}`) === true &&
+        ctx.inject('config').get('memory.groupChannelSummaryEnabled')?.[smokeGroupChannel.id] === true,
+    )
     memoryGroupToggle.click()
     await sleep(20)
     check(
       '逐渠道关闭开关可写回配置',
-      ctx.inject('config').get(`memory.groupSummaryDisabled.${smokeGroupChannel.id}`) === true &&
-        ctx.inject('config').get('memory.groupSummaryDisabled')?.[smokeGroupChannel.id] === true,
+      ctx.inject('config').get(`memory.groupChannelSummaryEnabled.${smokeGroupChannel.id}`) === false &&
+        ctx.inject('config').get('memory.groupChannelSummaryEnabled')?.[smokeGroupChannel.id] === false,
     )
-    memoryGroupToggle.click()
-    await sleep(20)
   }
   if (smokeGroupChannel) chatChannels.removeChannel('group', smokeGroupChannel.id)
   const reasoningSlider = document.querySelector('.settings-content [data-slider="reasoning"]')
@@ -1424,12 +1465,27 @@ async function main() {
   )
   const discoveredSmokeNew = document.querySelector('[data-discover-add="smoke-2"]')
   check('未安装的远端候选提供添加入口', !!discoveredSmokeNew && !discoveredSmokeNew.hasAttribute('disabled'))
+  // 搜索框输入后再添加：重渲染必须保留关键词，方便连续添加多款模型
+  const modelFilterInput = document.querySelector('.settings-content [data-model-filter]')
+  if (modelFilterInput) {
+    modelFilterInput.value = 'smoke-2'
+    modelFilterInput.dispatchEvent({ type: 'input' })
+  }
   discoveredSmokeNew?.click()
   const discoveredModelAdded = await waitFor(
     () => backend.ctx.settings.get().providers.smoke?.models?.some(model => model.id === 'smoke-2'),
     { timeout: 3000 },
   )
   check('点击「添加」后才写入模型列表', !!discoveredModelAdded)
+  const filterKeptAfterAdd = await waitFor(
+    () => document.querySelector('.settings-content [data-model-filter]')?.value === 'smoke-2',
+    { timeout: 3000 },
+  )
+  check(
+    '添加模型后模型搜索框内容保留',
+    !!filterKeptAfterAdd,
+    String(document.querySelector('.settings-content [data-model-filter]')?.value || ''),
+  )
 
   // 提供商启用开关（曾经是只有 data-toggle 没有绑定事件，点了没反应）
   document.querySelector('.settings-content [data-action="toggle-provider-enabled"]')?.click()
@@ -1683,6 +1739,15 @@ async function main() {
   check('记忆库标签默认激活并渲染工具栏', !!document.querySelector('[data-lib-memory-role]') && !!document.querySelector('[data-lib-memory-list]'))
   const libraryWrapper = document.querySelector('.main-view[data-view="library"]')
   const nowIso = new Date().toISOString()
+  // 群聊记忆新语义：逐渠道显式开启。冒烟里的两个群聊测试渠道先打开，后面的开关回归再单独控制。
+  await backend.ctx.settings.update({
+    preferences: {
+      memory: {
+        groupSummaryEnabled: true,
+        groupChannelSummaryEnabled: { 'napcat:smoke': true, 'napcat:smoke-window': true },
+      },
+    },
+  })
   const smokeMemory = await backend.ctx.memories.ingest({
     roleId: 'role-smoke-memory',
     memoryScope: 'normal',
@@ -1929,9 +1994,40 @@ async function main() {
       privateIngest?.summaries?.[0]?.message_count === 4,
     JSON.stringify(privateIngest).slice(0, 240),
   )
-  // 逐渠道关闭后，服务端也必须兜底拒绝写入（旧前端 / 其它调用方同样不能绕过）。
+  // 新语义：总开关开启时，群聊渠道也必须显式开启；未显式开启的默认不生成。
   await backend.ctx.settings.update({
-    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': true } } },
+    preferences: { memory: { groupSummaryEnabled: true, groupChannelSummaryEnabled: {} } },
+  })
+  const defaultGroupIngest = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-group-default',
+    roleName: '群聊默认关闭测试角色',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke-group-default',
+    conversationId: 'conv-smoke-group-default',
+    sourceGroup: 'group',
+    windowSize: 20,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: [
+      {
+        id: 'round:smoke-group-default-1',
+        channel_id: 'napcat:smoke-group-default',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-group-default-m1', seq: 1, role: 'user', content: '这个群没有单独开启记忆', sender_name: '群成员', timestamp: nowIso },
+          { message_id: 'smoke-group-default-m2', seq: 2, role: 'assistant', content: '不会写入。', sender_name: '群聊默认关闭测试角色', timestamp: nowIso },
+        ],
+      },
+    ],
+  })
+  check(
+    '未显式开启的群聊渠道默认不生成新记忆',
+    defaultGroupIngest?.ok === true && defaultGroupIngest?.skipped === true && defaultGroupIngest?.reason === 'group-summary-disabled',
+    JSON.stringify(defaultGroupIngest).slice(0, 240),
+  )
+  // 显式关闭（positive false）也必须被服务端兜底拒绝。
+  await backend.ctx.settings.update({
+    preferences: { memory: { groupChannelSummaryEnabled: { 'napcat:smoke-group-off': false } } },
   })
   const disabledGroupIngest = await backend.ctx.memories.ingest({
     roleId: 'role-smoke-group-off',
@@ -1956,15 +2052,15 @@ async function main() {
     ],
   })
   check(
-    '群聊渠道关闭记忆总结后绝不生成新记忆',
+    '群聊渠道显式关闭后绝不生成新记忆',
     disabledGroupIngest?.ok === true && disabledGroupIngest?.skipped === true && disabledGroupIngest?.reason === 'group-summary-disabled',
     JSON.stringify(disabledGroupIngest).slice(0, 240),
   )
   // 设置页写的是裸渠道 id，chat-store 传进来是带类型前缀的 id，必须同样命中。
   await backend.ctx.settings.update({
-    preferences: { memory: { groupSummaryDisabled: { 'smoke-group-bare': true } } },
+    preferences: { memory: { groupChannelSummaryEnabled: { 'smoke-group-bare': true } } },
   })
-  const bareDisabledIngest = await backend.ctx.memories.ingest({
+  const bareEnabledIngest = await backend.ctx.memories.ingest({
     roleId: 'role-smoke-group-bare',
     roleName: '群聊裸 id 测试角色',
     memoryScope: 'normal',
@@ -1980,19 +2076,50 @@ async function main() {
         channel_id: 'qqbot:smoke-group-bare',
         source_group: 'group',
         messages: [
-          { message_id: 'smoke-group-bare-m1', seq: 1, role: 'user', content: '裸 id 关闭也必须生效', sender_name: '群成员', timestamp: nowIso },
-          { message_id: 'smoke-group-bare-m2', seq: 2, role: 'assistant', content: '不会写入。', sender_name: '群聊裸 id 测试角色', timestamp: nowIso },
+          { message_id: 'smoke-group-bare-m1', seq: 1, role: 'user', content: '裸 id 开启也必须生效', sender_name: '群成员', timestamp: nowIso },
+          { message_id: 'smoke-group-bare-m2', seq: 2, role: 'assistant', content: '会写入。', sender_name: '群聊裸 id 测试角色', timestamp: nowIso },
         ],
       },
     ],
   })
   check(
-    '群聊逐渠道关闭兼容裸渠道 id 与带前缀 id',
-    bareDisabledIngest?.ok === true && bareDisabledIngest?.skipped === true && bareDisabledIngest?.reason === 'group-summary-disabled',
-    JSON.stringify(bareDisabledIngest).slice(0, 240),
+    '群聊逐渠道开启兼容裸渠道 id 与带前缀 id',
+    bareEnabledIngest?.ok === true && bareEnabledIngest?.reason !== 'group-summary-disabled',
+    JSON.stringify(bareEnabledIngest).slice(0, 240),
+  )
+  // 迁移期旧 groupSummaryDisabled=true 仍视为关闭，避免旧配置重启后意外开始总结。
+  await backend.ctx.settings.update({
+    preferences: { memory: { groupChannelSummaryEnabled: {}, groupSummaryDisabled: { 'napcat:smoke-group-legacy': true } } },
+  })
+  const legacyDisabledIngest = await backend.ctx.memories.ingest({
+    roleId: 'role-smoke-group-legacy',
+    roleName: '群聊旧配置测试角色',
+    memoryScope: 'normal',
+    channelId: 'napcat:smoke-group-legacy',
+    conversationId: 'conv-smoke-group-legacy',
+    sourceGroup: 'group',
+    windowSize: 20,
+    summaryProvider: 'smoke',
+    summaryModel: 'smoke-1',
+    rounds: [
+      {
+        id: 'round:smoke-group-legacy-1',
+        channel_id: 'napcat:smoke-group-legacy',
+        source_group: 'group',
+        messages: [
+          { message_id: 'smoke-group-legacy-m1', seq: 1, role: 'user', content: '旧配置关闭迁移期也不能写入', sender_name: '群成员', timestamp: nowIso },
+          { message_id: 'smoke-group-legacy-m2', seq: 2, role: 'assistant', content: '不会写入。', sender_name: '群聊旧配置测试角色', timestamp: nowIso },
+        ],
+      },
+    ],
+  })
+  check(
+    '旧版关闭配置在迁移期仍生效',
+    legacyDisabledIngest?.ok === true && legacyDisabledIngest?.skipped === true && legacyDisabledIngest?.reason === 'group-summary-disabled',
+    JSON.stringify(legacyDisabledIngest).slice(0, 240),
   )
   await backend.ctx.settings.update({
-    preferences: { memory: { groupSummaryDisabled: { 'napcat:smoke-group-off': false, 'smoke-group-bare': false } } },
+    preferences: { memory: { groupSummaryEnabled: true, groupChannelSummaryEnabled: {}, groupSummaryDisabled: {} } },
   })
   // 知识库扩展不在内置插件里，冒烟通过替换 api.get 的 /knowledge 返回，
   // 验证知识库标签页的列表 / 全文渲染逻辑；真实 bridge 路由由后端测试和

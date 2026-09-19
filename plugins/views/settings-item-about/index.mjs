@@ -8,7 +8,7 @@
  * 关于：版本、内核、插件与服务统计、调试面板入口。
  */
 export const name = 'settings-item-about'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '设置项 · 关于'
 export const description = '设置页 · 版本与插件系统信息。'
 export const author = '念风内核'
@@ -41,7 +41,7 @@ export function apply(ctx) {
     render(container) {
       const render = () => {
         const stats = manager.stats()
-        const appVersion = ctx.registry.get('app')?.version || '2.0.3'
+        const appVersion = ctx.registry.get('app')?.version || '未知'
         const uptime = Math.round((Date.now() - (ctx.registry.get('lifecycle')?.startedAt() || Date.now())) / 1000)
         container.innerHTML = page('关于', '念风：本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）。', `
           ${section('', `<div class="settings-card" style="padding:22px">
