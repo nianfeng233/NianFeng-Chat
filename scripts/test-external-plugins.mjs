@@ -100,6 +100,31 @@ if (scopeService?.setRole && toolsService?.definitions) {
     .definitions({ conversationId: 'scope-role-off', roleId: 'scope-role-off' })
     .some(tool => String(tool?.function?.name || tool?.name).startsWith('github_'))
   check('恢复默认后重新下发 GitHub 工具定义', restored === true, String(restored))
+
+  // 回归：通知投递只有 channelId，插件启用范围必须能从渠道 meta.roleId 反推出角色。
+  const channelService = app.services.get('channel-registry')?.value
+  const group = channelService?.groups?.('group')?.[0] || channelService?.addGroup?.('group', '范围测试')
+  const channel = group
+    ? channelService?.addChannel?.('group', group.id, {
+        type: 'napcat',
+        name: '范围测试渠道',
+        meta: { category: 'group', roleId: 'scope-role-only' },
+      })
+    : null
+  if (channel) {
+    scopeService.setDefault('github-hub', 'none')
+    scopeService.setRole('github-hub', 'scope-role-only', 'all')
+    const channelContextTools = toolsService
+      .definitions({ channelId: channel.id })
+      .some(tool => String(tool?.function?.name || tool?.name).startsWith('github_'))
+    check(
+      '只开启角色时，从渠道 id 上下文也能反推出角色并放行',
+      channelContextTools === true,
+      `channel=${channel.id} tools=${channelContextTools}`,
+    )
+    scopeService.reset('github-hub')
+    channelService.removeChannel?.('group', channel.id)
+  }
 }
 
 try {

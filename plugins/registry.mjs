@@ -582,7 +582,7 @@ export const plugins = [
   },
   {
     "id": "plugin-scope",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "插件启用范围",
     "description": "业务服务 · 按角色 / 渠道统一管理外部插件的启用范围。",
     "author": "念风内核",

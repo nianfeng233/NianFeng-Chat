@@ -16,7 +16,7 @@
  * 没有配置条目的插件视为「未限制」，保持旧版行为（默认启用）。
  */
 export const name = 'plugin-scope'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = '插件启用范围'
 export const description = '业务服务 · 按角色 / 渠道统一管理外部插件的启用范围。'
 export const author = '念风内核'
@@ -113,19 +113,27 @@ export function apply(ctx) {
     return separator >= 0 ? text.slice(separator + 1) : text
   }
 
-  /** 从工具 / 消息上下文解析出统一的 roleId / channelId。 */
+  /** 从工具 / 消息 / 渠道通知上下文解析出统一的 roleId / channelId。 */
   const resolveContext = (context = {}) => {
     const conversationId = asText(context?.conversationId)
     const conv = conversationId ? sessions.get(conversationId) : null
     let roleId = asText(context?.roleId)
     if (!roleId && conv) roleId = asText(conv.meta?.roleId || conv.id)
-    let channelId = channelIdFromStable(context?.channelId)
-    if (!channelId && conversationId) {
-      const found = findChannelByConversation(conversationId)
-      if (found) channelId = found.id
+
+    let channel = null
+    if (context?.channelId) channel = findChannelById(context.channelId)
+    if (!channel && conversationId) channel = findChannelByConversation(conversationId)
+    if (!channel && conv) {
+      const stable = channelIdFromStable(conv.meta?.channelId)
+      if (stable) channel = findChannelById(stable)
     }
-    if (!channelId && conv) {
-      channelId = channelIdFromStable(conv.meta?.channelId)
+    const channelId = channel?.id || channelIdFromStable(context?.channelId) || ''
+    // 渠道通知通常只带 channelId；这里补出它绑定的角色，否则“只开启了小风角色”
+    // 的配置会在投递通知时因为 context.roleId 为空而被误判成默认策略。
+    if (!roleId && channel?.meta?.roleId) roleId = asText(channel.meta.roleId)
+    if (!roleId && channelId) {
+      const fallback = findChannelById(channelId)
+      if (fallback?.meta?.roleId) roleId = asText(fallback.meta.roleId)
     }
     return { roleId: normalizeId(roleId), channelId }
   }
