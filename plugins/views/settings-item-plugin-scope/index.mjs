@@ -11,7 +11,7 @@
  * plugin-scope 服务统一解析；模型侧在未启用的角色 / 渠道里连工具定义都拿不到。
  */
 export const name = 'settings-item-plugin-scope'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '设置项 · 插件启用'
 export const description = '设置页 · 按角色 / 渠道控制外部插件的启用范围。'
 export const author = '念风内核'
@@ -37,11 +37,20 @@ const modeOptions = (current, labels) =>
     .map(([value, label]) => `<option value="${value}"${current === value ? ' selected' : ''}>${escapeHtml(label)}</option>`)
     .join('')
 
-const ROLE_MODES = { inherit: '跟随默认', all: '启用', none: '关闭' }
-const CHANNEL_MODES = { inherit: '跟随角色', all: '启用', none: '关闭' }
-
 const hasKey = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key)
-const modeOf = (object, key) => (hasKey(object, key) ? (object[key] === false ? 'none' : 'all') : 'inherit')
+
+/** 角色 / 渠道的“当前绝对状态”：有显式配置看显式配置，否则看默认策略。 */
+const roleEnabled = (entry, roleId) =>
+  hasKey(entry.roles, roleId) ? entry.roles[roleId] !== false : entry.default !== 'none'
+const channelEnabled = (entry, roleId, channelId) =>
+  hasKey(entry.channels, channelId) ? entry.channels[channelId] !== false : roleEnabled(entry, roleId)
+
+/** 业务级插件 = 外部插件 + 内置的功能 / 渠道 / 业务服务插件。 */
+const BUSINESS_DIR_PREFIXES = ['plugins/features/', 'plugins/channels/', 'plugins/domain/']
+const isBusinessPlugin = plugin => {
+  const dir = String(plugin?.dir || '').replace(/\\/g, '/')
+  return !!plugin && (plugin.external === true || BUSINESS_DIR_PREFIXES.some(prefix => dir.startsWith(prefix)))
+}
 
 export function apply(ctx) {
   const pages = ctx.inject('settings-container')
@@ -53,10 +62,10 @@ export function apply(ctx) {
 
   let selectedId = ''
 
-  const externalPlugins = () =>
+  const businessPlugins = () =>
     manager
       .list({ includeCore: false })
-      .filter(plugin => plugin.external && !plugin.removed)
+      .filter(plugin => !plugin.removed && isBusinessPlugin(plugin))
 
   const defaultSelect = (selected, current) =>
     `<select class="setting-select ps-select" data-ps-default="${escapeHtml(selected.id)}">${modeOptions(current, {
@@ -65,7 +74,7 @@ export function apply(ctx) {
     })}</select>`
 
   const roleRow = (selected, entry, role) => {
-    const current = modeOf(entry.roles, role.id)
+    const on = roleEnabled(entry, role.id)
     const channels = role.channels || []
     return `<div class="ps-role">
       <div class="ps-role-head">
@@ -74,19 +83,19 @@ export function apply(ctx) {
         ${channels.length ? `<span class="ps-dim">${channels.length} 个渠道</span>` : ''}
         <span class="ps-spacer"></span>
         <span class="ps-dim">${escapeHtml(role.id)}</span>
-        <select class="setting-select ps-select" data-ps-role="${escapeHtml(role.id)}">${modeOptions(current, ROLE_MODES)}</select>
+        <button class="switch ${on ? 'on' : ''}" data-ps-role-switch="${escapeHtml(role.id)}" type="button" role="switch" aria-checked="${on ? 'true' : 'false'}" title="${on ? '点击关闭该角色' : '点击开启该角色'}"></button>
       </div>
       ${
         channels.length
           ? `<div class="ps-channels">${channels
               .map(channel => {
-                const value = modeOf(entry.channels, channel.id)
+                const channelOn = channelEnabled(entry, role.id, channel.id)
                 return `<div class="ps-channel">
                   <span class="ps-channel-name">${escapeHtml(channel.name || channel.id)}</span>
                   <span class="ps-badge">${escapeHtml(channel.type || '渠道')}</span>
                   <span class="ps-dim">${escapeHtml(channel.groupName || channel.tab || '')}</span>
                   <span class="ps-spacer"></span>
-                  <select class="setting-select ps-select" data-ps-channel="${escapeHtml(channel.id)}">${modeOptions(value, CHANNEL_MODES)}</select>
+                  <button class="switch ${channelOn ? 'on' : ''}" data-ps-channel-switch="${escapeHtml(channel.id)}" type="button" role="switch" aria-checked="${channelOn ? 'true' : 'false'}" title="${channelOn ? '点击关闭该渠道' : '点击开启该渠道'}"></button>
                 </div>`
               })
               .join('')}</div>`
@@ -96,7 +105,7 @@ export function apply(ctx) {
   }
 
   const paint = container => {
-    const plugins = externalPlugins()
+    const plugins = businessPlugins()
     if (!selectedId || !plugins.some(plugin => plugin.id === selectedId)) selectedId = plugins[0]?.id || ''
     const current = plugins.find(plugin => plugin.id === selectedId) || null
     const tree = scope.roleTree()
@@ -104,7 +113,7 @@ export function apply(ctx) {
 
     container.innerHTML = page(
       '插件启用',
-      '以「角色 → 渠道」为粒度控制外部插件。模型在未启用的角色 / 渠道里连工具定义都拿不到；核心插件和本体内置功能不受影响。',
+      '按业务插件 → 角色直接开启 / 关闭，像开关一样一目了然；绑定的渠道默认跟随角色，也可以单独点开或关掉。核心插件和纯界面 / 设置项插件不在这里。',
       `
       ${
         plugins.length
@@ -116,7 +125,7 @@ export function apply(ctx) {
                 </button>`,
               )
               .join('')}</div>`
-          : '<div class="ps-empty">还没有外部插件。安装插件后，这里会按角色 / 渠道出现对应的启用开关。</div>'
+          : '<div class="ps-empty">还没有可控制的业务插件。安装外部插件，或启用内置功能插件后，这里会按角色出现对应的开关。</div>'
       }
       ${
         current
@@ -126,7 +135,7 @@ export function apply(ctx) {
                 `<div class="ps-default-row">
                   <div class="ps-default-main">
                     <div class="ps-default-name">默认策略</div>
-                    <div class="ps-help">没有单独设置的角色 / 渠道按这里执行。新安装插件会在安装时先问一次“全体启用 / 全体关闭”，之后也可以随时改。</div>
+                    <div class="ps-help">没点过开关的角色 / 渠道按这里执行；一旦点过某个角色或渠道的开关，就以你点的显式状态为准。新安装插件会先问一次“全体启用 / 全体关闭”。</div>
                   </div>
                   ${defaultSelect(current, entry.default)}
                 </div>
@@ -134,7 +143,7 @@ export function apply(ctx) {
                   <button class="outline-btn" data-ps-bulk="all" data-ps-plugin-bulk="${escapeHtml(current.id)}">全部角色启用</button>
                   <button class="outline-btn" data-ps-bulk="none" data-ps-plugin-bulk="${escapeHtml(current.id)}">全部角色关闭</button>
                   <button class="outline-btn" data-ps-bulk="reset" data-ps-plugin-bulk="${escapeHtml(current.id)}">恢复默认（不限制）</button>
-                  <span class="ps-dim">角色级设置会影响它绑定的所有渠道；给单个渠道单独设置后会覆盖角色设置。</span>
+                  <span class="ps-dim">打开角色开关后，渠道默认继承角色状态；单独点某个渠道开关会覆盖角色设置。</span>
                 </div>
                 <div class="ps-list">${tree.roles.map(role => roleRow(current, entry, role)).join('')}</div>
                 ${
@@ -143,12 +152,12 @@ export function apply(ctx) {
                         <div class="ps-role-head"><span class="ps-role-name">未绑定角色的渠道</span><span class="ps-help">只能按渠道单独控制</span></div>
                         <div class="ps-channels">${tree.unboundChannels
                           .map(channel => {
-                            const value = modeOf(entry.channels, channel.id)
+                            const channelOn = hasKey(entry.channels, channel.id) ? entry.channels[channel.id] !== false : entry.default !== 'none'
                             return `<div class="ps-channel">
                               <span class="ps-channel-name">${escapeHtml(channel.name || channel.id)}</span>
                               <span class="ps-badge">${escapeHtml(channel.type || '渠道')}</span>
                               <span class="ps-spacer"></span>
-                              <select class="setting-select ps-select" data-ps-channel="${escapeHtml(channel.id)}">${modeOptions(value, CHANNEL_MODES)}</select>
+                              <button class="switch ${channelOn ? 'on' : ''}" data-ps-channel-switch="${escapeHtml(channel.id)}" type="button" role="switch" aria-checked="${channelOn ? 'true' : 'false'}" title="${channelOn ? '点击关闭该渠道' : '点击开启该渠道'}"></button>
                             </div>`
                           })
                           .join('')}</div>
@@ -171,24 +180,15 @@ export function apply(ctx) {
     icon: '🎛️',
     order: 31,
     render(container) {
-      const currentPlugin = () => externalPlugins().find(item => item.id === selectedId) || null
+      const currentPlugin = () => businessPlugins().find(item => item.id === selectedId) || null
 
       const onChange = event => {
         const target = event.target
         const plugin = currentPlugin()
         if (!target || !plugin) return
-        if (target.hasAttribute?.('data-ps-default')) {
-          scope.setDefault(plugin.id, target.value)
-          toast.success('已更新默认策略')
-        } else if (target.hasAttribute?.('data-ps-role')) {
-          scope.setRole(plugin.id, target.dataset.psRole, target.value)
-          toast.success(`已更新角色「${target.dataset.psRole}」的启用状态`)
-        } else if (target.hasAttribute?.('data-ps-channel')) {
-          scope.setChannel(plugin.id, target.dataset.psChannel, target.value)
-          toast.success(`已更新渠道「${target.dataset.psChannel}」的启用状态`)
-        } else {
-          return
-        }
+        if (!target.hasAttribute?.('data-ps-default')) return
+        scope.setDefault(plugin.id, target.value)
+        toast.success('已更新默认策略')
         paint(container)
       }
 
@@ -202,10 +202,32 @@ export function apply(ctx) {
           }
           return
         }
+
+        const plugin = currentPlugin()
+        if (!plugin) return
+
+        const roleSwitch = event.target?.closest?.('[data-ps-role-switch]')
+        if (roleSwitch) {
+          const roleId = String(roleSwitch.dataset.psRoleSwitch || '')
+          const nextMode = roleSwitch.classList.contains('on') ? 'none' : 'all'
+          scope.setRole(plugin.id, roleId, nextMode)
+          toast.success(`${nextMode === 'all' ? '已开启' : '已关闭'}角色「${roleId}」的插件`)
+          paint(container)
+          return
+        }
+
+        const channelSwitch = event.target?.closest?.('[data-ps-channel-switch]')
+        if (channelSwitch) {
+          const channelId = String(channelSwitch.dataset.psChannelSwitch || '')
+          const nextMode = channelSwitch.classList.contains('on') ? 'none' : 'all'
+          scope.setChannel(plugin.id, channelId, nextMode)
+          toast.success(`${nextMode === 'all' ? '已开启' : '已关闭'}渠道「${channelId}」的插件`)
+          paint(container)
+          return
+        }
+
         const bulk = event.target?.closest?.('[data-ps-bulk]')
         if (bulk) {
-          const plugin = currentPlugin()
-          if (!plugin) return
           const mode = String(bulk.dataset.psBulk || '')
           const tree = scope.roleTree()
           if (mode === 'reset') {

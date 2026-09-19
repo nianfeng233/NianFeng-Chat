@@ -3016,7 +3016,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-plugin-scope",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "设置项 · 插件启用",
     "description": "设置页 · 按角色 / 渠道控制外部插件的启用范围。",
     "author": "念风内核",
