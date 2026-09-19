@@ -20,7 +20,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startBackend } from '../server/index.mjs'
-import { timingSafeStringEqual } from '../server/security-utils.mjs'
+import { createAccessTokenHash, verifyAccessTokenHash, timingSafeStringEqual, assertSafeProductionBinding } from '../server/security-utils.mjs'
+import { resolveStartupAccessToken } from '../server/access-token.mjs'
 import { requestPinned } from '../server/net-guard.mjs'
 import { createWebServer, webuiOriginList } from '../start.mjs'
 
@@ -283,6 +284,169 @@ async function main() {
       check('相同令牌返回 true', timingSafeStringEqual(token, token) === true)
       check('不同长度令牌返回 false', timingSafeStringEqual(token, `${token}x`) === false)
       check('同长度不同内容返回 false', timingSafeStringEqual(token, token.replace(/.$/, 'x')) === false)
+
+      console.log('\n⑤a 访问令牌只保存摘要')
+      const firstRunDir = join(TEMP, 'token-first-run')
+      const firstRun = await resolveStartupAccessToken(firstRunDir, { generateIfMissing: true, env: {} })
+      const firstRunConfig = await readFile(join(firstRunDir, 'config.json'), 'utf8').catch(() => '')
+      check(
+        '首次运行自动生成随机访问令牌',
+        firstRun.generated === true && firstRun.required === true && /^nf_[A-Za-z0-9_-]{20,}$/.test(firstRun.token),
+        JSON.stringify({ length: firstRun.token.length }),
+      )
+      check(
+        '首次运行生成的令牌不落明文、只落摘要',
+        firstRunConfig.includes('webuiTokenHash') && !firstRunConfig.includes(firstRun.token) && verifyAccessTokenHash(firstRun.token, firstRun.hash),
+        firstRunConfig.slice(0, 160),
+      )
+      const secondRun = await resolveStartupAccessToken(firstRunDir, { generateIfMissing: true, env: {} })
+      check(
+        '后续启动只读取摘要、不再生成新令牌',
+        secondRun.generated === false && secondRun.token === '' && secondRun.hash === firstRun.hash && secondRun.required === true,
+        JSON.stringify({ source: secondRun.source }),
+      )
+
+      const unsetDir = join(TEMP, 'token-existing-unset')
+      await mkdir(unsetDir, { recursive: true })
+      await writeFile(join(unsetDir, 'config.json'), JSON.stringify({ network: { webuiHost: '0.0.0.0' } }), 'utf8')
+      const unsetResolved = await resolveStartupAccessToken(unsetDir, { generateIfMissing: true, generateIfUnset: true, env: {} })
+      const unsetRaw = await readFile(join(unsetDir, 'config.json'), 'utf8')
+      check(
+        '已有配置但开放监听且从未设令牌时会强制补令牌',
+        unsetResolved.generated === true &&
+          unsetResolved.required === true &&
+          unsetResolved.firstRun === false &&
+          unsetRaw.includes('webuiTokenHash') &&
+          !unsetRaw.includes(unsetResolved.token),
+        JSON.stringify({ source: unsetResolved.source, firstRun: unsetResolved.firstRun }),
+      )
+
+      const legacyTokenDir = join(TEMP, 'token-legacy')
+      await mkdir(legacyTokenDir, { recursive: true })
+      const legacyPlain = 'legacy-plain-token-123456'
+      await writeFile(join(legacyTokenDir, 'config.json'), JSON.stringify({ network: { webuiToken: legacyPlain } }), 'utf8')
+      const legacyResolved = await resolveStartupAccessToken(legacyTokenDir, { generateIfMissing: true, env: {} })
+      const legacyRaw = await readFile(join(legacyTokenDir, 'config.json'), 'utf8')
+      check(
+        '旧版明文令牌启动时迁移为摘要并删除明文',
+        legacyResolved.migrated === true && legacyResolved.source === 'legacy' && !legacyRaw.includes(legacyPlain) && legacyRaw.includes('webuiTokenHash'),
+        legacyRaw.slice(0, 160),
+      )
+
+      const hashOne = createAccessTokenHash('unit-token-123456')
+      const hashTwo = createAccessTokenHash('unit-token-123456')
+      check(
+        '摘要随机加盐、校验通过且错误令牌不通过',
+        hashOne !== hashTwo &&
+          verifyAccessTokenHash('unit-token-123456', hashOne) &&
+          verifyAccessTokenHash('unit-token-123456', hashTwo) &&
+          !verifyAccessTokenHash('unit-token-654321', hashOne),
+        hashOne,
+      )
+
+      const newUserToken = ['nf-user', 'set-token', '123456789'].join('-')
+      const putTokenRes = await fetch(`${secureBackend.url}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-NianFeng-Token': token },
+        body: JSON.stringify({ network: { webuiToken: newUserToken } }),
+      })
+      const putTokenBody = await putTokenRes.json().catch(() => ({}))
+      const putTokenCookie = String(putTokenRes.headers.get('set-cookie') || '')
+      check(
+        '设置页保存访问令牌时不回显明文',
+        putTokenRes.status === 200 &&
+          !JSON.stringify(putTokenBody).includes(newUserToken) &&
+          putTokenBody.network?.webuiTokenSet === true &&
+          !('webuiTokenHash' in (putTokenBody.network || {})),
+        JSON.stringify({ status: putTokenRes.status, network: putTokenBody.network }),
+      )
+      check(
+        '保存新令牌时同步更新 HttpOnly Cookie',
+        putTokenCookie.includes(`nianfeng_token=${encodeURIComponent(newUserToken)}`) &&
+          putTokenCookie.includes('HttpOnly') &&
+          putTokenCookie.includes('SameSite=Lax'),
+        putTokenCookie.slice(0, 120),
+      )
+      const dataBRaw = await readFile(join(TEMP, 'data-b', 'config.json'), 'utf8')
+      check(
+        '运行中设置的新令牌同样只写摘要',
+        !dataBRaw.includes(newUserToken) && !dataBRaw.includes(token) && dataBRaw.includes('webuiTokenHash'),
+        dataBRaw.slice(0, 200),
+      )
+      const healthWithNewToken = await fetch(`${secureBackend.url}/api/health`, { headers: { 'X-NianFeng-Token': newUserToken } })
+      const healthNewJson = await healthWithNewToken.json().catch(() => ({}))
+      check(
+        '当前进程无需重启即可接受用户新设置的令牌',
+        healthWithNewToken.status === 200 && healthNewJson.authenticated === true && !!healthNewJson.dataDir,
+        JSON.stringify({ status: healthWithNewToken.status, authenticated: healthNewJson.authenticated }),
+      )
+      const shortTokenRes = await fetch(`${secureBackend.url}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-NianFeng-Token': newUserToken },
+        body: JSON.stringify({ network: { webuiToken: 'short' } }),
+      })
+      const dataBAfterShort = await readFile(join(TEMP, 'data-b', 'config.json'), 'utf8')
+      check(
+        '后端拒绝低于最小长度的访问令牌',
+        shortTokenRes.status === 400 && !dataBAfterShort.includes('"short"'),
+        JSON.stringify({ status: shortTokenRes.status, body: await shortTokenRes.text().catch(() => '') }),
+      )
+
+      console.log('\n⑤c 生产环境监听门禁')
+      const productionEnv = { NODE_ENV: 'production' }
+      let unsafeRejected = false
+      try {
+        assertSafeProductionBinding({ host: '0.0.0.0', accessTokenRequired: false, env: productionEnv })
+      } catch (_) {
+        unsafeRejected = true
+      }
+      check('生产模式开放监听且无访问令牌会被拒绝', unsafeRejected === true)
+      let localAllowed = true
+      try {
+        assertSafeProductionBinding({ host: '127.0.0.1', accessTokenRequired: false, env: productionEnv })
+      } catch (_) {
+        localAllowed = false
+      }
+      check('生产模式仅本机监听允许无令牌', localAllowed === true)
+      let tokenAllowed = true
+      try {
+        assertSafeProductionBinding({ host: '0.0.0.0', accessTokenRequired: true, env: productionEnv })
+      } catch (_) {
+        tokenAllowed = false
+      }
+      check('生产模式开放监听带访问令牌通过', tokenAllowed === true)
+      let forcedAllowed = true
+      try {
+        assertSafeProductionBinding({
+          host: '0.0.0.0',
+          accessTokenRequired: false,
+          env: { NODE_ENV: 'production', NIANFENG_ALLOW_INSECURE_LISTEN: '1' },
+        })
+      } catch (_) {
+        forcedAllowed = false
+      }
+      check('显式 NIANFENG_ALLOW_INSECURE_LISTEN=1 才会放行', forcedAllowed === true)
+
+      // 集成门禁：startBackend 本身也必须拒绝，避免调用方忘记在入口层处理。
+      const originalNodeEnv = process.env.NODE_ENV
+      let productionBackendStarted = null
+      let productionStartBlocked = false
+      try {
+        process.env.NODE_ENV = 'production'
+        productionBackendStarted = await startBackend({
+          port: 0,
+          host: '0.0.0.0',
+          dataDir: join(TEMP, 'token-prod-guard'),
+        })
+      } catch (_) {
+        productionStartBlocked = true
+      } finally {
+        if (originalNodeEnv === undefined) delete process.env.NODE_ENV
+        else process.env.NODE_ENV = originalNodeEnv
+        await productionBackendStarted?.close?.().catch(() => {})
+      }
+      check('startBackend 在生产模式无令牌开放监听时拒绝启动', productionStartBlocked === true && productionBackendStarted === null)
+
 
       console.log('\n⑤b 固定 DNS 请求客户端')
       const localFeed = http.createServer((req, res) => {

@@ -9,7 +9,7 @@
  * 代理是「每个提供商」单独的配置，入口在 设置 → 模型 → 提供商 → 高级配置。
  */
 export const name = 'settings-item-network'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const displayName = '设置项 · 网络'
 export const description = '设置页 · 后端连接状态与模型请求超时。'
 export const author = '念风内核'
@@ -92,7 +92,8 @@ export function apply(ctx) {
         const proxy = backendConfig?.network?.proxy || ''
         const webuiHost = backendConfig?.network?.webuiHost || '127.0.0.1'
         const webuiPort = Number(backendConfig?.network?.webuiPort) || 0
-        const webuiToken = backendConfig?.network?.webuiToken || ''
+        const webuiTokenSet = backendConfig?.network?.webuiTokenSet === true
+        const webuiTokenSource = String(backendConfig?.network?.webuiTokenSource || 'none')
         container.innerHTML = page('网络', '查看 WebUI ↔ 本地后端的真实连接状态，并配置模型请求的全局超时与代理。', `
           ${section('后端连接', card(
             row(
@@ -114,16 +115,21 @@ export function apply(ctx) {
               </select>`) +
             row('监听端口', 'Web 部署 / npm start 模式使用此端口；桌面版由宿主分配内部端口，此项在桌面版暂不生效',
               `<input class="setting-input" type="number" min="0" max="65535" style="width:110px" data-field="webui-port" value="${webuiPort}" />`) +
-            row('访问令牌', '非空时，浏览器必须带 token 才能访问：/?token=xxx；建议至少 12 位随机字符。留空不校验',
-              `<input class="setting-input" style="width:min(260px,100%)" data-field="webui-token" value="${escapeHtml(webuiToken)}" placeholder="例如 5f2c9a..." />`) +
-            row('保存访问配置', '保存后弹窗询问是否立即重启；不重启则下次启动生效',
+            row('访问令牌', `首次运行会在终端顶部打印随机令牌（只显示一次）；在这里可以设置你自己的值。后端只保存带随机盐的摘要，任何接口都不会回显明文。至少 12 位${webuiTokenSource === 'env' ? '；当前由 NIANFENG_WEBUI_TOKEN 环境变量临时覆盖' : ''}`,
+              `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <input class="setting-input" type="password" autocomplete="new-password" style="width:min(260px,100%)" data-field="webui-token" value="" placeholder="${webuiTokenSet ? '输入新令牌可覆盖当前值' : '输入 12 位以上随机字符'}" />
+                ${webuiTokenSet ? '<span class="text-good" title="只保存摘要，无法回显">● 已设置</span>' : '<span class="text-warn">○ 未设置</span>'}
+                ${webuiTokenSet && webuiTokenSource !== 'env' ? '<button class="outline-btn model-mini-btn model-danger-text" data-action="clear-webui-token">清除</button>' : ''}
+                ${webuiTokenSource === 'env' ? '<span class="setting-help">环境变量优先，当前进程内不能在此清除</span>' : ''}
+              </div>`) +
+            row('保存访问配置', '保存后弹窗询问是否立即重启；不重启则下次启动生效。保存新令牌时当前浏览器 Cookie 会同步更新',
               `<button class="outline-btn primary-soft" data-action="save-webui" ${online ? '' : 'disabled'}>保存</button>`) +
-            (webuiToken
-              ? row('访问示例', '把主机换成实际 IP；验证通过后会写入 Cookie',
+            (webuiTokenSet
+              ? row('访问示例', '把主机换成实际 IP；首次引导验证通过后会写入 HttpOnly Cookie',
                   `<span class="mono">http://${escapeHtml(webuiHost === '0.0.0.0' ? '你的主机IP' : webuiHost)}:${webuiPort || 5173}/?token=你的令牌</span>`)
               : '') +
-            (webuiHost === '0.0.0.0' && !webuiToken
-              ? '<div class="settings-note" style="background:rgba(198,91,91,.1);color:#c65b5b;margin:12px 14px 0">安全提示：当前监听 0.0.0.0 且访问令牌为空，同一局域网 / 公网可直接打开 WebUI。仅建议在可信网络临时使用；不强制设置令牌，但强烈建议填写。</div>'
+            (webuiHost === '0.0.0.0' && !webuiTokenSet
+              ? '<div class="settings-note" style="background:rgba(198,91,91,.1);color:#c65b5b;margin:12px 14px 0">安全提示：当前监听 0.0.0.0 且访问令牌为空，同一局域网 / 公网可直接打开 WebUI。仅建议在可信网络临时使用；正式部署必须设置访问令牌。</div>'
               : ''),
           ))}
           ${section('模型请求', card(
@@ -150,7 +156,21 @@ export function apply(ctx) {
         })
         container.querySelector('[data-action="save-network"]')?.addEventListener('click', saveNetwork)
         container.querySelector('[data-action="save-webui"]')?.addEventListener('click', saveWebui)
+        container.querySelector('[data-action="clear-webui-token"]')?.addEventListener('click', clearWebuiToken)
         container.querySelector('[data-action="save-backend-url"]')?.addEventListener('click', saveBackendUrl)
+      }
+
+      const promptRestartAfterWebuiSave = async () => {
+        const answer = await modal.confirm('立即重启念风？', '监听地址 / 端口 / 访问令牌需要重启后生效。\n\n点「确定」立即重启；点「取消」稍后手动重启（配置已保存）。')
+        if (!answer?.ok) {
+          toast.info('已保存，下次启动时生效')
+          return
+        }
+        if (window.windHost?.restart) {
+          window.windHost.restart()
+          return
+        }
+        await api.restartSystem()
       }
 
       const saveWebui = async () => {
@@ -162,27 +182,38 @@ export function apply(ctx) {
           toast.warn('端口需要在 0 - 65535 之间')
           return
         }
-        if (token && token.length < 8) {
-          toast.warn('访问令牌建议至少 8 位，避免被轻易猜到')
+        if (token && token.length < 12) {
+          toast.warn('访问令牌至少需要 12 位，避免被轻易猜到')
           return
         }
+        const patch = { network: { webuiHost: host, webuiPort: port } }
+        // 输入框留空 = 保持现有令牌不变；清空请走「清除」按钮。
+        if (token) patch.network.webuiToken = token
         saving = true
         try {
-          await api.setConfig({ network: { webuiHost: host, webuiPort: port, webuiToken: token } })
-          toast.success('WebUI 访问配置已保存')
+          await api.setConfig(patch)
+          toast.success(token ? '访问配置已保存；新令牌只写摘要，当前浏览器 Cookie 已同步' : 'WebUI 访问配置已保存')
           await load()
-          const answer = await modal.confirm('立即重启念风？', '监听地址 / 端口 / 访问令牌需要重启后生效。\n\n点「确定」立即重启；点「取消」稍后手动重启（配置已保存）。')
-          if (!answer?.ok) {
-            toast.info('已保存，下次启动时生效')
-            return
-          }
-          if (window.windHost?.restart) {
-            window.windHost.restart()
-            return
-          }
-          await api.restartSystem()
+          await promptRestartAfterWebuiSave()
         } catch (err) {
           toast.error(`保存失败：${err.message}`)
+        } finally {
+          saving = false
+        }
+      }
+
+      const clearWebuiToken = async () => {
+        if (saving) return
+        const answer = await modal.confirm('清除访问令牌？', '清除后任何能访问该地址的客户端都不再需要令牌。仅建议在完全可信的本机环境中这么做。')
+        if (!answer?.ok) return
+        saving = true
+        try {
+          await api.setConfig({ network: { webuiToken: '' } })
+          toast.success('访问令牌已清除')
+          await load()
+          await promptRestartAfterWebuiSave()
+        } catch (err) {
+          toast.error(`清除失败：${err.message}`)
         } finally {
           saving = false
         }

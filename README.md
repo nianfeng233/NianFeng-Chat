@@ -11,9 +11,9 @@
 插件目录和数据目录都可以放在外部；同一套源码可以构建 Web 部署版和 Windows 桌面版。
 
 > 说明：本 README 由 DeepSeek（AI）协助整理生成，项目实际功能与行为以代码和测试为准。
-> 项目状态：仍处于快速迭代期，`v1.x` 版本号只表示功能里程碑，不代表生产级成熟度或安全审计结论。默认仅监听本机；如需开放监听或部署到公网，请先阅读「安全与隐私」并设置访问令牌。
+> 项目状态：仍处于快速迭代期，`v2.x` 版本号只表示功能里程碑，不代表生产级成熟度或安全审计结论。默认仅监听本机；如需开放监听或部署到公网，请先阅读「安全与隐私」并设置访问令牌。生产环境建议执行 `npm run release:gate` 后再发布。
 
-- 当前版本：v2.0.3
+- 当前版本：v2.1.0
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
 - 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
 - 官方 QQ 群：1109357470
@@ -92,7 +92,7 @@
   权限声明和设置面板，升级 exe 不会删除外部插件目录。
 
 **可验证指标**：`npm run sync-plugins` 会重新扫描并校验上述依赖数据；
-`npm run test:deps` 有 208 项依赖结构 / 版本 / 服务映射断言；`npm run test:smoke` 有 313 项端到端断言。
+`npm run test:deps` 有 214 项依赖结构 / 版本 / 服务映射断言；`npm run test:smoke` 有 322 项端到端断言。
 所有数字都来自当前仓库代码。
 
 ## 功能与架构
@@ -106,7 +106,8 @@
 - **外部插件**：内置插件随版本发布；用户插件放在 `<数据目录>/plugins/` 或任意指定目录，
   重新扫描后加载；升级 exe 不删除外部插件目录。
 - **数据外置**：数据目录可在设置中切换；插件目录可独立指定。
-- **网络**：默认监听 `127.0.0.1`；可切换 `0.0.0.0` 并设置访问令牌，保存后按提示重启生效。
+- **网络**：默认监听 `127.0.0.1`；首次运行会在终端最上方打印随机访问令牌（只显示一次），
+  之后可在设置中换成自己的值。后端只保存盐化摘要，不保存明文；保存后按提示重启生效。
 - **通知**：系统通知、角色消息、其他通知三类；角色消息通知带角色头像与消息预览；
   支持内置音色与自定义提示音。
 - **微信clawbot 渠道**：内置第一个真实渠道插件；添加渠道时选择角色、分类（私聊/群聊/隐私）与权限，渠道详情点「接入」后用微信扫码。微信消息会进入所选角色的 clawbot 渠道并走念风完整模型链路，模型整轮调用彻底结束后才关闭微信 typing 状态。
@@ -154,7 +155,8 @@ Windows 用户也可以直接双击 `start.cmd`。
 - **数据**：数据目录可在设置中切换；空目录为全新实例，已有 `config.json` / `sessions.json`
   的目录会直接加载。
 - **插件**：内置插件目录只读；外部插件目录可指定、打开、重新扫描，也可删除外部插件。
-- **网络**：WebUI 监听地址、端口、访问令牌；非空令牌时首次访问
+- **网络**：WebUI 监听地址、端口、访问令牌。首次运行自动生成随机令牌并打印在终端最上方
+  （只打印一次）；之后可在「设置 → 网络」里设置自己的值。令牌只以随机盐摘要落盘，接口不会回显明文。首次访问
   `http://<主机>:<端口>/?token=你的令牌`，校验通过后会写入 HttpOnly Cookie 并自动把地址栏清理为无令牌 URL；后续 API 请求只认 Cookie 或 `X-NianFeng-Token` / `Authorization` 请求头，不再接受查询串令牌。
 - **通知**：角色消息通知、声音、后台活动、系统通知权限、提示音与测试按钮。
 - **运行日志**：侧栏独立日志视图（全宽主面板，不在设置页内）；级别为错误 / 警告 / 信息 / 调试图标的自由勾选，另可按分类 / 关键词筛选，支持暂停、清空、复制与导出；选择会自动记住，成功 HTTP 访问日志不再展示，并会标红超时和失败外发。
@@ -274,16 +276,17 @@ npm run build:desktop   # 只构建桌面版
 ## 测试
 
 ```bash
-npm test              # 模块检查 + 依赖标注 + 后端 API + 安全回归 + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
-npm run test:security # Origin / Host / CORS / health 脱敏 / SSRF / 令牌 / SSE 关闭（39 项）
-npm run test:deps     # 插件依赖字段 / 版本范围 / 无环 / inject 服务映射（208 项）
-npm run test:smoke    # 前端端到端（真实后端与 SSE，313 项）
+npm test              # 模块/风格检查 + 依赖标注 + 后端 API + 安全回归 + 备用模型 + Clawbot / QQ / NapCat + 前端端到端 + 对话 / 工具 / 厂商协议
+npm run test:security # Origin / Host / CORS / health 脱敏 / SSRF / 令牌摘要 / SSE 关闭
+npm run check:style   # .mjs 文件 LF / 无 Tab / 无行尾空白 / 以换行结尾
+npm run test:failover # 备用模型有序列表 / 逐个降级 / 循环轮数
+npm run test:deps     # 插件依赖字段 / 版本范围 / 无环 / inject 服务映射
+npm run test:smoke    # 前端端到端（真实后端与 SSE）
 npm run test:clawbot  # 微信 Clawbot 后端桥（本地 mock iLink 协议）
 npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 ```
 
-当前 `npm test` 全部通过；`scripts/smoke.mjs` 共 313 项通过，`scripts/test-dependencies.mjs` 共 208 项通过，
-`scripts/test-security.mjs` 共 39 项通过。
+当前 `npm test` 全部通过；各脚本的具体断言数量以本次 `npm test` 输出为准，不在文档里写死。
 
 ## 版本管理与发布
 
@@ -300,6 +303,8 @@ npm run test:napcat   # NapCat 后端桥（本地 reverse WebSocket mock）
 - 后端对 `Host` 与 `Origin` 双重校验，CORS 只按白名单精确回显，不再返回 `Access-Control-Allow-Origin: *`，可阻挡 DNS rebinding 与任意网页直读本机 API；
 - 配置了访问令牌时，`/api/health`、`/api/version` 只返回存活探针信息；数据目录、配置文件路径、提供商状态、会话统计等详情需要携带令牌（Cookie / 请求头）才能读取；
 - `?token=` 仅用于浏览器首次打开页面换取 HttpOnly Cookie，兑换后立即 302 到无令牌地址；API 不接受查询串令牌，令牌比较使用常量时间算法；
+- 访问令牌不落明文：首次运行随机令牌只打印在终端一次，磁盘只保存带随机盐的 `nf1$...` 摘要；旧版 `network.webuiToken` 明文在启动时自动迁移并删除，`.webui-token` 运行时文件不再写入；设置页也不回显现有令牌；后端强制新令牌至少 12 位；
+- `NODE_ENV=production` 且监听 `0.0.0.0` / `::` 时，若没有访问令牌会直接拒绝启动（仅 `NIANFENG_ALLOW_INSECURE_LISTEN=1` 可显式跳过），用于防止生产环境误暴露；
 - `/api/rss` 内置 SSRF 防护：拒绝 `localhost`、环回 / 私有 / 链路本地 / 云元数据地址与非 http(s) 协议，并逐跳校验 DNS 与重定向；
 - API Key 与敏感请求头以 AES-256-GCM 密文保存在本机数据目录的配置文件中；
 - 备份数据时需要连同同目录的 `.secret-key` 一起复制；

@@ -1,11 +1,6 @@
-<!--
-念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
-项目全称：念风 Chat（NianFeng-Chat）
-仓库：https://github.com/nianfeng233/NianFeng-Chat
--->
 # 依赖与许可证清单
 
-> 由 `scripts/audit-dependencies.mjs` 自动生成，生成时间：2026-09-11T18:32:07.521Z
+> 由 `scripts/audit-dependencies.mjs` 自动生成，生成时间：2026-09-19T05:49:36.539Z
 > 这份清单用于发布前的依赖审查；如升级依赖，请重新运行 `npm run audit:deps`。
 
 ## 结论摘要
@@ -41,7 +36,6 @@
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 |
 | `dpi` | 0.1.2 | Apache-2.0 AND MIT |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
-| `nianfeng-desktop` | 1.0.0 | MIT |
 | `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
 | `http` | 1.5.0 | MIT OR Apache-2.0 |
 | `icu_collections` | 2.3.0 | Unicode-3.0 |
@@ -58,6 +52,7 @@
 | `litemap` | 0.8.3 | Unicode-3.0 |
 | `lock_api` | 0.4.14 | MIT OR Apache-2.0 |
 | `log` | 0.4.33 | MIT OR Apache-2.0 |
+| `nianfeng-desktop` | 0.42.0 | MIT |
 | `num-conv` | 0.2.2 | MIT OR Apache-2.0 |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 |
 | `parking_lot_core` | 0.9.12 | MIT OR Apache-2.0 |

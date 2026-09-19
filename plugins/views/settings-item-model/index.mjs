@@ -21,7 +21,7 @@
  * 所有提供商配置都落在本机后端当前数据目录（默认 user_data/config.json），API Key 不回传浏览器。
  */
 export const name = 'settings-item-model'
-export const version = '4.0.0'
+export const version = '4.1.0'
 export const displayName = '设置项 · 模型'
 export const description = '设置页 · 内置模型开关与自定义提供商管理。'
 export const author = '念风内核'
@@ -57,6 +57,7 @@ import { icons } from '../../../src/util/icons.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { useStyle } from '../../../src/util/style.mjs'
 import { MODEL_PAGE_CSS } from './style.mjs'
+import { bindFailoverControls, buildFailoverBlockHtml } from './failover.mjs'
 
 const TYPE_LABELS = {
   openai: 'OpenAI 兼容',
@@ -759,7 +760,7 @@ export function apply(ctx) {
           </div>`
       }
 
-      const currentSection = () => {
+  const currentSection = () => {
         const activeKey = registry.activeKey()
         const modelList = registry.list()
         const modelControl = modelList.length
@@ -770,14 +771,7 @@ export function apply(ctx) {
               )
               .join('')}</select>`
           : '<span class="text-warn">● 没有可用模型</span>'
-        const failoverOptions =
-          `<option value="">（不启用备用模型）</option>` +
-          modelList
-            .map(
-              item =>
-                `<option value="${escapeHtml(item.key)}" ${String(config.get('model.failoverKey', '')) === item.key ? 'selected' : ''}>${escapeHtml(item.name || item.id)}（${escapeHtml(item.providerName || item.provider)}）</option>`,
-            )
-            .join('')
+        const failoverBlock = buildFailoverBlockHtml({ config, registry })
         const reasoningLevel = REASONING_LEVELS[reasoningIndexFor(config.get('chat.reasoningEffort', 'off'))]
         return section(
           '当前生效',
@@ -798,16 +792,16 @@ export function apply(ctx) {
                  <div class="setting-control">${temperatureSliderHtml()}</div>
                </div>` +
               row('流式输出', '实时显示模型输出', switchBtn('chat.stream', true)) +
-              row('失败自动切换模型', '当前模型在输出任何内容前报错时，自动尝试备用模型；已输出内容不重试，避免重复气泡', switchBtn('model.failoverEnabled', false)) +
               row(
-                '备用模型',
-                '失败时按此模型重试；建议选择另一个提供商或另一个可用模型',
-                `<select class="setting-select" data-config-select="model.failoverKey" style="min-width:230px">${failoverOptions}</select>`,
+                '失败自动切换模型',
+                '当前模型在输出任何内容前报错时，按备用模型列表顺序逐个尝试；已输出内容不重试，避免重复气泡',
+                switchBtn('model.failoverEnabled', false),
               ) +
+              failoverBlock +
               row(
-                '备用模型重试次数',
-                '0 = 不重试；默认 1 次',
-                `<input class="setting-input" type="number" min="0" max="3" style="width:70px" data-config-input="model.failoverRetries" value="${escapeHtml(String(config.get('model.failoverRetries', 1)))}" />`,
+                '备用列表循环轮数',
+                '1 = 每个备用模型依次尝试一次；2-3 = 整份列表都失败后从头再循环。',
+                `<input class="setting-input" type="number" min="1" max="3" style="width:70px" data-config-input="model.failoverPasses" value="${escapeHtml(String(config.get('model.failoverPasses', config.get('model.failoverRetries', 1))))}" />`,
               ),
           ),
         )
@@ -891,6 +885,16 @@ export function apply(ctx) {
         unbindConfig = bindConfigControls(container, ctx)
         bindActions()
         bindMemoryControls(container)
+        const refreshFailover = () => {
+          const host = container.querySelector('[data-failover-host]')
+          if (!host) {
+            render()
+            return
+          }
+          host.outerHTML = buildFailoverBlockHtml({ config, registry })
+          bindFailoverControls({ containerNode: container, config, refreshBlock: refreshFailover })
+        }
+        bindFailoverControls({ containerNode: container, config, refreshBlock: refreshFailover })
         bindCompactSliders()
       }
 

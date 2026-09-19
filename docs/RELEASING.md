@@ -93,8 +93,10 @@ release: 念风Chat v0.41.0
 # 0. 版本号：例如预览 v1.2.0-preview.1，确认后正式 v1.2.0
 #    修改 package.json 与 scripts/desktop-wrapper/Cargo.toml 为同一版本
 
-# 1. 全量测试（模块检查 / 后端 / 前端端到端 / 对话 / 工具 / 厂商协议）
+# 1. 生产静态门禁 + 全量测试（模块检查 / 后端 / 前端端到端 / 对话 / 工具 / 厂商协议）
+npm run verify:production
 npm test
+#    release:gate 可一次执行上面两步
 
 # 2. 生成两个发布版（Web 源码 + Web 部署 + 桌面源码 + 念风Chat.exe）
 npm run build:release
@@ -123,6 +125,9 @@ node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --
 * 邮箱、中国大陆手机号、身份证号；
 * `config.json`、`sessions.json`、`.secret-key`、`instance.json`、`.env` 等用户数据文件；
 * `node_modules`、`user_data`、`data`、`.tmp` 等禁止进入发布的内容。
+
+访问令牌专项：`npm run verify:production` 会额外检查源码不再写 `.webui-token` 明文文件、
+`config.json` 不残留 `webuiToken` 明文，以及备用模型已切换为 `model.failoverKeys` 有序列表。
 
 额外注意：
 
@@ -165,7 +170,8 @@ node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --
 
 ## 11. 发布 Checklist
 
-- [ ] 版本号已在 `package.json` 与 `Cargo.toml` 同步
+- [ ] 版本号已在 `package.json`、`package-lock.json` 与 `Cargo.toml` 同步
+- [ ] `npm run verify:production` 通过（访问令牌摘要化 / 备用模型列表 / 生产门禁）
 - [ ] `npm test` 全部通过
 - [ ] `npm run build:release` 成功，exe 可启动
 - [ ] `node scripts/prepare-publish.mjs` 安全扫描通过

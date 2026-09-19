@@ -507,7 +507,7 @@ export const plugins = [
   },
   {
     "id": "model-service",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "模型服务",
     "description": "业务服务 · 模型抽象接口与调度，具体由适配器插件实现。",
     "author": "念风内核",
@@ -1197,7 +1197,7 @@ export const plugins = [
   },
   {
     "id": "config",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "displayName": "配置中心",
     "description": "基础服务 · 用户偏好持久化（本地 + 后端 preferences），支持点号路径与 watch。",
     "author": "念风内核",
@@ -2863,7 +2863,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-model",
-    "version": "4.0.0",
+    "version": "4.1.0",
     "displayName": "设置项 · 模型",
     "description": "设置页 · 内置模型开关与自定义提供商管理。",
     "author": "念风内核",
@@ -2904,7 +2904,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-network",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "displayName": "设置项 · 网络",
     "description": "设置页 · 后端连接状态与模型请求超时。",
     "author": "念风内核",

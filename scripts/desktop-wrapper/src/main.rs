@@ -256,16 +256,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("本地服务启动超时（端口 {port}）").into());
     }
 
-    // 启用 WebUI 访问令牌后，Node 会把 token 写到 <HOME>/.webui-token；
-    // WebView 需要先带 ?token= 打开一次，以便后端下发访问 Cookie。
-    let webui_token = fs::read_to_string(base_dir.join(".webui-token"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let webview_url = match &webui_token {
-        Some(token) => format!("http://127.0.0.1:{port}/?token={}", encode_token(token)),
-        None => format!("http://127.0.0.1:{port}/"),
-    };
+    // 访问令牌不再以明文写入 .webui-token。哈希模式启动时 Node 也拿不到明文，
+    // WebView 直接打开本机地址；若后端要求令牌且没有可用 Cookie，会显示令牌输入页。
+    let webview_url = format!("http://127.0.0.1:{port}/");
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -454,19 +447,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     })
-}
-
-/// URL 查询参数编码：访问令牌可能包含需要转义的字符
-fn encode_token(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
 }
 
 fn prepare_base_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {

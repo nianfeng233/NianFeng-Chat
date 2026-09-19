@@ -13,6 +13,7 @@
  * 所有服务都跑在同一个 Node 进程里，Ctrl+C 一次性退出。
  */
 import { createServer } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
@@ -21,8 +22,21 @@ import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from './server/index.mjs'
 import { resolveDataDir } from './server/data-dir.mjs'
+import { resolveStartupAccessToken } from './server/access-token.mjs'
 import { ensurePortsFree } from './server/port-utils.mjs'
-import { timingSafeStringEqual, isInsideDir, isSensitiveStaticPath } from './server/security-utils.mjs'
+import { isInsideDir, isSensitiveStaticPath, assertSafeProductionBinding } from './server/security-utils.mjs'
+import {
+  ACCESS_TOKEN_COOKIE,
+  accessTokenCookie,
+  buildAuthPage,
+  createAccessTokenMatcher,
+  hostNameFromConfig,
+  isLoopbackHost,
+  isSecureRequest,
+  normalizeHostName,
+  parseCookieValue,
+} from './server/web-security.mjs'
+import { MIME } from './server/http-io.mjs'
 import { serveStaticFile, isVersionedRequest } from './server/static-cache.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
@@ -33,24 +47,6 @@ const autoOpen = !args.has('--no-open') && !/^(1|true|yes|on)$/i.test(noOpenEnv)
 // 服务端常驻代聊：默认开启（可用 --no-agent 或 NIANFENG_HEADLESS_AGENT=0 关闭）。
 // 它用 Node DOM 垫片运行与浏览器相同的前端插件，保证关掉 WebUI 后消息仍会被处理。
 const headlessAgentEnabled = !args.has('--no-agent') && !/^(0|false|no|off)$/i.test(String(process.env.NIANFENG_HEADLESS_AGENT || '').trim())
-
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.txt': 'text/plain; charset=utf-8',
-  '.md': 'text/markdown; charset=utf-8',
-}
 
 function banner(lines) {
   const width = Math.max(...lines.map(l => [...l].reduce((n, ch) => n + (ch.charCodeAt(0) > 255 ? 2 : 1), 0)))
@@ -89,25 +85,15 @@ function webuiOriginList(host, port) {
 }
 
 /** WebUI 静态服务器 + /api 反向代理（把 SSE 也原样透传） */
-function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', allowedHosts = [] }) {
-  const token = String(accessToken || '').trim()
+function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', getAccessTokenHash = null, host = '127.0.0.1', allowedHosts = [] }) {
+  const accessTokenVerifier = createAccessTokenMatcher({
+    plainToken: accessToken,
+    tokenHash: accessTokenHash,
+    getLatestHash: getAccessTokenHash,
+  })
+  const isTokenRequired = () => accessTokenVerifier.required()
+  const tokenMatches = candidate => accessTokenVerifier.matches(candidate)
   const wildcardBind = !host || host === '0.0.0.0' || host === '::'
-  const normalizeHostName = value => {
-    let name = String(value || '').trim().toLowerCase()
-    if (!name) return ''
-    name = name.replace(/^\[|\]$/g, '')
-    if (name === '::1') return '[::1]'
-    return name
-  }
-  const hostNameFromConfig = value => {
-    const raw = String(value || '').trim()
-    if (!raw) return ''
-    try {
-      return normalizeHostName(new URL(raw.includes('://') ? raw : `http://${raw}`).hostname)
-    } catch (_) {
-      return normalizeHostName(raw)
-    }
-  }
   const hostNames = new Set(
     ['localhost', '127.0.0.1', '[::1]', host, osHostname(), ...allowedHosts]
       .map(hostNameFromConfig)
@@ -152,40 +138,23 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
     }
   }
 
-  const cookieValue = (req, name) => {
-    for (const part of String(req.headers.cookie || '').split(';')) {
-      const [key, ...rest] = part.trim().split('=')
-      if (key !== name) continue
-      const raw = rest.join('=')
-      try {
-        return decodeURIComponent(raw)
-      } catch (_) {
-        return raw
-      }
-    }
-    return ''
-  }
-  const authPage = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>
-<body style="font-family:system-ui,sans-serif;padding:48px;color:#1a1d21"><h2>需要访问令牌</h2>
-<p>这是一个受保护的 WebUI。请在地址后加上访问令牌完成首次引导：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://&lt;主机&gt;:&lt;端口&gt;/?token=你的令牌</pre>
-<p>验证通过后会写入本机 Cookie，随后地址栏会自动去掉令牌。</p></body></html>`
-
   /**
    * 计算请求携带的令牌状态（纯计算，不写 Cookie / 不改响应）。
    * `?token=` 只允许用于首次 HTML 导航；API 只认 Cookie / 请求头。
    */
   const evaluateToken = (req, url, pathname) => {
     const queryToken = url.searchParams.get('token') || ''
-    const cookieToken = cookieValue(req, 'nianfeng_token')
-    const headerToken = String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-    const headerOk = !!headerToken && timingSafeStringEqual(headerToken, token)
-    const cookieOk = !!cookieToken && timingSafeStringEqual(cookieToken, token)
+    const cookieToken = parseCookieValue(req.headers.cookie, ACCESS_TOKEN_COOKIE)
+    const headerToken =
+      String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+    const headerOk = !!headerToken && tokenMatches(headerToken)
+    const cookieOk = !!cookieToken && tokenMatches(cookieToken)
     const canUseQuery =
       req.method === 'GET' &&
       !pathname.startsWith('/api/') &&
       !pathname.startsWith('/user-plugins/') &&
       String(req.headers.accept || '').includes('text/html')
-    const queryOk = canUseQuery && !!queryToken && timingSafeStringEqual(queryToken, token)
+    const queryOk = canUseQuery && !!queryToken && tokenMatches(queryToken)
     return { headerOk, cookieOk, queryOk, ok: headerOk || cookieOk || queryOk }
   }
 
@@ -193,6 +162,8 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('X-Frame-Options', 'DENY')
     res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
   }
 
   return createServer(async (req, res) => {
@@ -214,7 +185,7 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
     // 配了访问令牌且令牌有效时，Host 校验放行：
     // 远程部署（公网 IP / 域名 / 反向代理）通常不在默认的本机 Host 列表里，
     // 但令牌本身已是可信凭证；DNS rebinding 的恶意网页拿不到这个令牌。
-    const tokenState = token ? evaluateToken(req, url, pathname) : null
+    const tokenState = isTokenRequired() ? evaluateToken(req, url, pathname) : null
     if (!isAllowedHost(req.headers.host) && !tokenState?.ok) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
       return
@@ -226,11 +197,11 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
 
     // 访问令牌：health / version 放行（供宿主探活）。
     // ?token= 只允许用于首次 HTML 导航换 Cookie；API 请求只认 Cookie / 请求头。
-    if (token && req.method !== 'OPTIONS' && pathname !== '/api/health' && pathname !== '/api/version') {
+    if (isTokenRequired() && req.method !== 'OPTIONS' && pathname !== '/api/health' && pathname !== '/api/version') {
       const state = tokenState || evaluateToken(req, url, pathname)
       if (!state.ok) {
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-        res.end(authPage)
+        res.end(buildAuthPage())
         return
       }
       // 只要本次导航带的是有效 ?token=，就跳转到去掉令牌的干净地址：
@@ -239,7 +210,8 @@ function createWebServer({ backendPort, accessToken = '', host = '127.0.0.1', al
         const clean = new URL(req.url, 'http://localhost')
         clean.searchParams.delete('token')
         res.writeHead(302, {
-          'Set-Cookie': `nianfeng_token=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+          // 写入用户本次提交的明文令牌；Cookie 本身即后续凭证。
+          'Set-Cookie': accessTokenCookie(url.searchParams.get('token') || '', { secure: isSecureRequest(req) }),
           Location: `${clean.pathname || '/'}${clean.search}`,
           'Cache-Control': 'no-store',
           'Referrer-Policy': 'no-referrer',
@@ -366,8 +338,39 @@ async function main() {
   }
   const webuiHost = String(process.env.WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
   const webPort = Number(process.env.WEB_PORT || network.webuiPort || process.env.PORT || (singlePort ? 5173 : 5173))
-  const accessToken = String(network.webuiToken || '').trim()
   const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
+  const externalBind = !isLoopbackHost(webuiHost)
+  // 访问令牌：首次运行生成随机值并只打印一次；后续只认 config.json 里的摘要。
+  // 如果监听的是非本机地址但历史上一直没设过令牌，也必须补一个随机令牌，
+  // 否则公网 IP / 局域网可以直接打开控制台。桌面壳没有可见终端，跳过自动生成，
+  // 避免 WebView 拿不到明文而白屏；桌面版开放监听请自行设置令牌。
+  const access = await resolveStartupAccessToken(paths.dataDir, {
+    generateIfMissing: !homeEnv,
+    generateIfUnset: !homeEnv && externalBind,
+  })
+  const accessToken = access.token
+  const accessTokenHash = access.hash
+  // 服务端代聊 Worker 与后端同进程启动，不知道摘要对应的明文；
+  // 用只在内存里存在的随机 internal secret 给它开一条受控通道，绝不落盘。
+  const agentInternalSecret = randomBytes(32).toString('base64url')
+  // 生产环境门禁：NODE_ENV=production 且监听 0.0.0.0/:: 时必须已有访问令牌。
+  assertSafeProductionBinding({ host: webuiHost, accessTokenRequired: access.required })
+
+  if (access.generated) {
+    banner([
+      access.firstRun
+        ? '首次运行 · 随机访问令牌（只显示这一次，请立即复制）'
+        : '检测到开放监听但未配置令牌 · 已自动生成访问令牌（只显示这一次，请立即复制）',
+      access.token,
+      '后续可在「设置 → 网络」里改成自己的访问令牌（后端只保存摘要，不保存明文）',
+    ])
+  } else if (access.migrated) {
+    console.log('  访问令牌已从旧版明文迁移为盐化摘要，明文已从配置文件移除。')
+  } else if (access.required && !accessToken) {
+    console.log('  访问令牌已启用（配置中只有摘要）：浏览器没有有效 Cookie 时会显示令牌输入页。')
+  } else if (!access.required && externalBind) {
+    console.warn('  警告：当前监听非本机地址且未配置访问令牌；建议到「设置 → 网络」设置访问令牌后再开放访问。')
+  }
 
   banner(singlePort ? ['念风chat · 单端口模式', '后端同时托管 WebUI 与 API'] : ['念风chat · 开发模式', '后端 + WebUI 一起启动'])
 
@@ -505,6 +508,7 @@ async function main() {
         workerData: {
           backendUrl: `${backend.url}/api`,
           accessToken,
+          internalSecret: agentInternalSecret,
         },
       })
       agentWorker = worker
@@ -581,8 +585,9 @@ async function main() {
   }
 
   /**
-   * 桌面壳 / 部署宿主依赖 HOME/.webui-port 与 .webui-token 导航。
-   * 现在 start.mjs 也负责写这两个文件，保证 exe 走与网页版完全相同的启动链路。
+   * 桌面壳 / 部署宿主依赖 HOME/.webui-port 做导航。
+   * 访问令牌明文不再写文件；旧版本遗留的 .webui-token 会在这里清理掉，
+   * 避免升级后还在磁盘上留明文。
    */
   const writeRuntimeHints = async actualPort => {
     if (!homeEnv || !(Number(actualPort) > 0)) return
@@ -590,10 +595,9 @@ async function main() {
       const dir = resolve(homeEnv)
       await mkdir(dir, { recursive: true })
       await writeFile(join(dir, '.webui-port'), String(actualPort), 'utf8')
-      if (accessToken) await writeFile(join(dir, '.webui-token'), accessToken, 'utf8')
-      else await rm(join(dir, '.webui-token'), { force: true })
+      await rm(join(dir, '.webui-token'), { force: true })
     } catch (err) {
-      console.warn(`写入运行时端口 / 令牌文件失败：${err?.message || err}`)
+      console.warn(`写入运行时端口文件 / 清理旧令牌文件失败：${err?.message || err}`)
     }
   }
   backend = await startBackend({
@@ -602,6 +606,8 @@ async function main() {
     dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     staticDir: singlePort ? '.' : null,
     accessToken,
+    accessTokenHash,
+    internalAgentSecret: agentInternalSecret,
     onRestart: restart,
     onPluginsChanged: payload => reloadHeadlessAgent(payload?.action),
     // 开发模式下 WebUI 与 API 不同端口，需把 WebUI 的 Origin 显式放行给后端；
@@ -615,6 +621,15 @@ async function main() {
     web = createWebServer({
       backendPort: backend.port,
       accessToken,
+      accessTokenHash,
+      getAccessTokenHash: () => {
+        try {
+          if (typeof backend.ctx.settings.accessTokenHash === 'function') return backend.ctx.settings.accessTokenHash()
+          return backend.ctx.settings.get().network.webuiTokenHash || ''
+        } catch (_) {
+          return ''
+        }
+      },
       host: webuiHost,
       allowedHosts: [
         ...String(process.env.NIANFENG_ALLOWED_HOSTS || '')
@@ -634,7 +649,9 @@ async function main() {
       web.listen(webPort, webuiHost, resolve)
     })
     await writeRuntimeHints(webPort)
-    webUrl = `http://${webuiHost === '0.0.0.0' ? '127.0.0.1' : webuiHost}:${webPort}` + (accessToken ? '/?token=你的访问令牌' : '')
+    // 明文只存在于内存：生成 / 环境变量 / 旧配置迁移时可以带 token 自动登录；
+    // 哈希模式没有明文，靠浏览器已有 Cookie，失效时走令牌输入页。
+    webUrl = `http://${webuiHost === '0.0.0.0' ? '127.0.0.1' : webuiHost}:${webPort}` + (accessToken ? `/?token=${encodeURIComponent(accessToken)}` : '')
   }
 
   banner([

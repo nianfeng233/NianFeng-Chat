@@ -13,29 +13,26 @@ import { stat } from 'node:fs/promises'
 import { extname, join, resolve } from 'node:path'
 import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { timingSafeStringEqual, isInsideDir, isSensitiveStaticPath } from '../security-utils.mjs'
+import {
+  ACCESS_TOKEN_AGENT_HEADER,
+  ACCESS_TOKEN_COOKIE,
+  ACCESS_TOKEN_HEADER,
+  ACCESS_TOKEN_INTERNAL_HEADER,
+  accessTokenCookie,
+  buildAuthPage,
+  clearAccessTokenCookie,
+  createAccessTokenMatcher,
+  hostNameFromConfig,
+  isSecureRequest,
+  normalizeHostName,
+  parseCookieValue,
+} from '../web-security.mjs'
 import { fetchPublicText } from '../net-guard.mjs'
+import { MIME, readBody, sendError, sendJson } from '../http-io.mjs'
 import { serveStaticFile, isVersionedRequest } from '../static-cache.mjs'
 
 export const name = 'http'
 export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry']
-
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.txt': 'text/plain; charset=utf-8',
-  '.md': 'text/markdown; charset=utf-8',
-}
 
 export function apply(ctx, config = {}) {
   const settings = ctx.settings
@@ -68,6 +65,27 @@ export function apply(ctx, config = {}) {
   const host = config.host ?? '127.0.0.1'
   const staticDir = config.staticDir ? resolve(config.staticDir) : null
   const accessToken = String(config.accessToken || '').trim()
+  const accessTokenHash = String(config.accessTokenHash || '').trim()
+  /** 服务端代聊 Worker 的内部通道：只存在于同进程的内存随机串，不写配置。 */
+  const internalAgentSecret = String(config.internalAgentSecret || '').trim()
+  const internalAgentMatches = candidate => !!internalAgentSecret && timingSafeStringEqual(candidate, internalAgentSecret)
+  /** 读取设置页刚保存的最新摘要：让运行中更换的令牌无需等待重启即可生效。 */
+  const latestAccessTokenHash = () => {
+    try {
+      if (typeof settings.accessTokenHash === 'function') return String(settings.accessTokenHash() || '').trim()
+      return String(settings.get()?.network?.webuiTokenHash || '').trim()
+    } catch (_) {
+      return ''
+    }
+  }
+  const accessTokenVerifier = createAccessTokenMatcher({
+    plainToken: accessToken,
+    tokenHash: accessTokenHash,
+    getLatestHash: latestAccessTokenHash,
+  })
+  /** 是否需要校验访问令牌：启动时有令牌，或本进程运行期间用户刚设置了令牌。 */
+  const isAccessTokenRequired = () => accessTokenVerifier.required()
+  const accessTokenMatches = candidate => accessTokenVerifier.matches(candidate)
   const onRestart = typeof config.onRestart === 'function' ? config.onRestart : null
   const startedAt = Date.now()
   const requestLog = []
@@ -77,26 +95,6 @@ export function apply(ctx, config = {}) {
   const originList = Array.isArray(config.allowedOrigins) ? config.allowedOrigins : []
   const extraHostList = Array.isArray(config.allowedHosts) ? config.allowedHosts : []
   const wildcardBind = !host || host === '0.0.0.0' || host === '::'
-
-  const normalizeHostName = value => {
-    let name = String(value || '').trim().toLowerCase()
-    if (!name) return ''
-    name = name.replace(/^\[|\]$/g, '')
-    if (name === '::1') return '[::1]'
-    return name
-  }
-
-  /** 允许配置项写成 `example.com`、`example.com:8788` 或完整 `http://example.com:8788`。 */
-  const hostNameFromConfig = value => {
-    const raw = String(value || '').trim()
-    if (!raw) return ''
-    try {
-      const parsed = new URL(raw.includes('://') ? raw : `http://${raw}`)
-      return normalizeHostName(parsed.hostname)
-    } catch (_) {
-      return normalizeHostName(raw)
-    }
-  }
 
   const configuredOrigins = new Set(
     originList
@@ -165,13 +163,15 @@ export function apply(ctx, config = {}) {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('X-Frame-Options', 'DENY')
     res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
   }
 
   /** 只在来源明确合法时回 CORS 头；绝不使用 `*`，也不给未知 Origin 留任何响应头。 */
   const setCorsHeaders = (req, res) => {
     const origin = String(req.headers.origin || '')
     res.setHeader('Vary', 'Origin')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-NianFeng-Token')
+    res.setHeader('Access-Control-Allow-Headers', `Content-Type, Authorization, ${ACCESS_TOKEN_HEADER}, ${ACCESS_TOKEN_AGENT_HEADER}, ${ACCESS_TOKEN_INTERNAL_HEADER}`)
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
     res.setHeader('Access-Control-Max-Age', '600')
     if (!origin) return
@@ -181,36 +181,12 @@ export function apply(ctx, config = {}) {
 
   /* ---------------- 请求工具 ---------------- */
 
-  const sendJson = (res, status, data) => {
-    const body = JSON.stringify(data)
-    res.writeHead(status, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body),
-      'Cache-Control': 'no-store',
-    })
-    res.end(body)
-  }
-
-  const sendError = (res, status, message) => sendJson(res, status, { error: { status, message } })
-
   /* ---- WebUI 访问令牌（可选）：空 token 表示不校验 ---- */
-  const cookieValue = (req, name) => {
-    for (const part of String(req.headers.cookie || '').split(';')) {
-      const [key, ...rest] = part.trim().split('=')
-      if (key !== name) continue
-      const raw = rest.join('=')
-      try {
-        return decodeURIComponent(raw)
-      } catch (_) {
-        return raw
-      }
-    }
-    return ''
-  }
   const requestTokens = (req, url) => ({
     query: url.searchParams.get('token') || '',
-    cookie: cookieValue(req, 'nianfeng_token') || '',
-    header: String(req.headers['x-nianfeng-token'] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
+    cookie: parseCookieValue(req.headers.cookie, ACCESS_TOKEN_COOKIE) || '',
+    header: String(req.headers[ACCESS_TOKEN_HEADER] || '') || String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''),
+    internal: String(req.headers[ACCESS_TOKEN_INTERNAL_HEADER] || ''),
   })
 
   /**
@@ -227,69 +203,27 @@ export function apply(ctx, config = {}) {
 
   const checkAccessToken = (req, url, pathname) => {
     const tokens = requestTokens(req, url)
-    const headerOk = !!tokens.header && timingSafeStringEqual(tokens.header, accessToken)
-    const cookieOk = !!tokens.cookie && timingSafeStringEqual(tokens.cookie, accessToken)
-    const queryOk = !!tokens.query && canUseQueryToken(req, pathname) && timingSafeStringEqual(tokens.query, accessToken)
-    return { tokens, headerOk, cookieOk, queryOk, ok: headerOk || cookieOk || queryOk }
+    const headerOk = !!tokens.header && accessTokenMatches(tokens.header)
+    const cookieOk = !!tokens.cookie && accessTokenMatches(tokens.cookie)
+    const queryOk = !!tokens.query && canUseQueryToken(req, pathname) && accessTokenMatches(tokens.query)
+    // 内部通道必须同时带 Agent 标记：避免代聊密钥被当成通用旁路凭证。
+    const internalOk =
+      !!tokens.internal &&
+      internalAgentMatches(tokens.internal) &&
+      String(req.headers[ACCESS_TOKEN_AGENT_HEADER] || '') === '1'
+    return { tokens, headerOk, cookieOk, queryOk, internalOk, ok: headerOk || cookieOk || queryOk || internalOk }
   }
 
   const isAuthorizedRequest = (req, url, pathname) => {
-    if (!accessToken) return true
+    if (!isAccessTokenRequired()) return true
     return checkAccessToken(req, url, pathname).ok
   }
 
   const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version'
   const sendAuthPage = res => {
-    const body = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>需要访问令牌</title>
-<body style="font-family:system-ui,sans-serif;padding:48px;color:#1a1d21"><h2>需要访问令牌</h2>
-<p>这是一个受保护的 WebUI。请在地址后加上访问令牌完成首次引导：</p><pre style="padding:12px;background:#f4f6f2;border-radius:8px">http://&lt;主机&gt;:&lt;端口&gt;/?token=你的令牌</pre>
-<p>验证通过后会写入本机 Cookie，随后地址栏会自动去掉令牌；后续 API 请使用 Cookie 或 <code>X-NianFeng-Token</code> 请求头。</p></body></html>`
     res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
-    res.end(body)
+    res.end(buildAuthPage())
   }
-
-  const readBody = (req, maxBytes = 2 * 1024 * 1024) =>
-    new Promise((resolveBody, reject) => {
-      let size = 0
-      let settled = false
-      let oversizeError = null
-      const chunks = []
-      const finishReject = error => {
-        if (settled) return
-        settled = true
-        reject(error)
-      }
-      req.on('data', chunk => {
-        if (settled) return
-        size += chunk.length
-        if (size > maxBytes) {
-          // 超限时不要 destroy：继续把请求体读掉（最多 4 倍上限），
-          // 这样 catch 里写回的 413 JSON 能完整到达客户端，而不是被连接重置成 502。
-          if (!oversizeError) {
-            oversizeError = Object.assign(new Error(`请求体超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`), { status: 413 })
-          }
-          if (size > maxBytes * 4) {
-            finishReject(oversizeError)
-            req.destroy()
-          }
-          return
-        }
-        chunks.push(chunk)
-      })
-      req.on('end', () => {
-        if (oversizeError) return finishReject(oversizeError)
-        if (settled) return
-        settled = true
-        if (!chunks.length) return resolveBody({})
-        try {
-          resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-        } catch (_) {
-          reject(Object.assign(new Error('请求体不是合法 JSON'), { status: 400 }))
-        }
-      })
-      req.on('error', error => finishReject(error))
-      req.on('aborted', () => finishReject(Object.assign(new Error('请求已中断'), { status: 400 })))
-    })
 
   /** 插件上传是 base64 JSON，单独放宽到 48MB（解码后的 zip 仍限制 32MB）。 */
   const readUploadBody = req => readBody(req, 48 * 1024 * 1024)
@@ -415,11 +349,11 @@ export function apply(ctx, config = {}) {
       capabilities: [
         'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
         'external-plugins', 'plugin-dirs', 'plugin-upload', 'webui-auth', 'system-restart', 'plugin-http-routes',
-        'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'health-detail-auth', 'provider-model-discover',
+        'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'hashed-access-token', 'health-detail-auth', 'provider-model-discover',
         'embeddings', 'memory', 'session-message-pagination',
         ...extraCapabilities,
       ],
-      authRequired: !!accessToken,
+      authRequired: isAccessTokenRequired(),
       authenticated,
       runtime: 'cordis v4',
     }
@@ -441,7 +375,7 @@ export function apply(ctx, config = {}) {
   })
 
   route('GET', '/api/version', async (req, res) =>
-    sendJson(res, 200, { version: ctx.info.version, node: process.version, authRequired: !!accessToken }),
+    sendJson(res, 200, { version: ctx.info.version, node: process.version, authRequired: isAccessTokenRequired() }),
   )
 
   /** 重启：由宿主/启动脚本接管；桌面版请在设置页走 windHost.restart() */
@@ -463,9 +397,17 @@ export function apply(ctx, config = {}) {
 
   route('PUT', '/api/config', async (req, res) => {
     const body = await readBody(req)
+    const hasTokenField = !!body && typeof body === 'object' && !!body.network && typeof body.network === 'object' && Object.prototype.hasOwnProperty.call(body.network, 'webuiToken')
+    const nextToken = hasTokenField ? String(body.network.webuiToken || '').trim() : ''
     await settings.update(body)
     hub.broadcast('settings/updated', settings.redacted())
-    sendJson(res, 200, settings.redacted())
+    const headers = {}
+    if (hasTokenField) {
+      // 保存新令牌时顺手更新当前浏览器的 HttpOnly Cookie，避免重启后原会话被锁在门外。
+      const secure = isSecureRequest(req)
+      headers['Set-Cookie'] = nextToken ? accessTokenCookie(nextToken, { secure }) : clearAccessTokenCookie({ secure })
+    }
+    sendJson(res, 200, settings.redacted(), headers)
   })
 
   /* ---------------- 实例数据目录 ---------------- */
@@ -939,8 +881,8 @@ export function apply(ctx, config = {}) {
     // Host / Origin 校验直接放行——远程部署（公网 IP / 域名 / 反向代理）
     // 本来就不在默认的本机 Host 白名单里，令牌才是真正的访问凭证；
     // DNS rebinding 的恶意网页拿不到这个令牌。
-    const earlyTokenState = accessToken ? checkAccessToken(req, url, rawPathname) : null
-    const trustedPeer = !!accessToken && earlyTokenState?.ok === true
+    const earlyTokenState = isAccessTokenRequired() ? checkAccessToken(req, url, rawPathname) : null
+    const trustedPeer = !!earlyTokenState?.ok === true
     // Host / Origin 双重校验：DNS rebinding 的 Host 不是本机名，恶意网页的 Origin
     // 也不在放行列表里；两者都拒绝，不进入任何业务路由。
     if ((!isAllowedHost(req.headers.host) || !isAllowedOrigin(req.headers.origin)) && !trustedPeer) {
@@ -956,8 +898,8 @@ export function apply(ctx, config = {}) {
     }
 
     try {
-      /* WebUI 访问令牌：空 token 不启用；?token= 仅用于 HTML 首屏换 Cookie，API 只认头 / Cookie。 */
-      if (accessToken && !openRoute(pathname)) {
+      /* WebUI 访问令牌：未配置时保持旧行为；?token= 仅用于 HTML 首屏换 Cookie，API 只认头 / Cookie。 */
+      if (isAccessTokenRequired() && !openRoute(pathname)) {
         const state = earlyTokenState || checkAccessToken(req, url, pathname)
         if (!state.ok) return sendAuthPage(res)
         // 只要本次导航带的是有效 ?token=，就跳转到去掉令牌的干净地址，
@@ -966,7 +908,8 @@ export function apply(ctx, config = {}) {
           const clean = new URL(req.url, 'http://localhost')
           clean.searchParams.delete('token')
           res.writeHead(302, {
-            'Set-Cookie': `nianfeng_token=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+            // 写入的是用户本次提交的明文令牌；哈希模式下同样如此，浏览器 Cookie 即凭证。
+            'Set-Cookie': accessTokenCookie(state.tokens.query, { secure: isSecureRequest(req) }),
             Location: `${clean.pathname || '/'}${clean.search}`,
             'Cache-Control': 'no-store',
             'Referrer-Policy': 'no-referrer',

@@ -15,6 +15,8 @@
 import { readFile, writeFile, mkdir, rename, chmod } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto'
+import { ACCESS_TOKEN_ENV_NAMES, migrateAccessTokenData, normalizeAccessTokenPatch } from '../access-token.mjs'
+import { flattenValues, getPath, hasPath, setPath } from '../../src/shared/object-path.mjs'
 
 export const name = 'settings'
 export const inject = []
@@ -71,10 +73,13 @@ const DEFAULTS = {
     // 后端内部兼容值：空回复时对同一请求自动重试次数。设置页已统一到
     // 通用 → 空回复纠正次数，这里保留旧配置读取与默认一次的稳妥行为。
     emptyResponseRetries: 1,
-    // WebUI 对外监听：host 可为 127.0.0.1 / 0.0.0.0；port 为 0 表示使用启动默认端口；token 为空则不校验。
+    // WebUI 对外监听：host 可为 127.0.0.1 / 0.0.0.0；port 为 0 表示使用启动默认端口。
     webuiHost: '127.0.0.1',
     webuiPort: 0,
-    webuiToken: '',
+    // 访问令牌不允许明文落盘：这里只保存带随机盐的 HMAC 摘要。
+    // 首次运行生成的明文只打印在终端一次；之后用户可在设置页覆盖（同样只写摘要）。
+    webuiTokenHash: '',
+    webuiTokenUpdatedAt: 0,
   },
   // 前端界面偏好（签名 / 玻璃参数等），由 WebUI config 服务同步进来，
   // 与模型配置放在同一个 config.json 中，跨浏览器 / 桌面宿主都可恢复。
@@ -109,43 +114,6 @@ function deepEqual(a, b) {
   }
 }
 
-function toPath(key) {
-  return String(key).split('.').filter(Boolean)
-}
-function hasPath(obj, key) {
-  let cur = obj
-  for (const part of toPath(key)) {
-    if (cur === null || typeof cur !== 'object' || !(part in cur)) return false
-    cur = cur[part]
-  }
-  return true
-}
-function getPath(obj, key) {
-  let cur = obj
-  for (const part of toPath(key)) {
-    if (cur === null || typeof cur !== 'object') return undefined
-    cur = cur[part]
-  }
-  return cur
-}
-function setPath(obj, key, value) {
-  const parts = toPath(key)
-  const last = parts.pop()
-  let cur = obj
-  for (const part of parts) {
-    if (cur[part] === null || typeof cur[part] !== 'object') cur[part] = {}
-    cur = cur[part]
-  }
-  cur[last] = value
-}
-function flattenValues(target, prefix = '', out = new Map()) {
-  for (const [key, value] of Object.entries(target || {})) {
-    const path = prefix ? `${prefix}.${key}` : key
-    if (value && typeof value === 'object' && !Array.isArray(value)) flattenValues(value, path, out)
-    else out.set(path, value)
-  }
-  return out
-}
 function cloneMetaEntry(entry) {
   if (!entry || typeof entry !== 'object') return { at: Number(entry) || 0, by: '' }
   return { at: Number(entry.at) || 0, by: String(entry.by || '') }
@@ -157,6 +125,8 @@ export function apply(ctx, config = {}) {
   let data = structuredClone(DEFAULTS)
   let secretKey = null
   let ready = null
+  // 环境变量令牌只在当前进程生效，不写盘；这里仅用于让脱敏接口如实显示“已启用”。
+  const envAccessToken = String(ACCESS_TOKEN_ENV_NAMES.map(name => process.env[name]).find(Boolean) || '').trim()
 
   const keyPath = () => join(dataDir, KEY_FILE)
 
@@ -253,8 +223,11 @@ export function apply(ctx, config = {}) {
     } catch (err) {
       if (err.code !== 'ENOENT') ctx.logger.warn(`配置文件读取失败，使用默认值：${err.message}`)
     }
-    // 首次运行 / 从旧版明文配置升级：立即按加密格式重写
+    // 首次运行 / 从旧版明文配置升级：立即按加密格式重写。
+    // 访问令牌只保留摘要：旧版明文 network.webuiToken 会在这一步被替换。
+    const migratedAccessToken = migrateAccessTokenData(data)
     await save()
+    if (migratedAccessToken) ctx.logger.info('旧版明文访问令牌已迁移为盐化摘要，明文已从配置文件移除')
     ctx.logger.info(`配置已加载（凭据加密存储）：${file}`)
   }
 
@@ -290,6 +263,7 @@ export function apply(ctx, config = {}) {
       } catch (err) {
         if (err.code !== 'ENOENT') ctx.logger.warn(`新目录配置读取失败，使用默认值：${err.message}`)
       }
+      migrateAccessTokenData(data)
       await save()
     }
     ctx.logger.info(`配置目录已切换：${file}`)
@@ -362,6 +336,8 @@ export function apply(ctx, config = {}) {
     },
     rehome,
     get: () => structuredClone(data),
+    /** 轻量读取访问令牌摘要：避免每个 HTTP 请求都克隆整份配置。 */
+    accessTokenHash: () => String(data.network?.webuiTokenHash || '').trim(),
     provider: id => data.providers[id],
     providers: () =>
       Object.entries(data.providers)
@@ -369,15 +345,16 @@ export function apply(ctx, config = {}) {
         .map(([id, p]) => ({ id, ...structuredClone(p), apiKey: mask(p.apiKey) })),
     /** 合并写入（patch 可以包含明文 key，落盘时自动加密） */
     async update(patch) {
-      if (patch && typeof patch === 'object' && Object.prototype.hasOwnProperty.call(patch, 'preferences')) {
-        const { preferences, preferencesMeta, ...rest } = patch
+      const nextPatch = normalizeAccessTokenPatch(patch)
+      if (nextPatch && typeof nextPatch === 'object' && Object.prototype.hasOwnProperty.call(nextPatch, 'preferences')) {
+        const { preferences, preferencesMeta, ...rest } = nextPatch
         if (Object.keys(rest).length) data = deepMerge(data, rest)
         mergePreferences(preferences, preferencesMeta)
       } else {
-        data = deepMerge(data, patch)
+        data = deepMerge(data, nextPatch)
       }
       await save()
-      ctx.emit('settings/updated', patch)
+      ctx.emit('settings/updated', nextPatch)
       return service.get()
     },
     /**
@@ -425,6 +402,13 @@ export function apply(ctx, config = {}) {
           }
         }
       }
+      // 访问令牌只回传状态，绝不回传摘要或明文；控件按“写一次 / 可清除”设计。
+      const network = copy.network && typeof copy.network === 'object' && !Array.isArray(copy.network) ? copy.network : (copy.network = {})
+      const storedHash = String(network.webuiTokenHash || '').trim()
+      network.webuiTokenSet = !!storedHash || !!envAccessToken
+      network.webuiTokenSource = storedHash ? 'config' : envAccessToken ? 'env' : 'none'
+      delete network.webuiTokenHash
+      delete network.webuiToken
       return copy
     },
     ready: () => ready,

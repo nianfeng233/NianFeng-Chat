@@ -235,8 +235,13 @@ session-service 在新增 / 更新消息后防抖写回 /api/sessions/:id
 
 ## 九、安全模型（v1.1.7 加固后）
 
-- 默认只监听 `127.0.0.1`；开放监听必须同时处理访问令牌与白名单；
+- 默认只监听 `127.0.0.1`；开放监听必须同时处理访问令牌与白名单；`NODE_ENV=production`
+  且监听 `0.0.0.0` / `::` 时无令牌会拒绝启动；
+- 访问令牌首次运行随机生成并只打印一次；落盘只保存随机盐摘要（`nf1$...`），旧版明文
+  `network.webuiToken` 自动迁移删除，`.webui-token` 明文文件不再写入；
 - `Host` / `Origin` 双重校验；CORS 精确回显白名单 Origin；不返回通配 `*`，阻挡 DNS rebinding；
+- WebUI 代理层与后端 HTTP 插件共用 `server/web-security.mjs` 的 Host/Origin/Cookie/令牌匹配/401 页面，
+  避免两份安全实现漂移；
 - `?token=` 只作为 HTML 首屏换 Cookie 的引导，API 只认 Cookie / `X-NianFeng-Token` / `Authorization`；
 - `/api/health`、`/api/version` 作为探活入口；配置令牌后，health 的目录 / 配置 / 提供商 / 会话详情
   只对通过校验的请求返回；

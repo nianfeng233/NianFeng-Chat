@@ -1,0 +1,23 @@
+# 念风chat 代码风格基础约定
+# 编辑器会自动应用；CI / npm run check:style 做低成本一致性检查。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{cmd,bat,ps1}]
+end_of_line = crlf
+
+[*.rs]
+indent_size = 4
+
+[*.json]
+indent_size = 2

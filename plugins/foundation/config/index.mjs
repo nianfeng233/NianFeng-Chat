@@ -10,8 +10,10 @@
  * 后端在线时会把整份偏好同步到当前数据目录的 config.json（preferences 字段），
  * 这样浏览器版 / 桌面版 / 不同 WebView2 数据目录之间都能恢复历史偏好。
  */
+import { flattenValues, getPath, hasPath, removePath, setPath } from '../../../src/shared/object-path.mjs'
+
 export const name = 'config'
-export const version = '1.1.0'
+export const version = '1.2.0'
 export const displayName = '配置中心'
 export const description = '基础服务 · 用户偏好持久化（本地 + 后端 preferences），支持点号路径与 watch。'
 export const author = '念风内核'
@@ -100,8 +102,10 @@ const DEFAULTS = {
   'model.timeoutMs': 60000,
   'model.requestBody': '',
   'model.failoverEnabled': false,
-  'model.failoverKey': '',
-  'model.failoverRetries': 1,
+  // 备用模型列表：数组顺序即失败后的尝试顺序，设置页支持拖拽调整。
+  'model.failoverKeys': [],
+  // 列表循环轮数：1 = 每个备用模型依次尝试一次；2-3 = 全部失败后再从头循环。
+  'model.failoverPasses': 1,
   'chat.stream': true,
   // 推理等级：DeepSeek 官方 off / low / high / max
   'chat.reasoningEffort': 'off',
@@ -205,7 +209,48 @@ export function apply(ctx) {
   const getApi = () => ctx.registry.get('api')
   let data = storage.get(NS, KEY, null)
   if (!data || typeof data !== 'object') data = {}
+  let meta = storage.get(NS, META_KEY, null)
+  if (!meta || typeof meta !== 'object') meta = {}
   let dirty = false
+  /**
+   * 旧版单值 model.failoverKey -> 有序列表 model.failoverKeys。
+   * 只在用户从未显式改过列表时迁移，避免把用户已清空的列表又复活。
+   * 远端偏好同步后也可能带回来旧字段，因此封装成函数重复调用。
+   */
+  const migrateLegacyFailover = () => {
+    const changed = []
+    const legacyKey = String(getPath(data, 'model.failoverKey') || '').trim()
+    const failoverKeysMetaAt = Number(meta['model.failoverKeys']?.at) || 0
+    const currentKeys = getPath(data, 'model.failoverKeys')
+    if (legacyKey && failoverKeysMetaAt === 0 && (!Array.isArray(currentKeys) || currentKeys.length === 0)) {
+      setPath(data, 'model.failoverKeys', [legacyKey])
+      changed.push({ key: 'model.failoverKeys', value: [legacyKey] })
+    }
+    if (hasPath(data, 'model.failoverKey')) {
+      removePath(data, 'model.failoverKey')
+      removePath(meta, 'model.failoverKey')
+      changed.push({ key: 'model.failoverKey', value: undefined })
+    }
+    // 旧版 model.failoverRetries 语义接近“循环轮数”；只有用户没显式改过
+    // model.failoverPasses 时才迁移，避免把新值覆盖掉。
+    const legacyRetries = Math.floor(Number(getPath(data, 'model.failoverRetries')))
+    const failoverPassesMetaAt = Number(meta['model.failoverPasses']?.at) || 0
+    if (Number.isFinite(legacyRetries) && failoverPassesMetaAt === 0) {
+      const passes = Math.max(1, Math.min(3, legacyRetries || 1))
+      setPath(data, 'model.failoverPasses', passes)
+      changed.push({ key: 'model.failoverPasses', value: passes })
+    }
+    if (hasPath(data, 'model.failoverRetries')) {
+      removePath(data, 'model.failoverRetries')
+      removePath(meta, 'model.failoverRetries')
+      changed.push({ key: 'model.failoverRetries', value: undefined })
+    }
+    if (changed.length) {
+      storage.set(NS, KEY, data)
+      storage.set(NS, META_KEY, meta)
+    }
+    return changed
+  }
   // 旧版群聊上下文按“轮”保存为 chat.groupRounds；新语义改为按消息“条”数。
   // 迁移一次旧值，避免自定义设置丢失。
   if (!hasPath(data, 'chat.groupMessages') && hasPath(data, 'chat.groupRounds')) {
@@ -215,6 +260,7 @@ export function apply(ctx) {
   }
   if (hasPath(data, 'chat.groupRounds')) {
     removePath(data, 'chat.groupRounds')
+    removePath(meta, 'chat.groupRounds')
     dirty = true
   }
   for (const [key, value] of Object.entries(DEFAULTS)) {
@@ -223,10 +269,11 @@ export function apply(ctx) {
       dirty = true
     }
   }
-  if (dirty) storage.set(NS, KEY, data)
-
-  let meta = storage.get(NS, META_KEY, null)
-  if (!meta || typeof meta !== 'object') meta = {}
+  migrateLegacyFailover()
+  if (dirty) {
+    storage.set(NS, KEY, data)
+    storage.set(NS, META_KEY, meta)
+  }
 
   const persist = () => storage.set(NS, KEY, data)
   const persistMeta = () => storage.set(NS, META_KEY, meta)
@@ -304,13 +351,15 @@ export function apply(ctx) {
     data = merged.data
     meta = merged.meta
     const migrated = migrateLegacyDefaults()
-    if (merged.changes.length || metaChanged || migrated) {
+    const failoverMigration = migrateLegacyFailover()
+    const changes = [...merged.changes, ...failoverMigration]
+    if (changes.length || metaChanged || migrated) {
       persist()
       persistMeta()
     }
-    for (const change of merged.changes) ctx.emit('config:changed', change)
-    if (merged.changes.length) ctx.logger.debug(`已应用远端偏好 ${merged.changes.length} 项（${source}）`)
-    return merged.changes.length
+    for (const change of changes) ctx.emit('config:changed', change)
+    if (changes.length) ctx.logger.debug(`已应用远端偏好 ${changes.length} 项（${source}）`)
+    return changes.length
   }
 
   const schedulePush = () => {
@@ -455,63 +504,12 @@ export function apply(ctx) {
   ctx.logger.debug('配置中心就绪（本地 + 后端 preferences 同步）')
 }
 
-/* ---------------- 点号路径工具 ---------------- */
-function toPath(key) {
-  return String(key).split('.').filter(Boolean)
-}
-function hasPath(obj, key) {
-  let cur = obj
-  for (const part of toPath(key)) {
-    if (cur === null || typeof cur !== 'object' || !(part in cur)) return false
-    cur = cur[part]
-  }
-  return true
-}
-function getPath(obj, key) {
-  let cur = obj
-  for (const part of toPath(key)) {
-    if (cur === null || typeof cur !== 'object') return undefined
-    cur = cur[part]
-  }
-  return cur
-}
-function setPath(obj, key, value) {
-  const parts = toPath(key)
-  const last = parts.pop()
-  let cur = obj
-  for (const part of parts) {
-    if (cur[part] === null || typeof cur[part] !== 'object') cur[part] = {}
-    cur = cur[part]
-  }
-  cur[last] = value
-}
-function removePath(obj, key) {
-  const parts = toPath(key)
-  const last = parts.pop()
-  let cur = obj
-  for (const part of parts) {
-    cur = cur?.[part]
-    if (cur === undefined) return
-  }
-  if (cur && typeof cur === 'object') delete cur[last]
-}
-
 function deepEqual(a, b) {
   try {
     return JSON.stringify(a) === JSON.stringify(b)
   } catch (_) {
     return false
   }
-}
-
-/** 把对象/数组里的所有叶子路径展开；数组作为整体，不继续下钻 */
-function flattenValues(target, prefix = '', out = new Map()) {
-  for (const [key, value] of Object.entries(target || {})) {
-    const path = prefix ? `${prefix}.${key}` : key
-    if (value && typeof value === 'object' && !Array.isArray(value)) flattenValues(value, path, out)
-    else out.set(path, value)
-  }
-  return out
 }
 
 /**

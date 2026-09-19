@@ -15,8 +15,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 
 import { resolveDataDir } from './data-dir.mjs'
+import { resolveStartupAccessToken } from './access-token.mjs'
 import { applyNetworkDefaults } from './network-defaults.mjs'
 import { ensurePortsFree } from './port-utils.mjs'
+import { assertSafeProductionBinding } from './security-utils.mjs'
+import { isLoopbackHost } from './web-security.mjs'
 import * as settingsPlugin from './plugins/settings.mjs'
 import * as sessionsPlugin from './plugins/sessions.mjs'
 import * as hubPlugin from './plugins/hub.mjs'
@@ -202,11 +205,25 @@ export async function startBackend({
   staticDir,
   logLevel,
   accessToken = '',
+  accessTokenHash = '',
+  internalAgentSecret = '',
   onRestart = null,
   onPluginsChanged = null,
   allowedOrigins = [],
   allowedHosts = [],
 } = {}) {
+  // 嵌入场景可能只传 dataDir：从配置（或环境变量）解析访问令牌，避免生产模式下
+  // 明明配了令牌却被误判为“无令牌开放监听”。start.mjs 会显式传值，这里自动兜底。
+  if (!accessToken && !accessTokenHash && dataDir) {
+    try {
+      const accessState = await resolveStartupAccessToken(dataDir, { generateIfMissing: false })
+      if (accessState.hash) accessTokenHash = accessState.hash
+      if (!accessToken && accessState.token) accessToken = accessState.token
+    } catch (_) {
+      /* 配置不存在 / 损坏时按无令牌处理，由启动参数或设置页继续配置 */
+    }
+  }
+  assertSafeProductionBinding({ host, accessTokenRequired: !!(accessToken || accessTokenHash) })
   const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
   const ctx = new Context()
   const envList = name =>
@@ -273,6 +290,8 @@ export async function startBackend({
         host,
         staticDir: staticDir ? join(ROOT, staticDir) : null,
         accessToken,
+        accessTokenHash,
+        internalAgentSecret,
         onRestart,
         allowedOrigins: [...new Set([...allowedOrigins, ...envList('NIANFENG_ALLOWED_ORIGINS'), ...envList('FENGYU_ALLOWED_ORIGINS')])],
         allowedHosts: [...new Set([...allowedHosts, ...envList('NIANFENG_ALLOWED_HOSTS'), ...envList('FENGYU_ALLOWED_HOSTS')])],
@@ -401,9 +420,10 @@ export async function startBackend({
 
 // 直接运行：node server/index.mjs
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  // WebUI 监听与访问令牌来自当前数据目录的 config.json（明文 network 段）。
-  // 桌面壳会把 NIANFENG_HOME_DIR 传进来，token 会额外写入 <HOME>/.webui-token，
-  // 交给 Rust 在创建 WebView 时带 ?token= 打开，避免启用 token 后桌面白屏。
+  // WebUI 监听与访问令牌来自当前数据目录：
+  //   - 首次运行自动生成随机令牌并打印在终端最上方，落盘只写盐化摘要；
+  //   - 旧版本明文 network.webuiToken 在启动时迁移为摘要；
+  //   - 环境变量 NIANFENG_WEBUI_TOKEN / FENGYU_WEBUI_TOKEN 只在当前进程生效。
   const resolved = await resolveDataDir(ROOT)
   let network = {}
   try {
@@ -411,19 +431,38 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } catch (_) {
     network = {}
   }
-  const accessToken = String(process.env.NIANFENG_WEBUI_TOKEN || process.env.FENGYU_WEBUI_TOKEN || network.webuiToken || '').trim()
   const host = String(process.env.NIANFENG_WEBUI_HOST || process.env.FENGYU_WEBUI_HOST || network.webuiHost || '127.0.0.1').trim() || '127.0.0.1'
+  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
+  const externalBind = !isLoopbackHost(host)
+  const access = await resolveStartupAccessToken(resolved.dataDir, {
+    generateIfMissing: !homeEnv,
+    generateIfUnset: !homeEnv && externalBind,
+  })
+  const accessToken = access.token
+  const accessTokenHash = access.hash
+  if (access.generated) {
+    console.log('')
+    console.log('  ┌──────────────────────────────────────────────────────────┐')
+    console.log(`  │  ${(access.firstRun ? '首次运行 · 随机访问令牌（只显示这一次，请立即复制）' : '开放监听未配置令牌 · 已自动生成访问令牌（请立即复制）').slice(0, 54).padEnd(54, ' ')} │`)
+    console.log(`  │  ${access.token.padEnd(54, ' ')} │`)
+    console.log('  │  后续可在「设置 → 网络」里设置自己的访问令牌（只存摘要） │')
+    console.log('  └──────────────────────────────────────────────────────────┘')
+    console.log('')
+  } else if (access.migrated) {
+    console.log('  访问令牌已从旧版明文迁移为盐化摘要，明文已从配置文件移除。')
+  }
+  if (!access.required && externalBind) {
+    console.warn('  警告：当前监听非本机地址且未配置访问令牌；建议到「设置 → 网络」设置访问令牌后再开放访问。')
+  }
   const configuredPort = Number(network.webuiPort) > 0 ? Number(network.webuiPort) : 0
   const port = configuredPort || Number(process.env.PORT || 8788)
   await ensurePortsFree([port], { autoStop: true, log: console })
-  const homeEnv = process.env.NIANFENG_HOME_DIR || process.env.FENGYU_HOME_DIR
   if (homeEnv) {
-    const tokenFile = join(resolve(homeEnv), '.webui-token')
     try {
-      if (accessToken) await writeFile(tokenFile, accessToken, 'utf8')
-      else await rm(tokenFile, { force: true })
+      // 升级清理：旧版本可能留下明文 .webui-token 文件，启动时删除。
+      await rm(join(resolve(homeEnv), '.webui-token'), { force: true })
     } catch (_) {
-      /* 写不了 token 文件不影响协议本身 */
+      /* 清理失败不影响服务本身 */
     }
   }
 
@@ -433,6 +472,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     staticDir: process.env.NIANFENG_STATIC_DIR || process.env.FENGYU_STATIC_DIR || undefined,
     dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     accessToken,
+    accessTokenHash,
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)

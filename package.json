@@ -1,6 +1,6 @@
 {
   "name": "nianfeng-chat",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -17,7 +17,10 @@
     "build:release": "node scripts/package-release.mjs",
     "build:desktop": "node scripts/package-release.mjs --desktop-only",
     "audit:deps": "node scripts/audit-dependencies.mjs",
-    "check:kernels": "node scripts/check-syntax.mjs",
+    "check:style": "node scripts/check-style.mjs",
+    "verify:production": "node scripts/verify-production.mjs",
+    "release:gate": "npm run verify:production && npm test",
+    "check:kernels": "node scripts/check-syntax.mjs && node scripts/check-style.mjs",
     "test:deps": "node scripts/test-dependencies.mjs",
     "test:hot-plugins": "node scripts/test-hot-plugins.mjs",
     "test:static-cache": "node scripts/test-static-cache.mjs",
@@ -28,6 +31,7 @@
     "test:smoke": "node scripts/smoke.mjs",
     "test:backend": "node scripts/test-backend.mjs",
     "test:security": "node scripts/test-security.mjs",
+    "test:failover": "node scripts/test-failover.mjs",
     "test:chat": "node scripts/test-chat.mjs",
     "test:chat-tools": "node scripts/test-chat-tools.mjs",
     "test:memory": "node scripts/test-memory-same-session.mjs",
@@ -36,7 +40,7 @@
     "test:qqbot": "node scripts/test-qqbot.mjs",
     "test:images": "node scripts/test-images.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",
-    "test": "npm run check:kernels && npm run test:deps && npm run test:hot-plugins && npm run test:static-cache && npm run test:webui-scope && npm run test:external-plugins && npm run test:agent-bridge && npm run test:knowledge-reload && npm run test:backend && npm run test:security && npm run test:images && npm run test:clawbot && npm run test:qqbot && npm run test:napcat && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors",
+    "test": "npm run check:kernels && npm run test:deps && npm run test:hot-plugins && npm run test:static-cache && npm run test:webui-scope && npm run test:external-plugins && npm run test:agent-bridge && npm run test:knowledge-reload && npm run test:backend && npm run test:security && npm run test:failover && npm run test:images && npm run test:clawbot && npm run test:qqbot && npm run test:napcat && npm run test:smoke && npm run test:chat && npm run test:chat-tools && npm run test:vendors",
     "test:napcat": "node scripts/test-napcat.mjs"
   },
   "engines": {

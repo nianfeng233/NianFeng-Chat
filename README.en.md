@@ -14,11 +14,12 @@ a Windows desktop application.
 
 > Note: This README was organized and generated with the assistance of DeepSeek (AI).
 > The actual code and automated tests are the source of truth for behavior.
-> Project status: fast-moving iteration; `v1.x` marks feature milestones, not production maturity or a
+> Project status: fast-moving iteration; `v2.x` marks feature milestones, not production maturity or a
 > security audit. It listens on localhost by default; before exposing it beyond localhost, read
-> “Security and Privacy” and configure an access token.
+> “Security and Privacy” and configure an access token. For production, run `npm run release:gate`
+> before publishing.
 
-- Current version: v2.0.3
+- Current version: v2.1.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
@@ -105,8 +106,8 @@ The points below are implemented today in code, with paths and commands you can 
   external plugin directory.
 
 **Verifiable numbers**: `npm run sync-plugins` rescans and validates the dependency data;
-`npm run test:deps` contains 208 dependency / version / service-mapping assertions, and
-`npm run test:smoke` contains 313 end-to-end assertions. All numbers come from the current repository code.
+`npm run test:deps` contains 214 dependency / version / service-mapping assertions, and
+`npm run test:smoke` contains 322 end-to-end assertions. All numbers come from the current repository code.
 
 ## Features and Architecture
 
@@ -123,8 +124,9 @@ The points below are implemented today in code, with paths and commands you can 
   does not delete the external plugin directory.
 - **External storage**: the data directory can be changed in Settings; the plugin directory can be
   configured independently.
-- **Network**: listens on `127.0.0.1` by default. It can bind to `0.0.0.0` with an access token;
-  changes take effect after the prompted restart.
+- **Network**: listens on `127.0.0.1` by default. On first run a random access token is printed
+  once at the top of the terminal; you can later replace it in Settings. Only a salted digest is
+  stored on disk, never plaintext. Changes take effect after the prompted restart.
 - **Notifications**: system, character-message, and other notifications; character messages include
   the character avatar and a preview. Built-in and custom notification sounds are supported.
 - **Immediate channel delivery**: assistant messages are sent to the target channel as soon as they
@@ -189,10 +191,11 @@ On Windows you can also double-click `start.cmd`.
   containing `config.json` / `sessions.json` loads that instance.
 - **Plugins**: the built-in plugin directory is read-only; the external plugin directory can be
   selected, opened, rescanned, and external plugins can be deleted.
-- **Network**: WebUI host, port, and access token. When a token is set, open
-  `http://<host>:<port>/?token=YOUR_TOKEN`; a successful check stores an HttpOnly cookie and strips
-  the token from the URL. Subsequent API requests use the cookie or the `X-NianFeng-Token` /
-  `Authorization` header.
+- **Network**: WebUI host, port, and access token. On first run a random token is printed once at the
+  top of the terminal; it can be replaced with your own value. Only a salted digest is persisted and
+  the API never echoes plaintext. To sign in, open `http://<host>:<port>/?token=YOUR_TOKEN`; a
+  successful check stores an HttpOnly cookie and strips the token from the URL. Subsequent API
+  requests use the cookie or the `X-NianFeng-Token` / `Authorization` header.
 - **Notifications**: character-message notifications, sound, background activity, system-notification
   permission, notification sounds, and test buttons.
 - **Runtime logs**: independent full-width sidebar view (not inside Settings); free level checkboxes (error / warn / info / debug, remembered),
@@ -289,14 +292,17 @@ assets rather than committed to Git.
 ## Tests
 
 ```bash
-npm test              # module checks + dependency validation + backend API + end-to-end + chat / tools / vendor protocols
-npm run test:deps     # plugin dependency fields / version ranges / cycle detection / inject mapping (208 checks)
-npm run test:smoke    # frontend end-to-end against the real backend and SSE (313 checks)
+npm test              # module/style checks + dependency validation + backend API + security + failover + end-to-end + chat / tools / vendor protocols
+npm run test:security # Host / Origin / CORS / health redaction / SSRF / hashed token / SSE close
+npm run check:style   # .mjs: LF / no tabs / no trailing whitespace / final newline
+npm run test:failover # ordered backup-model list / sequential fallback / retry passes
+npm run test:deps     # plugin dependency fields / version ranges / cycle detection / inject mapping
+npm run test:smoke    # frontend end-to-end against the real backend and SSE
 npm run test:clawbot  # WeChat Clawbot backend bridge (local mock iLink protocol)
 npm run test:napcat   # NapCat backend bridge (local reverse WebSocket mock)
 ```
 
-`npm test` currently passes; `scripts/smoke.mjs` passes 313 checks and `scripts/test-dependencies.mjs` passes 208 checks.
+`npm test` currently passes; exact assertion counts are reported by the test output and intentionally not hard-coded in docs.
 
 ## Versioning and Releases
 
@@ -320,6 +326,12 @@ numbers, `user_data`, and similar content.
 - `?token=` is only a first-navigation bootstrap: it exchanges the token for an HttpOnly cookie and
   immediately redirects to a clean URL. API requests never accept the query token, and token
   comparison is constant-time.
+- Access tokens never touch disk as plaintext: the first-run random token is printed once in the
+  terminal; only a salted `nf1$...` digest is stored. Legacy plaintext `network.webuiToken` values
+  are migrated and removed at startup, and the `.webui-token` runtime file is no longer written.
+  The backend also enforces a minimum length of 12 characters for user-set tokens.
+- With `NODE_ENV=production`, binding `0.0.0.0` / `::` without an access token is refused at startup
+  (override only with `NIANFENG_ALLOW_INSECURE_LISTEN=1`), preventing accidental public exposure.
 - `/api/rss` blocks SSRF targets: localhost, loopback/private/link-local/metadata addresses, non-http(s)
   schemes, plus per-hop DNS and redirect validation.
 - API keys and sensitive request headers are stored locally as AES-256-GCM ciphertext in the data

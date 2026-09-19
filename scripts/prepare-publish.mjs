@@ -100,8 +100,15 @@ async function scan(dir) {
         regex.lastIndex = 0
         let match
         while ((match = regex.exec(text))) {
+          const value = match[0].slice(0, 80)
+          // 规则会把源码里的普通驼峰标识符误判为令牌（如 token = generateAccessToken）。
+          // 这里只跳过“纯标识符且不含数字”的值；真实密钥通常混合数字 / 符号。
+          if (rule === '疑似令牌') {
+            const rawValue = match[0].replace(/^[A-Za-z_]+\s*[:=]\s*["']?/, '')
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(rawValue) && !/\d/.test(rawValue)) continue
+          }
           const line = text.slice(0, match.index).split('\n').length
-          hits.push({ file: relative(dir, full), line, rule, value: match[0].slice(0, 80) })
+          hits.push({ file: relative(dir, full), line, rule, value })
           if (match[0].length === 0) break
         }
       }

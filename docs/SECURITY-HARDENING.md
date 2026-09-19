@@ -35,13 +35,13 @@
 - `plugins/domain/image-service/bridge.mjs`：移除图片接口多余的通配 CORS 头，统一由 http 主入口按 Origin 白名单下发
 - `start.mjs`：WebUI 代理层 Host / Origin / 令牌 / 静态边界 / 关闭流程同步加固；导出 WebUI 与 Origin 工具供安全测试复用
 - `plugins/foundation/backend-client/index.mjs`：绝对后端地址场景携带 Cookie（`credentials: include`）
-- `scripts/test-security.mjs`（新增）：39 项安全回归测试
+- `scripts/test-security.mjs`：安全回归测试（含访问令牌摘要化与生产监听门禁；数量以实际输出为准）
 - `README.md` / `README.en.md` / `docs/ARCHITECTURE.md` / `docs/PLUGINS.md` / `package.json` / `package-lock.json`
 
 ## 三、仍存在的边界与建议
 
-1. **默认无令牌**：没有配置访问令牌时，任何本机进程仍可调用 API。Host / Origin 校验只挡住浏览器网页跨站读取；本机安全仍依赖操作系统账户边界。
-2. **开放监听要配令牌**：`webuiHost = 0.0.0.0` 或反向代理到公网时，务必设置强随机 `webuiToken`；如使用自定义域名 / 端口，通过 `NIANFENG_ALLOWED_ORIGINS`、`NIANFENG_ALLOWED_HOSTS` 放行。
+1. **历史安装可能仍无令牌**：全新首次运行会自动生成随机访问令牌并只打印一次；但老版本升级上来的实例如果历史上从未设置令牌，仍保持“无令牌”状态，需要用户到「设置 → 网络」主动设置。Host / Origin 校验只挡住浏览器网页跨站读取，本机安全仍依赖操作系统账户边界。
+2. **开放监听要配令牌**：`webuiHost = 0.0.0.0` 或反向代理到公网时，务必设置强随机访问令牌；如使用自定义域名 / 端口，通过 `NIANFENG_ALLOWED_ORIGINS`、`NIANFENG_ALLOWED_HOSTS` 放行。`NODE_ENV=production` 且监听 `0.0.0.0` / `::` 时若无令牌会直接拒绝启动。
 3. **HTTP 明文**：本地默认是 HTTP，Cookie 不带 `Secure`；不要把这个本地端口直接暴露到不可信网络。
 4. **浏览器兼容性**：Origin 防护依赖现代浏览器发送 `Origin` 头；极老浏览器或特殊客户端可能没有该头，此时本机进程级防护仍然有效，跨站读取风险也较低。
 5. **外部插件权限**：`bridge.mjs` 是 Node 代码，权限等同主进程；只加载可信插件。
@@ -50,7 +50,9 @@
 ## 四、验证方式
 
 ```bash
-npm run test:security   # 39 项防护回归
+npm run test:security   # 防护回归（精准数量以实际输出为准）
+npm run test:failover   # 备用模型列表降级顺序回归
 npm run test:backend    # 后端 API 全量回归
+npm run check:style     # .mjs 风格一致性检查
 npm test                # 完整测试链
 ```

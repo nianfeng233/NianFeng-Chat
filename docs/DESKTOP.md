@@ -28,10 +28,11 @@ npm run build:release -- --web-only   # 只生成 Web 版
 - **拖动**：优先使用 WebView2 123+ 的 `app-region: drag`；同时注入 JS fallback，在顶层栏按下鼠标时通过 IPC 调用 `window.drag_window()`。
 - **后端**：Rust 先挑选一个空闲端口，启动内嵌的 `node.exe start.mjs --serve`，通过环境变量传入：
   - `PORT`：随机本地端口（若数据目录里配置了固定 WebUI 端口，则以配置为准）
-  - `NIANFENG_HOME_DIR=%LOCALAPPDATA%\NianFengChat`：运行时端口 / 令牌文件与数据目录指针
+  - `NIANFENG_HOME_DIR=%LOCALAPPDATA%\NianFengChat`：运行时端口文件与数据目录指针
   - `NIANFENG_NO_OPEN=1` / `--no-open`：由桌面壳控制窗口，不额外弹浏览器
 - **与 Web 版一致**：桌面版同样走 `start.mjs` 单端口模式，包含服务端常驻代聊、外部插件热加载与
-  `.webui-port` / `.webui-token` 生成；关闭 WebView 后渠道消息仍由服务端代聊处理。
+  `.webui-port` 端口文件；访问令牌只保存摘要，不再写 `.webui-token` 明文。需要令牌而 WebView
+  没有 Cookie 时会显示令牌输入页。关闭 WebView 后渠道消息仍由服务端代聊处理。
 - **资源**：`node.exe` 与干净的 `app/` 在编译时通过 `build.rs` / `app_assets.rs` 嵌入 exe；首次运行释放到 `%LOCALAPPDATA%\NianFengChat\runtime`，用 `.build-id` 判断是否需要更新。用户数据独立保存在 `%LOCALAPPDATA%\NianFengChat\user_data`，升级版本不会覆盖。
 - **外部插件**：后端 `plugin-registry` 会扫描数据目录下的 `plugins/`（桌面版为 `%LOCALAPPDATA%\NianFengChat\user_data\plugins`），也可在「设置 → 插件 → 插件目录」指定任意目录；插件放在 `<目录>/<分层>/<插件id>/index.mjs`，重新扫描/刷新即可加载，升级 exe 不删除外部插件。
 - **图标**：`scripts/desktop-wrapper/app.ico` 由 `scripts/generate-icon.ps1` 从 `logo.png` 生成圆角矩形多尺寸图标，构建时嵌入 Windows 资源；`app.rgba` 同时作为窗口 / 任务栏缩略图图标。

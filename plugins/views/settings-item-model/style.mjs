@@ -169,4 +169,32 @@ export const MODEL_PAGE_CSS = `
   html[data-theme="dark"] .model-provider-del,
   html[data-theme="dark"] .model-delete-provider{background:rgba(198,91,91,.16);border-color:rgba(198,91,91,.4);color:#e08585}
   html[data-theme="dark"] .model-note{background:rgba(255,255,255,.035)}
+
+  /* ---------- 备用模型拖拽列表 ---------- */
+  .model-failover-block{padding:12px 15px 14px;border-top:1px solid rgba(0,0,0,.045)}
+  .model-failover-title{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:12.5px;font-weight:600;color:var(--text);margin-bottom:9px}
+  .model-failover-title span{font-size:11px;font-weight:400;color:var(--text-3)}
+  .model-failover-table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid rgba(0,0,0,.07);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.72)}
+  .model-failover-table thead th{padding:7px 9px;text-align:left;font-size:10.5px;font-weight:600;color:var(--text-3);background:rgba(0,0,0,.028);border-bottom:1px solid rgba(0,0,0,.055)}
+  .model-failover-table tbody td{padding:8px 9px;border-bottom:1px solid rgba(0,0,0,.045);vertical-align:middle;font-size:12px;color:var(--text)}
+  .model-failover-table tbody tr:last-child td{border-bottom:0}
+  .model-failover-row{cursor:grab;transition:background .12s,border-color .12s,opacity .12s}
+  .model-failover-row:hover{background:rgba(0,0,0,.025)}
+  .model-failover-row.dragging{opacity:.42;background:var(--accent-soft)}
+  .model-failover-row.drag-over{background:var(--accent-soft);box-shadow:inset 0 2px 0 var(--accent)}
+  .model-failover-row.missing .model-failover-name{color:var(--text-3)}
+  .model-failover-handle{width:26px;color:var(--text-4);font-size:15px;line-height:1;cursor:grab;user-select:none;letter-spacing:-2px}
+  .model-failover-order{width:34px;text-align:center;color:var(--text-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .model-failover-model{min-width:0}
+  .model-failover-name{font-weight:550;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .model-failover-key{margin-top:2px;font-size:10px;color:var(--text-3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .model-failover-ops{width:174px;white-space:nowrap;text-align:right}
+  .model-failover-ops .model-mini-btn{height:26px;padding:0 7px;font-size:11px;margin-left:4px}
+  .model-failover-add{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+  .model-failover-empty td{padding:18px 12px !important;text-align:center;color:var(--text-3);font-size:11.5px}
+  html[data-theme="dark"] .model-failover-table{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.1)}
+  html[data-theme="dark"] .model-failover-table thead th{background:rgba(255,255,255,.05)}
+  html[data-theme="dark"] .model-failover-table tbody td{border-bottom-color:rgba(255,255,255,.07)}
+  html[data-theme="dark"] .model-failover-row:hover{background:rgba(255,255,255,.055)}
+
 `

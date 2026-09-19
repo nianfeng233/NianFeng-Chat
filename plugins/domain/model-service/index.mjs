@@ -9,7 +9,7 @@
  * chat-flow 只认这个服务，不认任何具体适配器。
  */
 export const name = 'model-service'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '模型服务'
 export const description = '业务服务 · 模型抽象接口与调度，具体由适配器插件实现。'
 export const author = '念风内核'
@@ -49,16 +49,43 @@ export function apply(ctx) {
       const requestedKey = options.model || registry.activeKey()
       const startedAt = Date.now()
       const elapsed = () => Date.now() - startedAt
-      const fallbackKey = String(config.get('model.failoverKey', '') || '').trim()
-      const failoverEnabled = config.get('model.failoverEnabled', false) === true && !!fallbackKey && fallbackKey !== requestedKey
-      const maxFallbacks = failoverEnabled ? Math.max(0, Math.min(3, Number(config.get('model.failoverRetries', 1)) || 0)) : 0
+      const failoverEnabled = config.get('model.failoverEnabled', false) === true
+      const configuredKeys = (() => {
+        const raw = config.get('model.failoverKeys', [])
+        const list = Array.isArray(raw) ? raw : []
+        // 兼容旧版单值配置：迁移逻辑没跑到时也能工作。
+        if (!list.length) {
+          const legacy = String(config.get('model.failoverKey', '') || '').trim()
+          if (legacy) list.push(legacy)
+        }
+        const out = []
+        for (const item of list) {
+          const key = String(item || '').trim()
+          if (key && !out.includes(key)) out.push(key)
+        }
+        return out
+      })()
+      // failoverPasses = 备用列表循环几轮；旧版 failoverRetries 继续兼容读取。
+      const passesRaw = config.get('model.failoverPasses', config.get('model.failoverRetries', 1))
+      const passes = Math.max(1, Math.min(3, Math.floor(Number(passesRaw) || 1)))
+      const fallbackQueue = []
+      if (failoverEnabled) {
+        for (let pass = 0; pass < passes; pass++) {
+          for (const key of configuredKeys) {
+            if (key !== requestedKey) fallbackQueue.push(key)
+          }
+        }
+      }
+      const attemptOrder = [requestedKey, ...fallbackQueue]
+      const maxFallbacks = attemptOrder.length - 1
 
       let aborted = false
       let finished = false
       let emitted = false
       let attemptIndex = 0
-      let currentKey = requestedKey
+      let currentKey = attemptOrder[0]
       let currentController = null
+      let detachAbort = null
       const outerController = new AbortController()
       const signal = options.signal || outerController.signal
 
@@ -66,19 +93,27 @@ export function apply(ctx) {
         if (aborted || finished) return
         // 只有“还没输出任何内容”时才适合自动切换，避免已经显示的半截回复被另一模型重写。
         if (!emitted && attemptIndex < maxFallbacks) {
+          const failedKey = currentKey
           attemptIndex += 1
-          const nextKey = fallbackKey
+          const nextKey = attemptOrder[attemptIndex]
           events.emit('model:fallback', {
-            from: currentKey,
+            from: failedKey,
             to: nextKey,
             error,
             attempt: attemptIndex,
+            order: attemptIndex,
+            total: maxFallbacks,
+            keys: attemptOrder.slice(),
           })
-          ctx.logger.warn(`模型 ${currentKey} 失败，自动切换备用模型 ${nextKey}：${error?.message || error}`)
+          ctx.logger.warn(
+            `模型 ${failedKey} 失败，自动切换备用模型 ${nextKey}（${attemptIndex}/${maxFallbacks}）：${error?.message || error}`,
+          )
           startAttempt(nextKey)
           return
         }
         finished = true
+        detachAbort?.()
+        detachAbort = null
         ctx.logger.error(
           `模型 ${currentKey || '未选择'} 调用失败（${elapsed()}ms）：${error?.message || error}`,
         )
@@ -87,6 +122,9 @@ export function apply(ctx) {
       }
 
       const startAttempt = key => {
+        detachAbort?.()
+        detachAbort = null
+        currentKey = key
         const resolved = registry.resolve(key)
         if (!resolved?.providerImpl?.stream) {
           const err = new Error(
@@ -97,7 +135,6 @@ export function apply(ctx) {
           emitError(err)
           return
         }
-        currentKey = key
         emitted = false
         currentController = new AbortController()
         const abortCurrent = () => {
@@ -108,7 +145,10 @@ export function apply(ctx) {
           }
         }
         if (signal.aborted) abortCurrent()
-        else signal.addEventListener('abort', abortCurrent, { once: true })
+        else {
+          signal.addEventListener('abort', abortCurrent, { once: true })
+          detachAbort = () => signal.removeEventListener('abort', abortCurrent)
+        }
 
         try {
           callbacks.onStart?.({ key, model: resolved.model, attempt: attemptIndex })
@@ -138,6 +178,8 @@ export function apply(ctx) {
               onDone: summary => {
                 if (aborted || finished) return
                 finished = true
+                detachAbort?.()
+                detachAbort = null
                 callbacks.onDone?.(summary || {})
                 events.emit('model:done', {
                   key,
@@ -156,12 +198,14 @@ export function apply(ctx) {
         }
       }
 
-      startAttempt(requestedKey)
+      startAttempt(attemptOrder[0])
 
       return {
         abort() {
           if (aborted || finished) return
           aborted = true
+          detachAbort?.()
+          detachAbort = null
           try {
             currentController?.abort()
             outerController.abort()

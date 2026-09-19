@@ -25,6 +25,8 @@ const trimSlash = value => String(value || '').replace(/\/+$/, '')
 export async function startHeadlessRuntime(options = {}) {
   const backendUrl = trimSlash(options.backendUrl || process.env.NIANFENG_BACKEND_URL || process.env.FENGYU_BACKEND_URL || '')
   const accessToken = String(options.accessToken || process.env.NIANFENG_WEBUI_TOKEN || process.env.FENGYU_WEBUI_TOKEN || '').trim()
+  // 只有哈希落盘时父进程也拿不到明文；用同进程内存随机串走受控内部通道。
+  const internalSecret = String(options.internalSecret || '').trim()
   if (!backendUrl) throw new Error('缺少服务端代聊所需的后端地址（NIANFENG_BACKEND_URL）')
 
   globalThis.__NIANFENG_SERVER_AGENT__ = true
@@ -43,6 +45,7 @@ export async function startHeadlessRuntime(options = {}) {
     if (!url || !url.startsWith(backendUrl)) return nativeFetch(input, init)
     const headers = new Headers(init?.headers || (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined))
     if (accessToken) headers.set('X-NianFeng-Token', accessToken)
+    if (internalSecret) headers.set('X-NianFeng-Internal', internalSecret)
     headers.set('X-NianFeng-Agent', '1')
     return nativeFetch(input, { ...init, headers })
   }
