@@ -123,6 +123,8 @@ export function apply(ctx) {
               </div>
             </header>
 
+            <div class="market-mirror-tip" data-market-mirror-tip hidden>当前使用国内 GitHub 镜像源；插件内容仍会做 SHA-256 校验，但官方 GitHub 源才是权威来源，如遇异常可在上方切回官方源。</div>
+
             <div class="market-toolbar">
               <input class="market-search" data-market-search type="search" placeholder="搜索插件 id / 名称 / 作者 / 描述…" />
               <select class="market-select" data-market-sort title="排序方式">
@@ -173,6 +175,7 @@ export function apply(ctx) {
         pageSize: container.querySelector('[data-market-page-size]'),
         stats: container.querySelector('[data-market-stats]'),
         warning: container.querySelector('[data-market-warning]'),
+        mirrorTip: container.querySelector('[data-market-mirror-tip]'),
         list: container.querySelector('[data-market-list]'),
         pageInfo: container.querySelector('[data-market-page-info]'),
         detail: container.querySelector('[data-market-detail]'),
@@ -218,7 +221,7 @@ export function apply(ctx) {
         el.source.innerHTML = state.sources
           .map(
             source =>
-              `<option value="${escapeHtml(source.id)}"${source.id === state.activeSourceId ? ' selected' : ''}>${escapeHtml(source.name || source.id)}${source.official ? ' · 官方' : ''}</option>`,
+              `<option value="${escapeHtml(source.id)}"${source.id === state.activeSourceId ? ' selected' : ''}>${escapeHtml(source.name || source.id)}${source.mirror ? ' · 镜像' : source.official ? ' · 官方' : ''}</option>`,
           )
           .join('')
         const custom = state.activeSourceId !== 'official'
@@ -301,6 +304,7 @@ export function apply(ctx) {
             el.warning.textContent = ''
           }
         }
+        if (el.mirrorTip) el.mirrorTip.hidden = state.source?.mirror !== true
       }
 
       const renderPager = () => {

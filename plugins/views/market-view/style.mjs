@@ -33,6 +33,7 @@ export const MARKET_CSS = `
   .market-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 12px;}
   .market-stats{font-size:11.5px;color:var(--text-4);margin-left:auto;white-space:nowrap;}
   .market-warning{margin-bottom:10px;padding:9px 11px;border-radius:9px;border:1px solid rgba(198,91,91,.3);background:rgba(198,91,91,.07);color:#c65b5b;font-size:11.5px;line-height:1.7;}
+  .market-mirror-tip{margin-bottom:10px;padding:8px 11px;border-radius:9px;border:1px solid rgba(201,162,39,.3);background:rgba(201,162,39,.1);color:#a5721a;font-size:11.5px;line-height:1.7;}
 
   .market-list{display:flex;flex-direction:column;gap:10px;min-height:120px;}
   .market-card{

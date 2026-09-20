@@ -67,6 +67,10 @@ const ARCHIVE_HEADERS = {
   Accept: 'application/zip, application/octet-stream, */*',
 }
 
+const MIRROR_SOURCE_ID = 'github-mirror'
+const SOURCE_DEFAULT_VERSION = 2
+const GITHUB_MIRROR_PROXIES = ['https://ghproxy.net/', 'https://gh-proxy.com/', 'https://ghfast.top/']
+
 const sha256Hex = value => createHash('sha256').update(value).digest('hex')
 
 async function mapLimit(items, limit, fn) {
@@ -115,6 +119,16 @@ export function apply(ctx) {
   const officialIndexUrl = () =>
     String(process.env.NIANFENG_MARKET_INDEX_URL || marketSettings().officialIndexUrl || '').trim() || OFFICIAL_MARKET_INDEX_URL
 
+  const mirrorIndexUrls = () => {
+    const base = officialIndexUrl()
+    const list = GITHUB_MIRROR_PROXIES.map(proxy => `${proxy}${base}`)
+    if (base === OFFICIAL_MARKET_INDEX_URL) {
+      list.push(`https://cdn.jsdelivr.net/gh/nianfeng233/NianFeng-Chat-Plugins@main/index.json`)
+    }
+    list.push(base)
+    return [...new Set(list)]
+  }
+
   const officialSource = () => ({
     id: 'official',
     name: '念风官方插件源',
@@ -123,6 +137,21 @@ export function apply(ctx) {
     branch: OFFICIAL_MARKET_BRANCH,
     official: true,
     builtin: true,
+    mirror: false,
+  })
+
+  /** 国内 GitHub 加速镜像：默认源，网络不可达时用户可手动切回官方源。 */
+  const mirrorSource = () => ({
+    id: MIRROR_SOURCE_ID,
+    name: '国内 GitHub 镜像源',
+    url: mirrorIndexUrls()[0],
+    urls: mirrorIndexUrls(),
+    repo: OFFICIAL_MARKET_REPO,
+    branch: OFFICIAL_MARKET_BRANCH,
+    official: false,
+    builtin: true,
+    mirror: true,
+    githubProxies: GITHUB_MIRROR_PROXIES,
   })
 
   const normalizeCustomSource = raw => {
@@ -130,7 +159,7 @@ export function apply(ctx) {
     const url = String(raw.url || raw.indexUrl || '').trim()
     if (!/^https?:\/\//i.test(url)) return null
     const id = safePluginId(raw.id || `custom-${sha256Hex(url).slice(0, 12)}`)
-    if (!id || id === 'official') return null
+    if (!id || id === 'official' || id === MIRROR_SOURCE_ID) return null
     return {
       id,
       name: String(raw.name || '').trim().slice(0, 60) || id,
@@ -139,6 +168,9 @@ export function apply(ctx) {
       branch: String(raw.branch || '').trim(),
       official: false,
       builtin: false,
+      mirror: false,
+      githubProxies: [],
+      urls: [url],
     }
   }
 
@@ -147,17 +179,34 @@ export function apply(ctx) {
     return Array.isArray(list) ? list.map(normalizeCustomSource).filter(Boolean) : []
   }
 
-  const allSources = () => [officialSource(), ...customSources().filter(source => source.id !== 'official')]
+  const allSources = () => [officialSource(), mirrorSource(), ...customSources()]
 
   const sourceById = id => {
     const wanted = String(id || '').trim()
-    if (!wanted) return officialSource()
+    if (!wanted) return mirrorSource()
     return allSources().find(source => source.id === wanted) || null
+  }
+
+  let sourceDefaultsEnsured = false
+  const ensureSourceDefaults = async () => {
+    if (sourceDefaultsEnsured) return
+    sourceDefaultsEnsured = true
+    try {
+      const current = marketSettings()
+      if (Number(current.sourceDefaultVersion) >= SOURCE_DEFAULT_VERSION) return
+      const next = { ...current, sourceDefaultVersion: SOURCE_DEFAULT_VERSION }
+      // 旧版本默认官方源；升级后默认切到国内镜像，用户主动选回官方源后会保持。
+      if (!current.activeSourceId || current.activeSourceId === 'official') next.activeSourceId = MIRROR_SOURCE_ID
+      await settings.update({ market: next })
+    } catch (err) {
+      ctx.logger.debug(`插件市场默认源初始化失败：${err?.message || err}`)
+    }
   }
 
   const activeSourceId = () => {
     const wanted = String(marketSettings().activeSourceId || '').trim()
-    return sourceById(wanted) ? wanted : 'official'
+    if (wanted && sourceById(wanted)) return wanted
+    return sourceById(MIRROR_SOURCE_ID) ? MIRROR_SOURCE_ID : 'official'
   }
 
   const saveSources = async (sources, nextActiveId) => {
@@ -242,12 +291,48 @@ export function apply(ctx) {
     }
   }
 
-  const fetchJsonText = async (url, { timeoutMs = 12000, maxBytes = MARKET_MAX_BYTES } = {}) => {
-    const result = await fetchPublicText(url, { headers: JSON_HEADERS, timeoutMs, maxBytes })
+  const isGithubHostUrl = value =>
+    /^https:\/\/(raw\.githubusercontent\.com|github\.com|codeload\.github\.com|api\.github\.com)\//i.test(String(value || ''))
+
+  /** 镜像源优先走加速前缀，最后一个候选才是 GitHub 原地址。 */
+  const mirrorUrlCandidates = (url, source) => {
+    const candidates = [url]
+    if (source?.mirror && Array.isArray(source.githubProxies) && isGithubHostUrl(url)) {
+      for (const proxy of source.githubProxies) candidates.unshift(`${proxy}${url}`)
+    }
+    return [...new Set(candidates.filter(Boolean))]
+  }
+
+  const fetchTextFirst = async (urls, options = {}) => {
+    let lastError = null
+    for (const url of urls) {
+      try {
+        return await fetchPublicText(url, { headers: JSON_HEADERS, timeoutMs: 12000, maxBytes: MARKET_MAX_BYTES, ...options })
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError || new Error('没有可用的下载地址')
+  }
+
+  const fetchBufferFirst = async (urls, options = {}) => {
+    let lastError = null
+    for (const url of urls) {
+      try {
+        return await fetchPublicBuffer(url, options)
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError || new Error('没有可用的下载地址')
+  }
+
+  const fetchJsonText = async (url, { source = null, timeoutMs = 12000, maxBytes = MARKET_MAX_BYTES } = {}) => {
+    const result = await fetchTextFirst(mirrorUrlCandidates(url, source), { timeoutMs, maxBytes })
     return result.text
   }
 
-  const fetchRepoInfo = async repoUrl => {
+  const fetchRepoInfo = async (repoUrl, source = null) => {
     const parsed = parseGithubRepo(repoUrl)
     if (!parsed) return null
     const key = `${parsed.owner}/${parsed.repo}`.toLowerCase()
@@ -256,12 +341,13 @@ export function apply(ctx) {
     if (inflightRepoInfos.has(key)) return inflightRepoInfos.get(key)
     const task = (async () => {
       try {
-        const text = await fetchPublicText(`https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`, {
+        const apiUrl = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`
+        const result = await fetchTextFirst(mirrorUrlCandidates(apiUrl, source), {
           headers: GITHUB_HEADERS,
           timeoutMs: 8000,
           maxBytes: 200000,
         })
-        const data = JSON.parse(text.text)
+        const data = JSON.parse(result.text)
         const info = {
           fullName: String(data.full_name || ''),
           owner: String(data.owner?.login || parsed.owner),
@@ -324,14 +410,14 @@ export function apply(ctx) {
     const repoUrl = String(repo.url || '').trim()
     if (!repoUrl) return []
     const branch = String(repo.branch || '').trim()
-    const repoInfo = branch ? null : await fetchRepoInfo(repoUrl).catch(() => null)
+    const repoInfo = branch ? null : await fetchRepoInfo(repoUrl, source).catch(() => null)
     const rawBranch = branch || repoInfo?.defaultBranch || MARKET_DEFAULT_BRANCH
     const fallbackId = safePluginId(parseGithubRepo(repoUrl)?.repo || repoUrl.split('/').filter(Boolean).pop() || 'plugin')
     let manifest = null
     const manifestUrl = githubRaw(repoUrl, rawBranch, 'manifest.json')
     if (manifestUrl) {
       try {
-        manifest = JSON.parse(await fetchJsonText(manifestUrl))
+        manifest = JSON.parse(await fetchJsonText(manifestUrl, { source }))
       } catch (_) {
         manifest = null
       }
@@ -352,8 +438,8 @@ export function apply(ctx) {
     const indexUrl = githubRaw(repoUrl, rawBranch, 'index.mjs')
     if (indexUrl) {
       try {
-        const text = await fetchPublicText(indexUrl, { headers: JSON_HEADERS, timeoutMs: 10000, maxBytes: 500000 })
-        const pick = pattern => String(text.text.match(pattern)?.[1] || '').trim()
+        const result = await fetchTextFirst(mirrorUrlCandidates(indexUrl, source), { timeoutMs: 10000, maxBytes: 500000 })
+        const pick = pattern => String(result.text.match(pattern)?.[1] || '').trim()
         const plugin = normalizeMarketPlugin(
           {
             id: pick(/export\s+const\s+name\s*=\s*['"`]([^'"`]+)['"`]/) || fallbackId,
@@ -389,7 +475,7 @@ export function apply(ctx) {
     if (!repoUrl) return []
     let branch = String(repo.branch || '').trim()
     if (!branch) {
-      const info = await fetchRepoInfo(repoUrl).catch(() => null)
+      const info = await fetchRepoInfo(repoUrl, source).catch(() => null)
       branch = info?.defaultBranch || MARKET_DEFAULT_BRANCH
     }
     const candidates = [String(repo.manifest || '').trim(), ...MARKET_MANIFEST_FILENAMES].filter(Boolean)
@@ -397,7 +483,7 @@ export function apply(ctx) {
       const url = /^https?:\/\//i.test(file) ? file : githubRaw(repoUrl, branch, file)
       if (!url) continue
       try {
-        const text = await fetchJsonText(url)
+        const text = await fetchJsonText(url, { source })
         const parsed = JSON.parse(text)
         const plugins = normalizeManifestPlugins(parsed, { url: repoUrl, branch }, source, warnings)
         if (plugins.length) return plugins
@@ -433,8 +519,9 @@ export function apply(ctx) {
       const sourceLooksLikeGithubRepo = isGithubRepoUrl(source.url) && !/\.json(?:$|[?#])/i.test(source.url)
       if (!sourceLooksLikeGithubRepo) {
         try {
-          const text = await fetchJsonText(source.url)
-          index = parseMarketIndex(text, source.repo || source.url)
+          const indexUrls = Array.isArray(source.urls) && source.urls.length ? source.urls : [source.url]
+          const result = await fetchTextFirst(indexUrls)
+          index = parseMarketIndex(result.text, source.repo || source.url)
         } catch (err) {
           warnings.push(`读取市场索引失败：${err?.message || err}`)
         }
@@ -491,7 +578,7 @@ export function apply(ctx) {
       const uniqueRepos = [...new Set(plugins.map(plugin => plugin.repo).filter(Boolean))]
       const infoList = await mapLimit(uniqueRepos, REPO_CONCURRENCY, async repoUrl => {
         try {
-          return await fetchRepoInfo(repoUrl)
+          return await fetchRepoInfo(repoUrl, source)
         } catch (_) {
           return null
         }
@@ -581,6 +668,7 @@ export function apply(ctx) {
     branch: source.branch || '',
     official: source.official === true,
     builtin: source.builtin === true,
+    mirror: source.mirror === true,
   })
 
   const parseBool = value => value === true || String(value || '').toLowerCase() === 'true' || String(value || '') === '1'
@@ -645,7 +733,7 @@ export function apply(ctx) {
     return { prefix, entries: selected }
   }
 
-  const downloadPluginArchive = async plugin => {
+  const downloadPluginArchive = async (plugin, source = null) => {
     const release = plugin.release && typeof plugin.release === 'object' ? plugin.release : null
     let archiveUrl = String(release?.url || plugin.archiveUrl || '').trim()
     if (!archiveUrl && isGithubRepoUrl(plugin.repo)) {
@@ -656,14 +744,19 @@ export function apply(ctx) {
     if (!archiveUrl) {
       return { ok: false, error: '该插件没有可用的下载地址（既没有 release，也不是 GitHub 仓库）' }
     }
-    const result = await fetchPublicBuffer(archiveUrl, { headers: ARCHIVE_HEADERS, maxBytes: ZIP_MAX_BYTES, timeoutMs: 180000 })
+    const result = await fetchBufferFirst(mirrorUrlCandidates(archiveUrl, source), {
+      headers: ARCHIVE_HEADERS,
+      maxBytes: ZIP_MAX_BYTES,
+      timeoutMs: 180000,
+    })
     if (result.truncated) return { ok: false, error: `插件压缩包超过 ${Math.round(ZIP_MAX_BYTES / 1024 / 1024)}MB 限制` }
-    return { ok: true, archiveUrl, buffer: result.buffer }
+    return { ok: true, archiveUrl: result.url || archiveUrl, buffer: result.buffer }
   }
 
   /* ---------------- HTTP API ---------------- */
 
   http.route('GET', '/api/market/sources', async (req, res) => {
+    await ensureSourceDefaults()
     await loadDiskCache()
     http.sendJson(res, 200, {
       ok: true,
@@ -720,6 +813,7 @@ export function apply(ctx) {
   })
 
   http.route('POST', '/api/market/refresh', async (req, res) => {
+    await ensureSourceDefaults()
     const body = await http.readBody(req)
     const source = sourceById(body?.sourceId || activeSourceId())
     if (!source) return http.sendJson(res, 200, { ok: false, error: '插件源不存在' })
@@ -732,6 +826,7 @@ export function apply(ctx) {
   })
 
   http.route('GET', '/api/market/plugins', async (req, res, params, url) => {
+    await ensureSourceDefaults()
     const source = sourceById(url.searchParams.get('sourceId') || activeSourceId())
     if (!source) return http.sendJson(res, 200, { ok: false, error: '插件源不存在' })
     const force = parseBool(url.searchParams.get('refresh'))
@@ -774,6 +869,7 @@ export function apply(ctx) {
   })
 
   http.route('GET', '/api/market/plugin/:id', async (req, res, params, url) => {
+    await ensureSourceDefaults()
     const source = sourceById(url.searchParams.get('sourceId') || activeSourceId())
     if (!source) return http.sendJson(res, 200, { ok: false, error: '插件源不存在' })
     let catalog
@@ -793,7 +889,7 @@ export function apply(ctx) {
     }
     if (!plugin) return http.sendJson(res, 404, { ok: false, error: '没有找到该插件' })
     const enriched = withInstallState(plugin, await installedVersions())
-    const repoInfo = plugin.repo ? await fetchRepoInfo(plugin.repo).catch(() => null) : null
+    const repoInfo = plugin.repo ? await fetchRepoInfo(plugin.repo, source).catch(() => null) : null
     const branch = plugin.branch || repoInfo?.defaultBranch || MARKET_DEFAULT_BRANCH
     const readmeCandidates = []
     if (plugin.path) {
@@ -805,7 +901,11 @@ export function apply(ctx) {
       const readmeUrl = /^https?:\/\//i.test(file) ? file : githubRaw(plugin.repo, branch, file)
       if (!readmeUrl) continue
       try {
-        const result = await fetchPublicText(readmeUrl, { headers: { ...JSON_HEADERS, Accept: 'text/plain, text/markdown, */*' }, timeoutMs: 10000, maxBytes: 500000 })
+        const result = await fetchTextFirst(mirrorUrlCandidates(readmeUrl, source), {
+          headers: { ...JSON_HEADERS, Accept: 'text/plain, text/markdown, */*' },
+          timeoutMs: 10000,
+          maxBytes: 500000,
+        })
         if (result.text.trim()) {
           readme = result.text
           break
@@ -866,6 +966,7 @@ export function apply(ctx) {
   })
 
   http.route('POST', '/api/market/install', async (req, res) => {
+    await ensureSourceDefaults()
     const body = await http.readBody(req)
     const source = sourceById(body?.sourceId || activeSourceId())
     if (!source) return http.sendJson(res, 200, { ok: false, error: '插件源不存在' })
@@ -896,7 +997,7 @@ export function apply(ctx) {
       })
     }
 
-    const downloaded = await downloadPluginArchive(plugin).catch(err => ({ ok: false, error: err?.message || String(err) }))
+    const downloaded = await downloadPluginArchive(plugin, source).catch(err => ({ ok: false, error: err?.message || String(err) }))
     if (!downloaded.ok) return http.sendJson(res, 200, downloaded)
 
     let archiveHashVerified = false
@@ -976,7 +1077,7 @@ export function apply(ctx) {
 
   // 启动后后台预热一次官方索引（不阻塞后端启动）；失败只写 debug 日志。
   const warmupTimer = setTimeout(() => {
-    fetchSourceCatalog(officialSource(), { force: true }).catch(err => {
+    fetchSourceCatalog(mirrorSource(), { force: true }).catch(err => {
       ctx.logger.debug(`插件市场预热失败（可能当前离线）：${err?.message || err}`)
     })
   }, 1800)
