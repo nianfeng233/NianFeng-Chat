@@ -39,6 +39,22 @@ function logLine(plan, message) {
   return appendFile(file, `${text}\n`, 'utf8').catch(() => {})
 }
 
+/** 等进度窗口读到最终状态自行关闭；超时则强制结束，避免残留后台窗口。 */
+async function closeUpdateWindow(plan) {
+  const pid = Number(plan?._progressPid) || 0
+  if (!pid) return
+  const deadline = Date.now() + 12000
+  while (Date.now() < deadline && isProcessAlive(pid)) await sleep(250)
+  if (isProcessAlive(pid)) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  plan._progressPid = 0
+}
+
 function formatBytes(value) {
   const bytes = Math.max(0, Number(value) || 0)
   if (bytes < 1024) return `${bytes} B`
@@ -655,7 +671,7 @@ async function main() {
     percent: 1,
   })
   // 给新进程和进度窗口一点时间显示最终状态，然后结束助手本身。
-  await sleep(1200)
+  await closeUpdateWindow(plan)
   if (plan.workDir) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
