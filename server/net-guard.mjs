@@ -88,6 +88,10 @@ function systemProxyUrl() {
     process.env.http_proxy ||
     process.env.ALL_PROXY ||
     process.env.all_proxy ||
+    process.env.NIANFENG_HTTPS_PROXY ||
+    process.env.NIANFENG_HTTP_PROXY ||
+    process.env.NIANFENG_MARKET_PROXY ||
+    process.env.MARKET_PROXY ||
     process.env.npm_config_https_proxy ||
     process.env.npm_config_http_proxy ||
     process.env.npm_config_proxy ||

@@ -378,7 +378,9 @@ export function apply(ctx) {
         /* 没有 index.mjs，继续给出提示 */
       }
     }
-    warnings.push(`${source.name || source.id}：仓库 ${repoUrl} 缺少市场清单（${MARKET_MANIFEST_FILENAMES.join(' / ')}），已跳过`)
+    warnings.push(
+      `${source.name || source.id}：仓库 ${repoUrl} 未找到可用市场清单（${MARKET_MANIFEST_FILENAMES.join(' / ')}），或网络不可达；已跳过`,
+    )
     return []
   }
 
@@ -465,6 +467,25 @@ export function apply(ctx) {
 
       const plugins = [...found.values()]
       if (!plugins.length && !warnings.length) warnings.push('没有从该源读取到任何插件')
+      if (
+        !plugins.length &&
+        warnings.some(warning => /ECONNRESET|ECONNREFUSED|ETIMEDOUT|请求超时|fetch failed|socket hang up|网络不可达/i.test(String(warning)))
+      ) {
+        warnings.push(
+          '网络请求失败：若当前使用代理，请确认系统代理已开启，或设置环境变量 NIANFENG_MARKET_PROXY（例如 http://127.0.0.1:7890）后重启后端。',
+        )
+      }
+
+      // 刷新失败（断网 / 代理抖动）时不能拿空目录覆盖上一次成功缓存，
+      // 否则用户会看到插件和源一起“消失”。返回旧目录并标记 stale，让 UI 给出提示。
+      if (!plugins.length && cached?.plugins?.length) {
+        return {
+          ...cached,
+          stale: true,
+          error: warnings.join('；'),
+          warnings: [...(cached.warnings || []), ...warnings].slice(0, 80),
+        }
+      }
 
       // 用 GitHub 仓库信息补齐 star / 作者 / 更新时间；失败只显示为空，不影响目录。
       const uniqueRepos = [...new Set(plugins.map(plugin => plugin.repo).filter(Boolean))]

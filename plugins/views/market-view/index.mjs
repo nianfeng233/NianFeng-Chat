@@ -184,7 +184,9 @@ export function apply(ctx) {
       }
 
       const state = {
-        sources: [],
+        // 先放一个官方源占位：即使 /api/market/sources 还没返回或读取失败，
+        // 下拉框也不会变成空白。
+        sources: [{ id: 'official', name: '念风官方插件源（读取中…）', official: true, builtin: true }],
         activeSourceId: 'official',
         loading: false,
         error: '',
@@ -197,6 +199,7 @@ export function apply(ctx) {
         sort: 'updated',
         order: 'desc',
         fetchedAt: 0,
+        stale: false,
         warnings: [],
         source: null,
         detail: null,
@@ -286,6 +289,7 @@ export function apply(ctx) {
           const parts = [`共 ${formatNumber(state.total)} 个插件`]
           if (source?.name) parts.push(`源：${source.name}`)
           if (state.fetchedAt) parts.push(`同步：${formatTime(state.fetchedAt)}`)
+          if (state.stale) parts.push('当前为缓存数据')
           el.stats.textContent = parts.join(' · ')
         }
         if (el.warning) {
@@ -361,11 +365,14 @@ export function apply(ctx) {
       const loadSources = async () => {
         try {
           const info = await api.marketSources()
-          state.sources = Array.isArray(info?.sources) ? info.sources : []
+          if (Array.isArray(info?.sources) && info.sources.length) state.sources = info.sources
+          else if (!state.sources.length) state.sources = [{ id: 'official', name: '念风官方插件源', official: true, builtin: true }]
           state.activeSourceId = info?.activeSourceId || 'official'
           renderSources()
         } catch (err) {
+          if (!state.sources.length) state.sources = [{ id: 'official', name: '念风官方插件源', official: true, builtin: true }]
           state.error = `读取插件源失败：${err?.message || err}`
+          renderSources()
         }
       }
 
@@ -393,6 +400,7 @@ export function apply(ctx) {
           state.pageSize = Number(data.pageSize) || state.pageSize
           state.totalPages = Math.max(1, Number(data.totalPages) || 1)
           state.warnings = Array.isArray(data.warnings) ? data.warnings : []
+          state.stale = data.stale === true
           state.fetchedAt = Number(data.fetchedAt) || 0
           state.source = data.source || null
           state.error = ''
