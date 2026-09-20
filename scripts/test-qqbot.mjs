@@ -485,6 +485,118 @@ async function main() {
     )
 
 
+    console.log('\n④e QQ 新版 msg_elements：元素图片 / 引用图片 / 引用正文')
+    const elementImageEvent = {
+      id: 'event-group-element-image',
+      op: 0,
+      s: 10,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-element-image',
+        content: '',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+        message_type: 0,
+        message_scene: { source: 'group', ext: [] },
+        msg_elements: [
+          {
+            type: 'image',
+            url: `${mockBase}/qq-image.png`,
+            content_type: 'image/png',
+            filename: 'element-image.png',
+            width: 1,
+            height: 1,
+          },
+        ],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: elementImageEvent })
+    await sleep(400)
+    const elementInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const elementImageMessage = (elementInbox.messages || []).find(item => item.id.includes('msg-group-element-image'))
+    check(
+      '普通消息的图片放在 msg_elements 时也能识别为图片消息',
+      elementImageMessage?.text === '[图片]' &&
+        Array.isArray(elementImageMessage?.images) &&
+        elementImageMessage.images.length === 1 &&
+        !!elementImageMessage.images[0]?.id,
+      JSON.stringify(elementImageMessage),
+    )
+    check(
+      'msg_elements 图片事件不再落成 parseFallback 占位提示',
+      elementImageMessage?.parseFallback !== true,
+      JSON.stringify(elementImageMessage),
+    )
+
+    const quoteImageEvent = {
+      id: 'event-group-quote-image',
+      op: 0,
+      s: 11,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-quote-image',
+        content: '那这个呢',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+        message_type: 103,
+        msg_elements: [
+          {
+            id: 'quoted-image-msg-1',
+            content: '',
+            attachments: [
+              {
+                content_type: 'image/png',
+                filename: 'quoted-image.png',
+                width: 1,
+                height: 1,
+                url: `${mockBase}/qq-image.png`,
+              },
+            ],
+          },
+        ],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: quoteImageEvent })
+    await sleep(400)
+    const quoteImageInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const quoteImageMessage = (quoteImageInbox.messages || []).find(item => item.id.includes('msg-group-quote-image'))
+    check(
+      '引用消息正文为空时，msg_elements 里被引用图片也会下载并带进本条消息',
+      quoteImageMessage?.text === '那这个呢' &&
+        Array.isArray(quoteImageMessage?.images) &&
+        quoteImageMessage.images.length === 1 &&
+        !!quoteImageMessage.images[0]?.id,
+      JSON.stringify(quoteImageMessage),
+    )
+
+    const quoteTextEvent = {
+      id: 'event-group-quote-text',
+      op: 0,
+      s: 12,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-quote-text',
+        content: '',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-full',
+        author: { id: 'member-openid-full-1', member_openid: 'member-openid-full-1' },
+        message_type: 103,
+        msg_elements: [{ id: 'quoted-text-msg-1', content: '被引用的原话', attachments: [] }],
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: quoteTextEvent })
+    await sleep(260)
+    const quoteTextInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group-full')).json()
+    const quoteTextMessage = (quoteTextInbox.messages || []).find(item => item.id.includes('msg-group-quote-text'))
+    check(
+      '引用正文会以 [引用] 前缀保留，不再生成无法解析占位消息',
+      quoteTextMessage?.text === '[引用] 被引用的原话' && quoteTextMessage?.parseFallback !== true,
+      JSON.stringify(quoteTextMessage),
+    )
+
+
     // QQ 如果未来改事件名，payload 结构兜底仍要能识别群消息，避免整类消息被丢弃。
     const structuralGroupEvent = {
       id: 'event-group-structural-1',

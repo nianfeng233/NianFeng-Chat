@@ -132,6 +132,10 @@ export function apply(ctx) {
 后端事件（`/api/events`）：`channel:message`、
 `provider/status`、`chat/start|done|error`、`sessions/changed`、`settings/updated`。
 
+> WebUI 入口会把相同 `origin + pathname` 的 `new EventSource` 合并为一条原生 SSE 连接
+> （`src/util/event-source-multiplex.mjs`），避免多个渠道 / 外部插件占满浏览器 6 条连接池；
+> `start.mjs` 代理也会在浏览器刷新 / 关闭导致下游断开时同步销毁上游 SSE，防止后端 hub 堆积悬挂客户端。
+
 ### 微信 Clawbot 渠道
 
 `wechat-clawbot` 插件是当前唯一内置的真实渠道：

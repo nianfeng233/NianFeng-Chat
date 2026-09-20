@@ -1147,7 +1147,7 @@ async function main() {
   const convHydrate = sessions.create({ name: '入站图片 Hydration 测试', meta: { roleId: 'role-img-hydrate' } })
   sessions.activate(convHydrate.id)
   store.channelForConversation(convHydrate.id)
-  store.append(convHydrate.id, {
+  const hydrateIncoming = store.append(convHydrate.id, {
     role: 'user',
     content: '看看这张入站图片',
     sender_id: 'qq:10002',
@@ -1178,6 +1178,34 @@ async function main() {
     hydrateImages.length === 1 && String(hydrateImages[0].image_url?.url || '').startsWith('data:image/'),
     JSON.stringify({ captured: !!hydrateCaptured, imageParts: hydrateImages.length, contentType: typeof hydrateUser?.content }),
   )
+  const hydrateChannelId = store.channelForConversation(convHydrate.id).channelId
+  const readImageResult = await tools.execute(
+    'read_messages',
+    { image_message_ids: [hydrateIncoming.message_id], image_limit: 2, limit: 5 },
+    {
+      conversationId: convHydrate.id,
+      channelId: hydrateChannelId,
+      roleId: 'role-img-hydrate',
+      userId: 'web-user',
+      sentContents: new Map(),
+    },
+  )
+  check(
+    'read_messages 按 image_message_ids 取回只有 imageId 的图片原图',
+    readImageResult?.ok === true &&
+      Array.isArray(readImageResult.images) &&
+      readImageResult.images.length === 1 &&
+      String(readImageResult.images[0]?.image_url?.url || '').startsWith('data:image/') &&
+      String(readImageResult.images[0]?.message_id || '') === String(hydrateIncoming.message_id),
+    JSON.stringify(readImageResult).slice(0, 500),
+  )
+  check(
+    'read_messages 指定 image_message_ids 时同时返回该消息本身',
+    Array.isArray(readImageResult?.messages) &&
+      readImageResult.messages.some(item => String(item.message_id || item.id || '') === String(hydrateIncoming.message_id)),
+    JSON.stringify(readImageResult?.messages || []).slice(0, 300),
+  )
+
 
 
 

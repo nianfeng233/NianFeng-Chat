@@ -882,8 +882,10 @@ function detectGroupMention(account, input) {
     if (values.some(value => value !== undefined && value !== null && candidates.has(String(value)))) return true
   }
   const content = String(d?.content ?? d?.text ?? root?.content ?? '')
+  const elementText = extractMessageElements(d?.msg_elements ?? root?.msg_elements).texts.join('\n')
+  const hay = [content, elementText].filter(Boolean).join('\n')
   for (const value of candidates) {
-    if (content.includes(`<@!${value}>`) || content.includes(`<@${value}>`) || content.includes(`@${value}`)) return true
+    if (hay.includes(`<@!${value}>`) || hay.includes(`<@${value}>`) || hay.includes(`@${value}`)) return true
   }
   return false
 }
@@ -926,14 +928,32 @@ function detectGroupMention(account, input) {
       senderName = String(author.username || '')
     }
     const rawContent = d.content ?? d.text ?? root.content ?? ''
-    const rawAttachments = d.attachments || root.attachments || []
+    // 新版权消息会额外给出 message_scene / msg_elements：
+    //   - message_type=103 时 msg_elements[0] 是被引用的原消息；
+    //   - 普通新版事件也可能把图片放在元素对象里，而 attachments 为空。
+    // 因而文字与附件都要从元素列表里兜底提取，不能只看 d.content / d.attachments。
+    const messageElements = extractMessageElements(d.msg_elements ?? root.msg_elements)
+    const rawAttachments = [
+      ...(Array.isArray(d.attachments) ? d.attachments : []),
+      ...(Array.isArray(root.attachments) ? root.attachments : []),
+      ...messageElements.attachments,
+    ]
+    const messageType = Number(d.message_type ?? root.message_type)
+    const quoteEvent = messageType === 103 || !!d.message_reference || !!root.message_reference
     text = normalizeEventText(rawContent, botName)
+    const elementTexts = messageElements.texts.map(value => normalizeEventText(value, botName)).filter(Boolean)
+    if (!text && elementTexts.length) {
+      text = quoteEvent ? `[引用] ${elementTexts[0]}` : elementTexts.join('\n')
+    } else if (quoteEvent && elementTexts.length) {
+      const quoted = elementTexts.find(value => value !== text && !text.includes(value))
+      if (quoted) text = `${text}\n[引用] ${quoted}`
+    }
     const attachmentImages = extractAttachments(rawAttachments)
-    const media = attachmentImages.length > 0 || (Array.isArray(rawAttachments) && rawAttachments.length > 0)
-    // QQ 官方图片消息的 content 可能是空串，真实图片在 d.attachments 里；
+    const media = attachmentImages.length > 0 || rawAttachments.length > 0
+    // QQ 官方图片消息的 content 可能是空串，真实图片在 d.attachments / msg_elements 里；
     // 这里必须使用已抽取的 attachmentImages，不能引用未定义的 images（否则图片事件直接异常）。
-    if (!text && attachmentImages.length) text = '[图片]'
-    else if (!text && media) text = '[QQ 媒体消息]'
+    if (!text && attachmentImages.length) text = quoteEvent ? '[引用图片]' : '[图片]'
+    else if (!text && media) text = quoteEvent ? '[引用媒体]' : '[QQ 媒体消息]'
     if (!peerId) return null
     const qqMessageId = String(d.id || d.message_id || root.id || '')
     // 事件名 / payload 结构对，但正文和附件都解析不出来时，生成一条占位消息，
@@ -976,28 +996,171 @@ function detectGroupMention(account, input) {
     }
   }
 
+  /** 从对象里尽力取出 QQ 富媒体的实际 URL（兼容 attachments / msg_elements / media 等结构）。 */
+  function attachmentUrlOf(item) {
+    if (!item || typeof item !== 'object') return ''
+    const media = item.media && typeof item.media === 'object' ? item.media : {}
+    const image = item.image_url ?? item.imageUrl ?? item.image
+    const candidates = [
+      item.url,
+      item.proxy_url,
+      item.proxyUrl,
+      item.file_url,
+      item.fileUrl,
+      item.download_url,
+      item.downloadUrl,
+      item.pic_url,
+      item.picUrl,
+      item.picture_url,
+      item.pictureUrl,
+      image,
+      media.url,
+      media.proxy_url,
+      media.file_url,
+      media.download_url,
+      media.pic_url,
+      media.image_url,
+      media.imageUrl,
+    ]
+    for (const candidate of candidates) {
+      if (!candidate) continue
+      if (typeof candidate === 'string') {
+        const url = candidate.trim()
+        if (url) return url
+        continue
+      }
+      if (typeof candidate === 'object') {
+        const nested = attachmentUrlOf(candidate)
+        if (nested) return nested
+      }
+    }
+    return ''
+  }
+
+  function attachmentContentTypeOf(item) {
+    const media = item?.media && typeof item.media === 'object' ? item.media : {}
+    return String(
+      item?.content_type ??
+        item?.contentType ??
+        item?.mime_type ??
+        item?.mimeType ??
+        item?.mime ??
+        media.content_type ??
+        media.mime_type ??
+        media.mime ??
+        '',
+    )
+      .toLowerCase()
+      .split(';')[0]
+      .trim()
+  }
+
+  function attachmentFilenameOf(item) {
+    const media = item?.media && typeof item.media === 'object' ? item.media : {}
+    return String(item?.filename ?? item?.file_name ?? item?.fileName ?? item?.name ?? media.filename ?? media.file_name ?? '').trim()
+  }
+
+  function attachmentTypeHintOf(item) {
+    const media = item?.media && typeof item.media === 'object' ? item.media : {}
+    return String(item?.type ?? item?.element_type ?? item?.elementType ?? item?.msg_type ?? item?.msgType ?? media.type ?? '').toLowerCase()
+  }
+
+  function normalizeAttachmentUrl(rawUrl) {
+    const value = String(rawUrl || '').trim()
+    if (!value) return ''
+    if (/^https?:\/\//i.test(value) || /^data:image\//i.test(value)) return value
+    if (value.startsWith('//')) return `https:${value}`
+    return `https://${value.replace(/^\/+/, '')}`
+  }
+
+  function attachmentLooksImage(item, rawUrl) {
+    const contentType = attachmentContentTypeOf(item)
+    const filename = attachmentFilenameOf(item)
+    const typeHint = attachmentTypeHintOf(item)
+    return (
+      contentType.startsWith('image') ||
+      /image|img|pic|picture|photo|sticker|face|emoji/.test(typeHint) ||
+      (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif|heic|heif)(\?|#|$)/i.test(rawUrl)) ||
+      (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif|heic|heif)$/i.test(filename))
+    )
+  }
+
+  /**
+   * 提取新版权消息的 msg_elements：
+   *   - texts：可能是当前消息的文本段，也可能是 message_type=103 时的引用原文；
+   *   - attachments：元素里直接带的媒体，或嵌套在 attachments / media / images 里的媒体。
+   * 只识别常见字段，避免把未知结构硬当成聊天正文。
+   */
+  function extractMessageElements(input) {
+    const out = { texts: [], attachments: [] }
+    const seenTexts = new Set()
+    const seenAttachments = new Set()
+    const visit = (value, depth = 0) => {
+      if (!value || depth > 4) return
+      if (typeof value === 'string') {
+        const text = value.trim()
+        if (text && !seenTexts.has(text)) {
+          seenTexts.add(text)
+          out.texts.push(text)
+        }
+        return
+      }
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item, depth + 1)
+        return
+      }
+      if (typeof value !== 'object') return
+
+      const directText = [value.content, value.text, value.plain_text, value.plainText].find(
+        item => typeof item === 'string' && item.trim(),
+      )
+      if (directText) {
+        const text = String(directText).trim()
+        if (!seenTexts.has(text)) {
+          seenTexts.add(text)
+          out.texts.push(text)
+        }
+      }
+
+      if (attachmentUrlOf(value)) {
+        const key = `${attachmentUrlOf(value)}\u0000${attachmentContentTypeOf(value)}`
+        if (!seenAttachments.has(key)) {
+          seenAttachments.add(key)
+          out.attachments.push(value)
+        }
+      }
+
+      for (const key of ['attachments', 'elements', 'msg_elements', 'messages', 'images', 'image', 'media', 'content']) {
+        const nested = value[key]
+        if (Array.isArray(nested) || (nested && typeof nested === 'object')) visit(nested, depth + 1)
+      }
+    }
+    visit(input)
+    return out
+  }
+
   /** QQ 消息事件的附件（图片）直接给 HTTPS URL；URL 可能带签名有效期，读取时立即使用。 */
   function extractAttachments(input) {
     const list = Array.isArray(input) ? input : []
     const images = []
+    const seen = new Set()
     for (const item of list) {
       if (images.length >= MAX_IMAGES_PER_MESSAGE) break
-      const contentType = String(item?.content_type || item?.contentType || '').toLowerCase()
-      const filename = String(item?.filename || item?.file_name || '').trim()
-      const rawUrl = String(item?.url || item?.proxy_url || '').trim()
-      if (!rawUrl) continue
-      const looksImage =
-        contentType.startsWith('image') ||
-        (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif)(\?|#|$)/i.test(rawUrl)) ||
-        (!contentType && /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename))
-      if (!looksImage) continue
+      if (!item || typeof item !== 'object') continue
+      const contentType = attachmentContentTypeOf(item)
+      const filename = attachmentFilenameOf(item)
+      const rawUrl = attachmentUrlOf(item)
+      if (!rawUrl || !attachmentLooksImage(item, rawUrl)) continue
+      const url = normalizeAttachmentUrl(rawUrl)
+      if (!url || seen.has(url)) continue
+      seen.add(url)
       images.push({
-        url: /^https?:/i.test(rawUrl) ? rawUrl : `https://${rawUrl}`,
+        url,
         // 具体 MIME 直接使用；只有通配 / 缺失时留空，交给 image-service 按文件头识别，
         // 避免存成 `image/*` 后拼出模型不接受的 data URL。
-        mime: contentType.startsWith('image/') && contentType !== 'image/*' ? contentType.split(';')[0] : '',
-        width: Number(item?.width) || 0,
-        height: Number(item?.height) || 0,
+        mime: contentType.startsWith('image/') && contentType !== 'image/*' ? contentType : '',
+        width: Number(item.width ?? item.image_width ?? item.imageWidth ?? 0) || 0,
+        height: Number(item.height ?? item.image_height ?? item.imageHeight ?? 0) || 0,
       })
     }
     return images

@@ -86,7 +86,7 @@
 
 ### 5.1 QQ 官方机器人（私聊 / 群聊）
 
-- 入站：`C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 的 `attachments[]`（HTTPS URL）由 bridge 下载（≤3MB/张、≤4 张、总量≤6MB）→ 存 image-service → `meta.images` 只留 id；
+- 入站：`C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE` 的 `attachments[]`（HTTPS URL）或新版 `msg_elements`（含 `message_type=103` 的引用消息 / 引用图片）由 bridge 下载（≤3MB/张、≤4 张、总量≤6MB）→ 存 image-service → `meta.images` 只留 id；
 - 出站私聊：`POST /v2/users/{openid}/files`（`file_type:1, srv_send_msg:false`）→ `file_info` → `POST /v2/users/{openid}/messages`（`msg_type:7 + media + msg_id/msg_seq`）；
 - 出站群聊：`POST /v2/groups/{group_openid}/files`（`file_type:1, srv_send_msg:false`）→ `file_info` → `POST /v2/groups/{group_openid}/messages`（`msg_type:7 + media + msg_id/msg_seq`）。
 

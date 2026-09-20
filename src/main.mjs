@@ -12,6 +12,11 @@
 import { App, VERSION, STATUS } from './runtime/app.mjs'
 import { plugins as builtinPluginEntries } from '../plugins/registry.mjs'
 import { isPluginInScope } from './runtime/plugin-scope.mjs'
+import { installEventSourceMultiplexer } from './util/event-source-multiplex.mjs'
+
+// 浏览器同一 host 的 HTTP/1.1 连接池有限，多个插件各开一条 /api/events 会占满；
+// 入口统一复用相同 origin + pathname 的 EventSource，避免刷新后 WebUI 排队卡加载。
+installEventSourceMultiplexer()
 
 const CONFIG_KEY = 'nianfeng:config'
 

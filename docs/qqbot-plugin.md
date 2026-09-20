@@ -126,8 +126,8 @@
 
 ```text
 QQ C2C / GROUP_AT / GROUP_MESSAGE 事件
-  ├─ 文本：message.text
-  └─ 图片：d.attachments[] HTTPS URL
+  ├─ 文本：message.content / msg_elements（含 message_type=103 的引用正文）
+  └─ 图片：d.attachments[] / msg_elements（含引用消息里的附件）HTTPS URL
         → bridge 下载（≤3MB/张、≤4 张、总量≤6MB）
         → image-service 落盘（<数据目录>/images/<id>.<ext>）
         → 消息 meta.images 只存 { id, mime, width, height, size }

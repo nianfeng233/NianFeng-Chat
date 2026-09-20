@@ -206,17 +206,35 @@ export function apply(ctx) {
     return { items, used, truncated }
   }
 
+  const imageRefsOfMessage = message => {
+    const refs = []
+    if (Array.isArray(message?.meta?.images)) refs.push(...message.meta.images.filter(Boolean))
+    // 引用消息 / 合并转发预览里的图片也可能需要按 message_id 回捞。
+    if (Array.isArray(message?.meta?.quote?.images)) refs.push(...message.meta.quote.images.filter(Boolean))
+    return refs
+  }
+
   /** 按需查看图片：默认只给 [图片] 占位；include_images / image_message_ids 才真带原图。 */
-  const collectToolImages = (candidates, { includeImages = false, wantedIds = [], imageLimit = 2 } = {}) => {
+  const collectToolImages = async (candidates, { includeImages = false, wantedIds = [], imageLimit = 2 } = {}) => {
     const images = []
     if (!includeImages && !wantedIds.length) return images
+    const refs = []
+    for (const message of candidates || []) refs.push(...imageRefsOfMessage(message))
+    // 入站图片在消息里通常只存 imageId，真正的 data URL 要由 image-service 按需从后端取。
+    // 之前这里只认 dataUrl / url，导致 QQ 官方机器人等“只有 imageId”的图片明明存在却读不出来。
+    if (refs.length && imageService?.hydrateImages) {
+      try {
+        await imageService.hydrateImages(refs)
+      } catch (_) {
+        /* 单张失败不影响文字结果 */
+      }
+    }
     for (const message of candidates || []) {
       if (images.length >= imageLimit) break
       const messageId = String(message.message_id || message.id || '')
-      const list = Array.isArray(message.meta?.images) ? message.meta.images : []
-      for (const image of list) {
+      for (const image of imageRefsOfMessage(message)) {
         if (images.length >= imageLimit) break
-        const url = image?.dataUrl || image?.url
+        const url = image?.dataUrl || imageService?.dataUrlOf?.(image) || image?.url || ''
         if (!url) continue
         images.push({ type: 'image_url', image_url: { url: String(url) }, message_id: messageId })
       }
@@ -258,22 +276,26 @@ export function apply(ctx) {
       cursor: args.cursor ?? null,
     })
     const maxTokens = Math.max(200, Number(config.get('chat.readTokens', 1500)) || 1500)
-    const { items, truncated } = formatToolMessages(result.messages, maxTokens)
     const includeImages = args.include_images === true || String(args.include_images) === 'true'
     const wantedIds = Array.isArray(args.image_message_ids)
       ? args.image_message_ids.map(item => String(item || '')).filter(Boolean)
       : []
     const imageLimit = Math.min(4, Math.max(1, Number(args.image_limit) || 2))
-    const candidates = wantedIds.length
+    // image_message_ids 是“精确按 message_id 取图”的语义：命中的消息本身也要返回，
+    // 否则模型很容易只拿到 cursor / query 选出的另一条旧消息，误以为图片不存在。
+    const exactMessages = wantedIds.length
       ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
-      : result.messages
-    const images = collectToolImages(candidates, { includeImages, wantedIds, imageLimit })
+      : []
+    const messagesForItems = wantedIds.length ? exactMessages : result.messages
+    const { items, truncated } = formatToolMessages(messagesForItems, maxTokens)
+    const candidates = wantedIds.length ? exactMessages : result.messages
+    const images = await collectToolImages(candidates, { includeImages, wantedIds, imageLimit })
     const payload = {
       ok: true,
       channel: decision.channelId,
-      total: result.total,
+      total: wantedIds.length ? exactMessages.length : result.total,
       returned: items.length,
-      next_cursor: truncated ? result.offset + items.length : result.next_cursor,
+      next_cursor: wantedIds.length ? null : truncated ? result.offset + items.length : result.next_cursor,
       truncated,
       messages: items,
     }
@@ -401,21 +423,23 @@ export function apply(ctx) {
         })
       : rawMessages
     const maxTokens = Math.max(200, Number(config.get('chat.readTokens', 1500)) || 1500)
-    const { items, truncated } = formatToolMessages(filteredRaw, maxTokens)
     const includeImages = args.include_images === true || String(args.include_images) === 'true'
     const wantedIds = Array.isArray(args.image_message_ids)
       ? args.image_message_ids.map(item => String(item || '')).filter(Boolean)
       : []
     const imageLimit = Math.min(4, Math.max(1, Number(args.image_limit) || 2))
-    const imageCandidates = wantedIds.length
+    const exactMessages = wantedIds.length
       ? store.messagesOf(decision.channelId).filter(message => wantedIds.includes(String(message.message_id || message.id || '')))
-      : filteredRaw
-    const images = collectToolImages(imageCandidates, { includeImages, wantedIds, imageLimit })
+      : []
+    const messagesForItems = wantedIds.length ? exactMessages : filteredRaw
+    const { items, truncated } = formatToolMessages(messagesForItems, maxTokens)
+    const imageCandidates = wantedIds.length ? exactMessages : filteredRaw
+    const images = await collectToolImages(imageCandidates, { includeImages, wantedIds, imageLimit })
 
     const payload = {
       ok: true,
       channel: decision.channelId,
-      total: filteredRaw.length,
+      total: wantedIds.length ? exactMessages.length : filteredRaw.length,
       returned: items.length,
       next_cursor: null,
       truncated,
@@ -1067,7 +1091,7 @@ export function apply(ctx) {
             image_message_ids: {
               type: 'array',
               items: { type: 'string' },
-              description: '只查看这些 message_id 的图片；比 include_images 更精确。',
+              description: '只查看这些 message_id 的图片，并返回命中的消息本身；比 include_images 更精确。',
             },
             image_limit: { type: 'number', description: '本次最多返回的图片数量，默认 2，最大 4。' },
           },

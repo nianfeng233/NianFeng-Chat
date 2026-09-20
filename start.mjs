@@ -226,7 +226,29 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
 
     // 1) API 代理（外部插件模块也由后端提供，避免开发模式下 5173 找不到）
     if (pathname.startsWith('/api/') || pathname.startsWith('/user-plugins/')) {
-      const proxyReq = (await import('node:http')).request(
+      let upstreamDone = false
+      let clientAborted = false
+      let proxyReq = null
+      // 浏览器刷新 / 关闭页面会先断开这里的下游请求；必须同步销毁上游请求。
+      // 否则 SSE（/api/events、日志流等）会在后端 hub 里一直悬挂，反复刷新后
+      // 越积越多，表现为 WebUI 通信越来越慢、偶发长时间加载不出来。
+      const abortUpstream = () => {
+        if (upstreamDone || clientAborted) return
+        clientAborted = true
+        try {
+          proxyReq?.destroy()
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      req.on('close', () => {
+        if (!req.complete) abortUpstream()
+      })
+      res.on('close', () => {
+        if (!res.writableFinished) abortUpstream()
+      })
+
+      proxyReq = (await import('node:http')).request(
         {
           host: '127.0.0.1',
           port: backendPort,
@@ -243,15 +265,26 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
           })(),
         },
         proxyRes => {
+          proxyRes.on('end', () => { upstreamDone = true })
+          proxyRes.on('error', () => { upstreamDone = true })
+          res.on('finish', () => { upstreamDone = true })
           res.writeHead(proxyRes.statusCode || 502, proxyRes.headers)
           proxyRes.pipe(res)
         },
       )
       proxyReq.on('error', err => {
+        upstreamDone = true
+        if (clientAborted) return
         if (!res.headersSent) {
           res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ error: { status: 502, message: `后端不可用：${err.message}` } }))
-        } else res.end()
+        } else {
+          try {
+            res.end()
+          } catch (_) {
+            /* 客户端已经断开时忽略 */
+          }
+        }
       })
       req.pipe(proxyReq)
       return
