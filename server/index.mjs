@@ -30,6 +30,8 @@ import * as httpPlugin from './plugins/http.mjs'
 import * as memoriesPlugin from './plugins/memories.mjs'
 import * as logsPlugin from './plugins/logs.mjs'
 import { attachRuntimeLogStore } from './plugins/logs.mjs'
+import * as marketPlugin from './plugins/market.mjs'
+import { printFreeSoftwareNotice } from '../src/shared/project-info.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 applyNetworkDefaults()
@@ -108,6 +110,9 @@ function createExternalBridgeLoader(ctx, { exclude = new Set() } = {}) {
   const handles = new Map()
 
   const disabledExternalIds = () => {
+    // 只认全局禁用 / 卸载。分角色启用范围（plugin.scope）只负责过滤该角色 /
+    // 渠道里的工具与事件；只要插件没有被全局禁用，后端桥就必须完整加载，
+    // 否则会出现“角色已启用、前端工具在，但后端桥 404”的半加载状态。
     const prefs = ctx.settings?.get?.()?.preferences?.plugins || {}
     const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : [])
     return new Set([...list(prefs.disabled), ...list(prefs.removed)])
@@ -305,6 +310,7 @@ export async function startBackend({
         allowedHosts: [...new Set([...allowedHosts, ...envList('NIANFENG_ALLOWED_HOSTS'), ...envList('FENGYU_ALLOWED_HOSTS')])],
       },
     ],
+    [marketPlugin, {}],
     [memoriesPlugin, { dataDir: paths.dataDir }],
     [logsPlugin, {}],
   ]
@@ -332,6 +338,30 @@ export async function startBackend({
   const externalBridges = createExternalBridgeLoader(ctx, { exclude: builtinBridges })
   await externalBridges.load(resolveExternalPluginDir())
 
+  // 全局启用 / 禁用 / 卸载状态变化也要同步外部桥：插件在设置页被重新启用时，
+  // 必须立即把 bridge.mjs 补加载回来，不能等用户手动「重新扫描」或重启后端。
+  const globalPluginStateSignature = () => {
+    const prefs = ctx.settings?.get?.()?.preferences?.plugins || {}
+    const list = value => (Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean).sort() : [])
+    return JSON.stringify({ disabled: list(prefs.disabled), removed: list(prefs.removed), enabled: list(prefs.enabled) })
+  }
+  let globalPluginState = globalPluginStateSignature()
+  let globalBridgeSyncTimer = null
+  const syncExternalBridgesForGlobalState = () => {
+    const next = globalPluginStateSignature()
+    if (next === globalPluginState) return
+    globalPluginState = next
+    if (globalBridgeSyncTimer) clearTimeout(globalBridgeSyncTimer)
+    globalBridgeSyncTimer = setTimeout(() => {
+      globalBridgeSyncTimer = null
+      externalBridges
+        .reload(resolveExternalPluginDir())
+        .catch(err => console.warn(`[channel-bridge] 全局插件状态变化后重载外部桥失败：${err?.message || err}`))
+    }, 250)
+    globalBridgeSyncTimer.unref?.()
+  }
+  ctx.on('settings/updated', syncExternalBridgesForGlobalState)
+
   // 外部插件安装 / 删除 / 重新扫描 / 切换目录后即时重载 bridge，使其可以热插拔。
   const pluginRegistry = ctx.pluginRegistry
   if (pluginRegistry) {
@@ -350,6 +380,7 @@ export async function startBackend({
       }
     }
     wrapBridgeReload('installZip', { onlyFulfilled: true })
+    wrapBridgeReload('installEntries', { onlyFulfilled: true })
     wrapBridgeReload('removeExternal', { onlyFulfilled: true })
     wrapBridgeReload('refresh')
     wrapBridgeReload('setExternalDir')
@@ -432,6 +463,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   //   - 首次运行自动生成随机令牌并打印在终端最上方，落盘只写盐化摘要；
   //   - 旧版本明文 network.webuiToken 在启动时迁移为摘要；
   //   - 环境变量 NIANFENG_WEBUI_TOKEN / FENGYU_WEBUI_TOKEN 只在当前进程生效。
+  // 开源项目的免费声明：在终端输出最开头打印。
+  printFreeSoftwareNotice()
   const resolved = await resolveDataDir(ROOT)
   let network = {}
   try {

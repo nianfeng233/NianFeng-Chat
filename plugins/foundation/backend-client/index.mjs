@@ -189,6 +189,40 @@ export function apply(ctx) {
     openPluginsDir: () => request('/plugins/open-dir', { method: 'POST' }),
     removeExternalPlugin: id => request(`/plugins/external/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     uploadPlugin: payload => request('/plugins/upload', { method: 'POST', body: payload, timeoutMs: 180000 }),
+
+    /** 插件市场：源预设、目录分页、详情、安装 / 更新。 */
+    marketSources: () => request('/market/sources'),
+    addMarketSource: payload => request('/market/sources', { method: 'POST', body: payload, timeoutMs: 30000 }),
+    updateMarketSource: (id, patch) => request(`/market/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: patch, timeoutMs: 30000 }),
+    removeMarketSource: id => request(`/market/sources/${encodeURIComponent(id)}`, { method: 'DELETE', timeoutMs: 30000 }),
+    activateMarketSource: id => request(`/market/sources/${encodeURIComponent(id)}/activate`, { method: 'POST', timeoutMs: 30000 }),
+    marketRefresh: sourceId => request('/market/refresh', { method: 'POST', body: { sourceId }, timeoutMs: 60000 }),
+    marketInstalledMeta: () => request('/market/installed-meta'),
+    marketLookup: (ids = [], sourceId = '') => {
+      const list = Array.isArray(ids) ? ids : [ids]
+      const params = new URLSearchParams()
+      params.set('ids', list.map(item => String(item || '').trim()).filter(Boolean).join(','))
+      if (sourceId) params.set('sourceId', sourceId)
+      return request(`/market/lookup?${params.toString()}`, { timeoutMs: 20000, retries: 0 })
+    },
+    marketPlugin: (id, sourceId = '', options = {}) =>
+      request(`/market/plugin/${encodeURIComponent(id)}${sourceId ? `?sourceId=${encodeURIComponent(sourceId)}` : ''}`, {
+        timeoutMs: options.timeoutMs || 15000,
+        retries: options.retries ?? 0,
+      }),
+    marketInstall: payload => request('/market/install', { method: 'POST', body: payload, timeoutMs: 180000 }),
+    marketPlugins: (options = {}) => {
+      const params = new URLSearchParams()
+      if (options.sourceId) params.set('sourceId', options.sourceId)
+      if (options.q) params.set('q', options.q)
+      if (options.sort) params.set('sort', options.sort)
+      if (options.order) params.set('order', options.order)
+      if (options.page) params.set('page', options.page)
+      if (options.pageSize) params.set('pageSize', options.pageSize)
+      if (options.refresh) params.set('refresh', '1')
+      const query = params.toString()
+      return request(`/market/plugins${query ? `?${query}` : ''}`, { timeoutMs: options.refresh ? 60000 : 30000 })
+    },
     restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
 
     sessions: (options = {}) => request(`/sessions${options?.compact ? '?compact=1' : ''}`),

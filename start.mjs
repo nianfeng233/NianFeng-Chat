@@ -38,6 +38,7 @@ import {
 } from './server/web-security.mjs'
 import { MIME } from './server/http-io.mjs'
 import { serveStaticFile, isVersionedRequest } from './server/static-cache.mjs'
+import { printFreeSoftwareNotice } from './src/shared/project-info.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
 const args = new Set(process.argv.slice(2))
@@ -322,6 +323,9 @@ async function logCrash(kind, error) {
 }
 
 async function main() {
+  // 开源项目的免费声明：在终端输出最开头打印，先于端口 / 令牌 / 服务信息。
+  printFreeSoftwareNotice()
+
   const backendPort = Number(process.env.BACKEND_PORT || 8788)
 
   // WebUI 监听地址/端口/访问令牌来自数据目录 config.json 的 network 段。

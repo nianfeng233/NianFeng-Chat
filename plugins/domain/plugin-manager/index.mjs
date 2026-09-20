@@ -22,8 +22,10 @@ export const depends = {
   'plugin-loader': '^1.0.0',
   'toast-host': '>=1.0.0',
 }
-export const optionalDepends = {}
-export const inject = ['plugin-loader', 'config', 'event-bus', 'toast', 'modal']
+export const optionalDepends = {
+  'view-router': '^1.0.0',
+}
+export const inject = ['plugin-loader', 'config', 'event-bus', 'toast', 'modal', 'view-router?']
 export const provides = [{ name: 'plugin-manager', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
@@ -382,9 +384,15 @@ export function apply(ctx) {
       return ok
     },
 
-    /** 安装插件：插件市场是 M5，这里预留入口 */
+    /** 安装入口：打开顶层「插件市场」视图 */
     async install() {
-      toast.info('插件市场将在 M5 开放：支持从市场或本地目录安装插件。')
+      const router = ctx.inject('view-router?')
+      if (router?.has?.('market')) {
+        ctx.emit('settings:close', null)
+        router.switch('market')
+        return true
+      }
+      toast.info('插件市场视图尚未就绪，请刷新页面后再试')
       return false
     },
 

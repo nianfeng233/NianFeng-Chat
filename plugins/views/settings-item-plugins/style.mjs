@@ -64,6 +64,57 @@ export const PLUGIN_PAGE_CSS = `
     font-size:11.5px;color:var(--text-3);margin-top:3px;line-height:1.45;word-break:break-word;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
   }
+  .plugin-dev-meta{font-size:10.5px;color:var(--text-4);margin-top:3px;line-height:1.5;word-break:break-word;}
+  /* ---------- 插件详情（rich modal） ---------- */
+  .plugin-detail{display:flex;flex-direction:column;gap:14px;}
+  .plugin-detail-hero{display:flex;align-items:flex-start;gap:13px;}
+  .plugin-detail-icon{
+    width:48px;height:48px;flex:0 0 48px;border-radius:14px;display:flex;align-items:center;justify-content:center;
+    background:rgba(237,247,231,.9);font-size:23px;line-height:1;
+  }
+  .plugin-detail-icon.core{background:linear-gradient(135deg,#e7f0fb,#d3e5fa);}
+  .plugin-detail-hero-main{flex:1;min-width:0;}
+  .plugin-detail-name{font-size:17px;font-weight:700;color:var(--text);line-height:1.35;word-break:break-word;}
+  .plugin-detail-badges{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:5px;}
+  .plugin-detail-desc{margin-top:6px;font-size:12.5px;line-height:1.75;color:var(--text-3);word-break:break-word;}
+  .plugin-detail-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;}
+  .plugin-detail-stat{
+    border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.52);
+    padding:9px 11px;min-width:0;
+  }
+  .plugin-detail-stat span{display:block;font-size:10.5px;color:var(--text-4);margin-bottom:3px;}
+  .plugin-detail-stat b{font-size:12.5px;font-weight:600;color:var(--text);word-break:break-word;}
+  .plugin-detail-fallback{display:block;margin-top:2px;font-style:normal;font-size:10px;color:var(--text-4);}
+  .plugin-detail-repo{grid-column:span 2;}
+  .plugin-detail-link{font-size:12px;color:var(--accent);text-decoration:none;word-break:break-all;}
+  .plugin-detail-link:hover{text-decoration:underline;}
+  .plugin-detail-section{border-top:1px solid var(--border);padding-top:12px;}
+  .plugin-detail-section-title{font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:8px;}
+  .plugin-detail-readme{font-size:12.5px;line-height:1.85;color:var(--text-2);word-break:break-word;}
+  .plugin-detail-readme .md-h1,
+  .plugin-detail-readme .md-h2,
+  .plugin-detail-readme .md-h3,
+  .plugin-detail-readme .md-h4{color:var(--text);font-weight:700;margin:13px 0 6px;}
+  .plugin-detail-readme .md-p{margin:5px 0;}
+  .plugin-detail-readme .md-list{margin:6px 0;padding-left:20px;}
+  .plugin-detail-readme .md-code{margin:8px 0;padding:9px 11px;border-radius:9px;background:rgba(0,0,0,.055);overflow:auto;}
+  .plugin-detail-readme .md-inline{padding:1px 4px;border-radius:4px;background:rgba(0,0,0,.055);}
+  .plugin-detail-readme blockquote{margin:7px 0;padding:5px 10px;border-left:3px solid var(--accent-soft-2);color:var(--text-3);}
+  .plugin-readme-plain{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.75;color:var(--text-2);font-family:Consolas,"Cascadia Mono",ui-monospace,monospace;}
+  .plugin-detail-empty{padding:24px 10px;text-align:center;border:1px dashed var(--border);border-radius:10px;color:var(--text-4);font-size:12px;}
+  .plugin-detail-tech{border-top:1px dashed var(--border);padding-top:9px;font-size:11.5px;color:var(--text-3);}
+  .plugin-detail-tech summary{cursor:pointer;user-select:none;color:var(--text-3);outline:none;}
+  .plugin-detail-tech pre{
+    margin:8px 0 0;padding:10px 11px;border-radius:10px;background:rgba(0,0,0,.045);
+    white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.7;color:var(--text-2);
+    font-family:Consolas,"Cascadia Mono",ui-monospace,monospace;
+  }
+  html[data-theme="dark"] .plugin-detail-stat{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.1);}
+  html[data-theme="dark"] .plugin-detail-icon{background:rgba(112,161,90,.16);}
+  html[data-theme="dark"] .plugin-detail-icon.core{background:rgba(90,141,255,.16);}
+  html[data-theme="dark"] .plugin-detail-readme .md-code,
+  html[data-theme="dark"] .plugin-detail-readme .md-inline,
+  html[data-theme="dark"] .plugin-detail-tech pre{background:rgba(255,255,255,.08);}
   .plugin-actions{flex:0 0 auto;display:flex;gap:6px;}
   .plugin-action-btn{
     height:30px;padding:0 11px;border:1px solid rgba(0,0,0,.09);background:#fff;border-radius:7px;

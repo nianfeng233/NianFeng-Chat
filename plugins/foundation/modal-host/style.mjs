@@ -20,9 +20,18 @@ export const MODAL_CSS = `
     box-shadow:var(--shadow-lg);
     animation:modalIn .18s cubic-bezier(.16,1,.3,1);
   }
+  .modal.wide{width:min(880px,94vw);max-height:88vh;display:flex;flex-direction:column;padding:20px 22px 16px;}
+  .modal.wide .modal-title{text-align:left;margin-bottom:10px;}
+  .modal.wide .modal-desc{margin:0 0 12px;}
+  .modal.wide .modal-actions{margin-top:12px;flex:0 0 auto;}
+  .modal.wide .modal-actions .btn{flex:0 0 auto;min-width:96px;margin-left:auto;}
   @keyframes modalIn{from{opacity:0;transform:translateY(-8px) scale(.97);}to{opacity:1;transform:none;}}
   .modal-title{font-size:15px;font-weight:600;text-align:center;margin-bottom:14px;}
   .modal-desc{font-size:12.5px;line-height:1.6;color:var(--text-3);text-align:center;margin:-8px 0 16px;white-space:pre-wrap;}
+  .modal-desc.modal-rich{
+    text-align:left;white-space:normal;margin:0;padding-right:4px;
+    flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;
+  }
   .modal-input{
     width:100%;height:42px;border:1px solid var(--border-strong);border-radius:10px;
     padding:0 14px;font-size:13px;font-family:inherit;color:var(--text);

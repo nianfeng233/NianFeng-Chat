@@ -6,7 +6,7 @@
  * 由 scripts/sync-plugins.mjs 自动生成，请勿手改。
  * 重新生成：npm run sync-plugins
  *
- * 共 98 个插件，按目录名排序；真正的加载顺序由
+ * 共 100 个插件，按目录名排序；真正的加载顺序由
  * plugin-loader 依据 depends / inject 做拓扑排序决定。
  */
 export const plugins = [
@@ -561,13 +561,16 @@ export const plugins = [
       "plugin-loader": "^1.0.0",
       "toast-host": ">=1.0.0"
     },
-    "optionalDepends": {},
+    "optionalDepends": {
+      "view-router": "^1.0.0"
+    },
     "inject": [
       "plugin-loader",
       "config",
       "event-bus",
       "toast",
-      "modal"
+      "modal",
+      "view-router?"
     ],
     "provides": [
       {
@@ -2464,6 +2467,44 @@ export const plugins = [
     "dir": "plugins/views/library-view"
   },
   {
+    "id": "market-view",
+    "version": "1.0.0",
+    "displayName": "视图 · 插件市场",
+    "description": "独立视图：浏览官方 / 自定义插件源，搜索、排序、查看详情并一键安装更新。",
+    "author": "念风内核",
+    "core": true,
+    "enabled": true,
+    "icon": "🛍️",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "backend-client": ">=1.0.0",
+      "modal-host": ">=1.0.0",
+      "toast-host": ">=1.0.0",
+      "view-router": "^1.0.0"
+    },
+    "optionalDepends": {
+      "markdown-enhancer": ">=1.0.0"
+    },
+    "inject": [
+      "view-router",
+      "api",
+      "toast",
+      "modal",
+      "markdown?"
+    ],
+    "provides": [
+      {
+        "name": "market-view",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/views/market-view/index.mjs",
+    "dir": "plugins/views/market-view"
+  },
+  {
     "id": "message-list",
     "version": "1.1.0",
     "displayName": "消息列表",
@@ -3061,16 +3102,21 @@ export const plugins = [
       "plugin-manager": "^1.0.0",
       "plugin-scope": "^1.0.0",
       "settings-container": "^1.0.0",
-      "toast-host": ">=1.0.0"
+      "toast-host": ">=1.0.0",
+      "view-router": "^1.0.0"
     },
-    "optionalDepends": {},
+    "optionalDepends": {
+      "markdown-enhancer": ">=1.0.0"
+    },
     "inject": [
       "settings-container",
       "plugin-manager",
       "plugin-scope",
       "toast",
       "modal",
-      "api"
+      "api",
+      "view-router",
+      "markdown?"
     ],
     "provides": [],
     "permissions": [],
@@ -3256,6 +3302,37 @@ export const plugins = [
     "slots": [],
     "path": "./plugins/views/user-widget/index.mjs",
     "dir": "plugins/views/user-widget"
+  },
+  {
+    "id": "welcome-view",
+    "version": "1.0.0",
+    "displayName": "视图 · 欢迎",
+    "description": "独立视图：项目介绍、官方仓库 / QQ 群与免费开源声明，首次打开 WebUI 自动进入。",
+    "author": "念风内核",
+    "core": true,
+    "enabled": true,
+    "icon": "👋",
+    "unavailable": false,
+    "unavailableReason": "",
+    "depends": {
+      "storage": "^1.0.0",
+      "view-router": "^1.0.0"
+    },
+    "optionalDepends": {},
+    "inject": [
+      "storage",
+      "view-router"
+    ],
+    "provides": [
+      {
+        "name": "welcome-view",
+        "type": "singleton"
+      }
+    ],
+    "permissions": [],
+    "slots": [],
+    "path": "./plugins/views/welcome-view/index.mjs",
+    "dir": "plugins/views/welcome-view"
   },
   {
     "id": "win-buttons",

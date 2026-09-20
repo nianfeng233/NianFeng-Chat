@@ -16,6 +16,7 @@
  *     这样 exe 不需要内置 scripts/sync-plugins.mjs，用户丢完插件重启/重新扫描即可。
  */
 import { constants } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -453,37 +454,85 @@ export function apply(ctx, config = {}) {
     return safeFolderName(tail || fallback || 'plugin')
   }
 
-  /**
-   * 安装浏览器上传的 zip 插件包：
-   *   - data 是 base64（前端 FileReader 读取本地文件后上传，远程部署同样适用）；
-   *   - 默认拒绝覆盖已存在的插件目录，overwrite=true 时才整体替换；
-   *   - 路径、类型、体积都在这里做安全校验，只写入当前外部插件目录。
-   */
-  async function installZip({ base64 = '', filename = '', overwrite = false } = {}) {
-    const raw = String(base64 || '').replace(/^data:[^,]*,/, '')
-    if (!raw) return { ok: false, error: '缺少压缩包内容（data）' }
-    if (filename && !/\.zip$/i.test(String(filename))) return { ok: false, error: '只支持 .zip 插件压缩包' }
-    let buffer = null
-    try {
-      buffer = Buffer.from(raw, 'base64')
-    } catch (_) {
-      return { ok: false, error: '压缩包 base64 解码失败' }
+  /** 对 zip 条目中的实际文件做稳定内容哈希；与官方仓库 scripts/build-market.mjs 的算法一致。 */
+  const hashPluginEntries = entries => {
+    const hash = createHash('sha256')
+    const files = entries
+      .filter(entry => !entry.directory)
+      .slice()
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const entry of files) {
+      const name = String(entry.name || '').replace(/\\/g, '/')
+      const data = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data || '')
+      hash.update(`file:${name}\n`)
+      hash.update(`size:${data.length}\n`)
+      hash.update(data)
+      hash.update('\n')
     }
-    if (!buffer.length) return { ok: false, error: '压缩包内容为空' }
-    if (buffer.length > MAX_ZIP_BYTES) return { ok: false, error: `压缩包超过 ${Math.round(MAX_ZIP_BYTES / 1024 / 1024)}MB 限制` }
+    return hash.digest('hex')
+  }
 
-    let entries = []
+  const rootManifestOf = entries => {
+    const file = entries.find(entry => !entry.directory && String(entry.name).replace(/\\/g, '/') === 'manifest.json')
+    if (!file) return null
     try {
-      entries = listZipEntries(buffer)
-    } catch (err) {
-      return { ok: false, error: err?.message || 'zip 解析失败' }
+      return JSON.parse(file.data.toString('utf8'))
+    } catch (_) {
+      return null
     }
+  }
+
+  /**
+   * 安装已解析的 zip 条目（浏览器上传与插件市场共用）：
+   *   - 默认拒绝覆盖已存在的插件目录，overwrite=true 时才整体替换；
+   *   - 路径、类型、体积都在这里做安全校验，只写入当前外部插件目录；
+   *   - expected 用于市场安装时校验插件 id / 版本 / 内容 SHA-256。
+   */
+  async function installZipEntries({ entries = [], filename = '', overwrite = false, expected = null } = {}) {
+    if (!Array.isArray(entries) || !entries.length) return { ok: false, error: '压缩包内容为空' }
+
+    const expectedId = expected?.id ? String(expected.id).trim() : ''
+    const expectedVersion = expected?.version ? String(expected.version).trim() : ''
+    let hashVerified = false
+    if (expectedId && safeFolderName(expectedId) !== expectedId) return { ok: false, error: '市场插件 id 不合法' }
+
     const roots = findPluginRoots(entries)
     if (!roots.length) return { ok: false, error: '压缩包里没有找到 index.mjs；请把插件目录（内含 index.mjs）压缩后再上传' }
+    if (roots.length > 1 && expectedId) return { ok: false, error: '市场来源的压缩包包含多个插件根，已拒绝安装' }
+
+    const rootManifest = rootManifestOf(entries)
+    if (rootManifest) {
+      const manifestId = String(rootManifest.id || rootManifest.name || '').trim()
+      if (expectedId && manifestId && safeFolderName(manifestId) !== expectedId) {
+        return { ok: false, error: `插件 id 不一致：市场为 ${expectedId}，压缩包为 ${manifestId}` }
+      }
+      const manifestVersion = String(rootManifest.version || '').trim()
+      if (expectedVersion && manifestVersion && manifestVersion !== expectedVersion) {
+        return { ok: false, error: `插件版本不一致：市场为 ${expectedVersion}，压缩包为 ${manifestVersion}` }
+      }
+    }
+
+    if (expected?.sha256) {
+      const actualHash = hashPluginEntries(entries)
+      const wanted = String(expected.sha256)
+        .trim()
+        .toLowerCase()
+        .replace(/^sha(?:256)?[:-]/i, '')
+      if (actualHash !== wanted) {
+        return {
+          ok: false,
+          hashMismatch: true,
+          expectedHash: wanted,
+          actualHash,
+          error: '插件内容哈希校验失败：压缩包可能与市场清单不一致，已拒绝安装',
+        }
+      }
+      hashVerified = true
+    }
 
     const rootDir = externalDir()
     await mkdir(rootDir, { recursive: true }).catch(() => {})
-    const fallback = String(filename || '').replace(/\.zip$/i, '')
+    const fallback = expectedId || String(filename || '').replace(/\.zip$/i, '')
 
     // 先算出所有目标目录并检查冲突，避免多个插件时装一半又失败。
     const planned = roots.map(pluginRoot => {
@@ -562,10 +611,39 @@ export function apply(ctx, config = {}) {
     return {
       ok: true,
       installed,
+      hashVerified: hashVerified && blocked.length === 0,
       blocked: blocked.length ? blocked : undefined,
       plugins: publicSnapshot(next).plugins,
       dirs: publicDirs(next),
     }
+  }
+
+  /**
+   * 安装浏览器上传的 zip 插件包：
+   *   - data 是 base64（前端 FileReader 读取本地文件后上传，远程部署同样适用）；
+   *   - 默认拒绝覆盖已存在的插件目录，overwrite=true 时才整体替换；
+   *   - 路径、类型、体积都在这里做安全校验，只写入当前外部插件目录。
+   */
+  async function installZip({ base64 = '', filename = '', overwrite = false, expected = null } = {}) {
+    const raw = String(base64 || '').replace(/^data:[^,]*,/, '')
+    if (!raw) return { ok: false, error: '缺少压缩包内容（data）' }
+    if (filename && !/\.zip$/i.test(String(filename))) return { ok: false, error: '只支持 .zip 插件压缩包' }
+    let buffer = null
+    try {
+      buffer = Buffer.from(raw, 'base64')
+    } catch (_) {
+      return { ok: false, error: '压缩包 base64 解码失败' }
+    }
+    if (!buffer.length) return { ok: false, error: '压缩包内容为空' }
+    if (buffer.length > MAX_ZIP_BYTES) return { ok: false, error: `压缩包超过 ${Math.round(MAX_ZIP_BYTES / 1024 / 1024)}MB 限制` }
+
+    let entries = []
+    try {
+      entries = listZipEntries(buffer)
+    } catch (err) {
+      return { ok: false, error: err?.message || 'zip 解析失败' }
+    }
+    return installZipEntries({ entries, filename, overwrite, expected })
   }
 
   const service = {
@@ -585,6 +663,7 @@ export function apply(ctx, config = {}) {
     removeExternal,
     readExternalFile,
     installZip,
+    installEntries: installZipEntries,
     openExternalDir,
     pickDirectory: () => instance.pickDirectory({ description: '选择插件的存放目录' }),
   }

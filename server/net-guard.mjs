@@ -20,8 +20,109 @@
  */
 import http from 'node:http'
 import https from 'node:https'
+import { execFileSync } from 'node:child_process'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
+
+/**
+ * 出网代理自动探测：
+ *   - 优先 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY（大小写与 npm 配置都支持）；
+ *   - Windows 上再回退到系统「Internet 选项」里的 ProxyEnable + ProxyServer，
+ *     这样挂着 Clash / v2rayN 等系统代理时，后端读取插件市场也能直接出网。
+ * 只支持 http(s) 代理；代理地址来自本机用户配置，不再做内网地址拦截。
+ */
+let cachedProxy = undefined
+
+function readWindowsSystemProxy() {
+  if (process.platform !== 'win32') return ''
+  if (String(process.env.NIANFENG_DISABLE_SYSTEM_PROXY || '') === '1') return ''
+  const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+  try {
+    const enabled = execFileSync('reg', ['query', key, '/v', 'ProxyEnable'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 2500,
+    })
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1\b/i.test(enabled)) return ''
+    const server = execFileSync('reg', ['query', key, '/v', 'ProxyServer'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 2500,
+    })
+    const value = String(server.match(/ProxyServer\s+REG_SZ\s+(.+)/i)?.[1] || '').trim()
+    if (!value) return ''
+    if (value.includes('=')) {
+      const map = {}
+      for (const part of value.split(';')) {
+        const [name, address] = part.split('=')
+        if (name && address) map[name.trim().toLowerCase()] = address.trim()
+      }
+      return map.https || map.http || ''
+    }
+    return value
+  } catch (_) {
+    return ''
+  }
+}
+
+function normalizeProxyValue(value) {
+  const text = String(value || '').trim()
+  if (!text) return null
+  const candidate = /^https?:\/\//i.test(text) ? text : `http://${text}`
+  try {
+    const url = new URL(candidate)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    return url
+  } catch (_) {
+    return null
+  }
+}
+
+function systemProxyUrl() {
+  if (cachedProxy !== undefined) return cachedProxy
+  cachedProxy = null
+  const envValue =
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    process.env.ALL_PROXY ||
+    process.env.all_proxy ||
+    process.env.npm_config_https_proxy ||
+    process.env.npm_config_http_proxy ||
+    process.env.npm_config_proxy ||
+    ''
+  cachedProxy = normalizeProxyValue(envValue)
+  if (!cachedProxy) cachedProxy = normalizeProxyValue(readWindowsSystemProxy())
+  return cachedProxy
+}
+
+function shouldBypassProxy(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
+  const noProxy = String(process.env.NO_PROXY || process.env.no_proxy || '').trim()
+  if (!noProxy) return false
+  for (const item of noProxy.split(',')) {
+    const rule = item.trim().toLowerCase()
+    if (!rule) continue
+    if (rule === '*') return true
+    const suffix = rule.startsWith('.') ? rule.slice(1) : rule
+    if (host === suffix || host.endsWith(`.${suffix}`)) return true
+  }
+  return false
+}
+
+function proxyForTarget(raw) {
+  try {
+    const url = raw instanceof URL ? raw : new URL(String(raw))
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    const hostname = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname
+    if (shouldBypassProxy(hostname)) return null
+    return systemProxyUrl()
+  } catch (_) {
+    return null
+  }
+}
 
 const BLOCKED_IPV4_RANGES = [
   ['0.0.0.0', 8], // 本网络
@@ -174,12 +275,87 @@ export async function resolvePublicHttpUrl(raw) {
   return { url, addresses: addresses.map(item => ({ address: item.address, family: Number(item.family) || 0 })) }
 }
 
+const requestTimeoutError = () => Object.assign(new Error('请求超时'), { code: 'ETIMEDOUT' })
+
+/** 通过 http(s) 代理请求：HTTP 目标直接发绝对地址，HTTPS 目标走 CONNECT 隧道。 */
+function requestPinnedViaProxy(url, { proxy, method = 'GET', headers = {}, timeoutMs = 15000 }) {
+  const proxyUrl = proxy instanceof URL ? proxy : new URL(String(proxy))
+  const proxyPort = Number(proxyUrl.port) || (proxyUrl.protocol === 'https:' ? 443 : 80)
+  const targetPort = Number(url.port) || (url.protocol === 'https:' ? 443 : 80)
+  const auth = proxyUrl.username
+    ? `Basic ${Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password || '')}`).toString('base64')}`
+    : ''
+  const proxyHeaders = auth ? { 'Proxy-Authorization': auth } : {}
+  const lib = proxyUrl.protocol === 'https:' ? https : http
+
+  return new Promise((resolve, reject) => {
+    if (url.protocol === 'http:') {
+      const request = lib.request(
+        {
+          hostname: proxyUrl.hostname,
+          port: proxyPort,
+          method,
+          path: url.href,
+          headers: { ...headers, Host: url.host, ...proxyHeaders },
+          timeout: timeoutMs,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+        res => resolve(res),
+      )
+      request.on('timeout', () => request.destroy(requestTimeoutError()))
+      request.on('error', reject)
+      request.end()
+      return
+    }
+
+    const connectRequest = lib.request({
+      hostname: proxyUrl.hostname,
+      port: proxyPort,
+      method: 'CONNECT',
+      path: `${url.hostname}:${targetPort}`,
+      headers: { Host: `${url.hostname}:${targetPort}`, ...proxyHeaders },
+      timeout: timeoutMs,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    connectRequest.on('connect', (proxyRes, socket) => {
+      if (Number(proxyRes.statusCode) !== 200) {
+        try {
+          socket.destroy()
+        } catch (_) {
+          /* ignore */
+        }
+        reject(requestError(`代理 CONNECT 返回 HTTP ${proxyRes.statusCode || '未知'}`))
+        return
+      }
+      const request = https.request(
+        url,
+        {
+          method,
+          headers,
+          timeout: timeoutMs,
+          agent: false,
+          createConnection: () => socket,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+        res => resolve(res),
+      )
+      request.on('timeout', () => request.destroy(requestTimeoutError()))
+      request.on('error', reject)
+      request.end()
+    })
+    connectRequest.on('timeout', () => connectRequest.destroy(requestTimeoutError()))
+    connectRequest.on('error', reject)
+    connectRequest.end()
+  })
+}
+
 /**
  * 使用已校验地址发起单次请求（不自动跟随重定向）。
  * 导出用于安全自测；业务入口只应使用 fetchPublicText。
  */
-export function requestPinned(input, { addresses, method = 'GET', headers = {}, timeoutMs = 15000 } = {}) {
+export function requestPinned(input, { addresses, method = 'GET', headers = {}, timeoutMs = 15000, proxy = null } = {}) {
   const url = input instanceof URL ? input : new URL(String(input))
+  if (proxy) return requestPinnedViaProxy(url, { proxy, method, headers, timeoutMs })
   if (!Array.isArray(addresses) || !addresses.length) return Promise.reject(requestError('缺少已校验的目标地址'))
   const servername = url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname
   return new Promise((resolve, reject) => {
@@ -233,10 +409,11 @@ export async function fetchPublicText(raw, { headers = {}, timeoutMs = 15000, ma
   let current = String(raw)
 
   for (let hop = 0; hop <= redirects; hop += 1) {
+    const proxy = proxyForTarget(current)
     const { url, addresses } = await resolvePublicHttpUrl(current)
     let response
     try {
-      response = await requestPinned(url, { addresses, headers, timeoutMs })
+      response = await requestPinned(url, { addresses, headers, timeoutMs, proxy })
     } catch (err) {
       throw requestError(`请求失败：${networkErrorMessage(err)}`)
     }
@@ -275,6 +452,64 @@ export async function fetchPublicText(raw, { headers = {}, timeoutMs = 15000, ma
       if (!truncated) throw requestError(`读取响应失败：${networkErrorMessage(err)}`)
     }
     return { url: url.href, status, text: Buffer.concat(chunks).toString('utf8'), length: size, truncated }
+  }
+
+  throw requestError('重定向次数过多')
+}
+
+/**
+ * 拉取受信任程度未知的远程二进制（插件 zip 等）：
+ * 与 fetchPublicText 相同的 SSRF / 重定向防护，但保留原始 Buffer。
+ */
+export async function fetchPublicBuffer(raw, { headers = {}, timeoutMs = 30000, maxRedirects = 5, maxBytes = 32 * 1024 * 1024 } = {}) {
+  const limit = Math.max(1024, Number(maxBytes) || 32 * 1024 * 1024)
+  const redirects = Math.min(Math.max(Number(maxRedirects) || 0, 0), 8)
+  let current = String(raw)
+
+  for (let hop = 0; hop <= redirects; hop += 1) {
+    const proxy = proxyForTarget(current)
+    const { url, addresses } = await resolvePublicHttpUrl(current)
+    let response
+    try {
+      response = await requestPinned(url, { addresses, headers, timeoutMs, proxy })
+    } catch (err) {
+      throw requestError(`请求失败：${networkErrorMessage(err)}`)
+    }
+
+    const status = Number(response.statusCode) || 0
+    const location = response.headers?.location
+    if (status >= 300 && status < 400) {
+      response.resume()
+      if (!location) throw requestError(`目标返回 HTTP ${status} 且没有 Location`)
+      if (hop === redirects) throw requestError('重定向次数过多')
+      current = new URL(String(location), url).href
+      continue
+    }
+    if (status < 200 || status >= 300) {
+      response.resume()
+      throw requestError(`目标返回 HTTP ${status}`)
+    }
+
+    const chunks = []
+    let size = 0
+    let truncated = false
+    try {
+      for await (const chunk of response) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        if (size + buffer.length >= limit) {
+          chunks.push(buffer.subarray(0, limit - size))
+          size = limit
+          truncated = true
+          response.destroy()
+          break
+        }
+        chunks.push(buffer)
+        size += buffer.length
+      }
+    } catch (err) {
+      if (!truncated) throw requestError(`读取响应失败：${networkErrorMessage(err)}`)
+    }
+    return { url: url.href, status, buffer: Buffer.concat(chunks), length: size, truncated }
   }
 
   throw requestError('重定向次数过多')

@@ -44,6 +44,7 @@ export function apply(ctx) {
   ctx.effect(() => root.remove())
 
   const mask = root.querySelector('#modalMask')
+  const modalEl = root.querySelector('.modal')
   const titleEl = root.querySelector('#modalTitle')
   const descEl = root.querySelector('#modalDesc')
   const inputEl = root.querySelector('#modalInput')
@@ -93,12 +94,14 @@ export function apply(ctx) {
   const service = {
     name: 'modal',
     isOpen: () => !!current,
-    /** 通用打开：{ title, description, input, value, requireValue, confirmText, cancelText, dismissible } */
+    /** 通用打开：{ title, description, html, wide, input, value, requireValue, confirmText, cancelText, dismissible } */
     open(options = {}) {
       if (current) close({ ok: false, superseded: true })
       const {
         title = '提示',
         description = '',
+        html = '',
+        wide = false,
         input = false,
         value = '',
         placeholder = '',
@@ -110,8 +113,12 @@ export function apply(ctx) {
       } = options
 
       titleEl.textContent = title
-      descEl.textContent = description
-      descEl.style.display = description ? '' : 'none'
+      const rich = !!html
+      if (rich) descEl.innerHTML = html
+      else descEl.textContent = description
+      descEl.classList.toggle('modal-rich', rich)
+      descEl.style.display = rich || description ? '' : 'none'
+      modalEl.classList.toggle('wide', !!wide)
       inputEl.style.display = input ? '' : 'none'
       inputEl.value = value
       inputEl.placeholder = placeholder

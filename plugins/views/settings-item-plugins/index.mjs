@@ -27,9 +27,12 @@ export const depends = {
   'plugin-scope': '^1.0.0',
   'settings-container': '^1.0.0',
   'toast-host': '>=1.0.0',
+  'view-router': '^1.0.0',
 }
-export const optionalDepends = {}
-export const inject = ['settings-container', 'plugin-manager', 'plugin-scope', 'toast', 'modal', 'api']
+export const optionalDepends = {
+  'markdown-enhancer': '>=1.0.0',
+}
+export const inject = ['settings-container', 'plugin-manager', 'plugin-scope', 'toast', 'modal', 'api', 'view-router', 'markdown?']
 
 import { page, section, card, row } from '../../../src/util/settings.mjs'
 import { useStyle } from '../../../src/util/style.mjs'
@@ -45,17 +48,43 @@ const STATUS_TAG = {
   pending: { cls: 'warn', text: '加载中' },
 }
 
+const formatCount = value => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  if (number >= 10000) return `${(number / 10000).toFixed(1)}w`
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}k`
+  return String(number)
+}
+
+const safeHttpUrl = value => {
+  try {
+    const url = new URL(String(value || ''))
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : ''
+  } catch (_) {
+    return ''
+  }
+}
+
 export function apply(ctx) {
   const pages = ctx.inject('settings-container')
   const manager = ctx.inject('plugin-manager')
   const scope = ctx.inject('plugin-scope')
   const toast = ctx.inject('toast')
   const modal = ctx.inject('modal')
+  const router = ctx.inject('view-router')
+  const markdown = ctx.inject('markdown?')
 
   useStyle(ctx, PLUGIN_PAGE_CSS)
 
   let sortKey = 'status'
   let sortOrder = 'asc'
+  /**
+   * 市场安装元数据：为已上架的外部插件标注开发者（如清单未带 author 时）与 Star。
+   * 读取失败时保持为空，不影响插件管理页其它功能。
+   */
+  let marketMeta = {}
+  let marketMetaLoaded = false
+  let marketMetaLoading = false
   /** 本次页面会话里用户点了“稍后设置”的插件，避免反复弹选择框。 */
   const scopePromptLater = new Set()
   let scopePromptOpen = false
@@ -74,6 +103,7 @@ export function apply(ctx) {
             ${icons.check} 重新自检
           </button>
           <button class="plugin-toolbar-btn" data-action="export">导出诊断</button>
+          <button class="plugin-toolbar-btn" data-action="market">🛍️ 插件市场</button>
           <div class="plugin-toolbar-right">
             <span>排序</span>
             <select class="plugin-sort-select" data-sort-key>
@@ -204,6 +234,13 @@ export function apply(ctx) {
       const itemHtml = (plugin, list) => {
         const severity = severityOf(plugin, list)
         const disabled = plugin.status !== 'active'
+        const market = marketMeta[plugin.id] || null
+        const developer = market?.author || plugin.author || ''
+        const stars = Number.isFinite(Number(market?.stars)) ? Number(market.stars) : null
+        const marketLine =
+          developer || stars !== null
+            ? `<div class="plugin-dev-meta">开发者：${escapeHtml(developer || '未标注')}${stars !== null ? ` · ⭐ ${escapeHtml(String(stars))}` : ''}</div>`
+            : ''
         // 插件可以注册自己的设置面板；有面板时，无论内置 / 第三方都显示「设置」。
         const settingsBtn = plugin.hasSettings
           ? `<button class="plugin-action-btn" data-plugin-action="settings" data-plugin-id="${plugin.id}">设置</button>`
@@ -228,6 +265,7 @@ export function apply(ctx) {
                 ${severity === 'ok' && plugin.status === 'active' ? '<span class="plugin-health">● 正常</span>' : ''}
               </div>
               <div class="plugin-desc">${escapeHtml(plugin.description || '')}</div>
+              ${marketLine}
               ${reasonHtml(plugin, list)}
             </div>
             <div class="plugin-actions">${actions}</div>
@@ -310,7 +348,42 @@ export function apply(ctx) {
           }`
         bindActionButtons()
         loadPluginDirs()
+        loadMarketMeta()
         ctx.setTimeout(() => promptNewPluginScopes(), 180)
+      }
+
+      /** 读取市场安装元数据 + 批量市场目录元数据，用于小字标注开发者 / Star；只拉取一次。 */
+      const loadMarketMeta = async () => {
+        if (marketMetaLoaded || marketMetaLoading) return
+        marketMetaLoading = true
+        try {
+          const api = ctx.inject('api')
+          if (typeof api.marketInstalledMeta === 'function') {
+            const result = await api.marketInstalledMeta()
+            if (result?.installed && typeof result.installed === 'object') marketMeta = { ...result.installed }
+          }
+          if (typeof api.marketLookup === 'function') {
+            const externalIds = manager
+              .list({ includeCore: true, includeRemoved: true })
+              .filter(plugin => plugin.external && plugin.id)
+              .map(plugin => plugin.id)
+              .slice(0, 200)
+            if (externalIds.length) {
+              const result = await api.marketLookup(externalIds)
+              if (result?.ok && result.plugins && typeof result.plugins === 'object') {
+                for (const [id, info] of Object.entries(result.plugins)) {
+                  marketMeta[id] = { ...(marketMeta[id] || {}), ...info }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          ctx.logger.debug(`读取插件市场元数据失败：${err?.message || err}`)
+        } finally {
+          marketMetaLoaded = true
+          marketMetaLoading = false
+        }
+        render()
       }
 
       /* 运行期热同步 / 其它设备启停 / 安装卸载后，当前打开的插件页会通过
@@ -348,7 +421,7 @@ export function apply(ctx) {
         }
         const requiredDeps = dependencyReport.filter(item => item.required)
         const optionalDeps = dependencyReport.filter(item => !item.required)
-        const detail = [
+        const detailLines = [
           `id        ${plugin.id}@${plugin.version}`,
           `作者      ${plugin.author || '未标注'}`,
           `状态      ${plugin.statusLabel}${plugin.conflict ? '（服务冲突）' : ''}`,
@@ -364,10 +437,105 @@ export function apply(ctx) {
           `实际持有  ${owns.join('、') || '无'}`,
           `使用插槽  ${plugin.slots.join('、') || '未声明'}`,
           plugin.warnings?.length ? `\n告警\n${plugin.warnings.map(w => `· [${w.severity}] ${w.message}`).join('\n')}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n')
-        await modal.open({ title: `插件详情 · ${plugin.name}`, description: detail, confirmText: '关闭', hideCancel: true })
+        ].filter(Boolean)
+
+        // 外部插件优先去插件市场补全真实 GitHub 作者 / Star / 仓库 / README；
+        // 市场不可达时安静降级为插件内签名与空 README。
+        let marketInfo = null
+        let readme = ''
+        if (plugin.external) {
+          try {
+            const api = ctx.inject('api')
+            if (typeof api.marketPlugin === 'function') {
+              const data = await api.marketPlugin(id, '', { timeoutMs: 8000, retries: 0 })
+              if (data?.ok && data.plugin) {
+                marketInfo = data.plugin
+                readme = String(data.readme || '')
+              }
+            }
+          } catch (err) {
+            ctx.logger.debug(`读取插件市场详情失败：${err?.message || err}`)
+          }
+        }
+
+        const fallbackMarket = marketMeta[plugin.id] || null
+        const runtimeAuthor = plugin.author || '未标注'
+        const author = marketInfo?.author || fallbackMarket?.author || runtimeAuthor
+        const starsValue = Number(marketInfo?.stars ?? fallbackMarket?.stars)
+        const stars = Number.isFinite(starsValue) ? starsValue : null
+        const repo = safeHttpUrl(marketInfo?.repo || marketInfo?.homepage || fallbackMarket?.repo || '')
+        const severity = severityOf(plugin, issues())
+        const readmeHtml = readme
+          ? markdown?.render
+            ? markdown.render(readme)
+            : `<pre class="plugin-readme-plain">${escapeHtml(readme)}</pre>`
+          : '<div class="plugin-detail-empty">该插件暂未提供 README。</div>'
+        const html = `
+          <div class="plugin-detail">
+            <div class="plugin-detail-hero">
+              <div class="plugin-detail-icon ${plugin.core ? 'core' : ''}">${escapeHtml(plugin.icon || icons.plugin)}</div>
+              <div class="plugin-detail-hero-main">
+                <div class="plugin-detail-name">${escapeHtml(plugin.name || plugin.id)}</div>
+                <div class="plugin-detail-badges">
+                  <span class="plugin-id">${escapeHtml(plugin.id)}@${escapeHtml(plugin.version || '0.0.0')}</span>
+                  ${tagOf(plugin, severity)}
+                  ${plugin.external ? '<span class="plugin-tag">外部</span>' : ''}
+                </div>
+                <div class="plugin-detail-desc">${escapeHtml(plugin.description || '暂无描述')}</div>
+              </div>
+            </div>
+
+            <div class="plugin-detail-stats">
+              <div class="plugin-detail-stat">
+                <span>开发者</span>
+                <b>${escapeHtml(author)}</b>
+                ${author !== runtimeAuthor ? `<em class="plugin-detail-fallback">插件签名：${escapeHtml(runtimeAuthor)}</em>` : ''}
+              </div>
+              <div class="plugin-detail-stat">
+                <span>GitHub Star</span>
+                <b>${stars !== null ? `⭐ ${escapeHtml(formatCount(stars))}` : '—'}</b>
+              </div>
+              <div class="plugin-detail-stat">
+                <span>当前版本</span>
+                <b>${escapeHtml(plugin.version || '—')}</b>
+              </div>
+              <div class="plugin-detail-stat">
+                <span>来源</span>
+                <b>${plugin.external ? '外部插件' : '内置插件'}</b>
+              </div>
+              ${
+                repo
+                  ? `<div class="plugin-detail-stat plugin-detail-repo">
+                      <span>仓库</span>
+                      <a class="plugin-detail-link" href="${escapeHtml(repo)}" target="_blank" rel="noopener noreferrer">${escapeHtml(repo.replace(/^https?:\/\//i, ''))}</a>
+                    </div>`
+                  : ''
+              }
+              ${
+                marketInfo
+                  ? `<div class="plugin-detail-stat"><span>市场版本</span><b>${escapeHtml(marketInfo.version || plugin.version || '—')}</b></div>`
+                  : ''
+              }
+            </div>
+
+            <div class="plugin-detail-section">
+              <div class="plugin-detail-section-title">README</div>
+              <div class="plugin-detail-readme" data-plugin-readme>${readmeHtml}</div>
+            </div>
+
+            <details class="plugin-detail-tech">
+              <summary>技术详情</summary>
+              <pre>${escapeHtml(detailLines.join('\n'))}</pre>
+            </details>
+          </div>`
+
+        await modal.open({
+          title: `插件详情 · ${plugin.name}`,
+          html,
+          wide: true,
+          confirmText: '关闭',
+          hideCancel: true,
+        })
       }
 
       /* ---------------- 插件目录（内置 + 外部） ---------------- */
@@ -638,8 +806,10 @@ export function apply(ctx) {
           a.click()
           URL.revokeObjectURL(url)
           toast.success('诊断信息已导出')
-        } else if (action === 'install' || action === 'market') {
-          toast.info('未实现：当前版本只支持本地插件目录 + 运行时启停，详见「设置 → 未实现清单」。')
+        } else if (action === 'market' || action === 'install') {
+          ctx.emit('settings:close', null)
+          if (router.has('market')) router.switch('market')
+          else toast.info('插件市场视图尚未就绪，请刷新页面后再试')
         }
       }
 
