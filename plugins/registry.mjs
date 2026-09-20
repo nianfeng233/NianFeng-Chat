@@ -3305,7 +3305,7 @@ export const plugins = [
   },
   {
     "id": "welcome-view",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "displayName": "视图 · 欢迎",
     "description": "独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。",
     "author": "念风内核",

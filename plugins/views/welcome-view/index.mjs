@@ -12,7 +12,7 @@
  * 因为共享偏好而互相覆盖。
  */
 export const name = 'welcome-view'
-export const version = '1.1.0'
+export const version = '1.2.0'
 export const displayName = '视图 · 欢迎'
 export const description = '独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。'
 export const author = '念风内核'
@@ -379,6 +379,7 @@ export function apply(ctx) {
           loading: false,
           loadSeq: 0,
           busy: false,
+          infoFailed: false,
         }
 
         const setUpdateNote = text => {
@@ -486,16 +487,54 @@ export function apply(ctx) {
           try {
             const data = await api.appReleases(updateState.source, force)
             if (seq !== updateState.loadSeq) return
-            updateState.releases = Array.isArray(data?.releases) ? data.releases : []
+            const { releases, ...infoPatch } = data && typeof data === 'object' ? data : {}
+            if (infoPatch.kind || infoPatch.kindLabel || infoPatch.version) {
+              updateState.info = {
+                ...(updateState.info || {}),
+                ...infoPatch,
+                version: infoPatch.version || updateState.info?.version || appVersion,
+              }
+              updateState.infoFailed = false
+              renderCurrent()
+            }
+            updateState.releases = Array.isArray(releases) ? releases : []
             renderReleases()
-            if (data?.stale) setUpdateNote(`网络暂时不可用，展示的是缓存版本列表：${data.warning || '请稍后刷新'}`)
+            if (!updateState.releases.length && updateState.infoFailed) {
+              setUpdateNote('当前后端进程尚未加载本体更新服务；请先彻底重启一次项目，重启后即可选择任意历史 Release 升级或降级。')
+            } else if (data?.stale) {
+              setUpdateNote(`网络暂时不可用，展示的是缓存版本列表：${data.warning || '请稍后刷新'}`)
+            }
           } catch (err) {
             if (seq !== updateState.loadSeq) return
             updateState.releases = []
             renderReleases()
-            setUpdateNote(`读取 GitHub Release 失败：${err?.message || err}`)
+            if (updateState.infoFailed) {
+              setUpdateNote('当前后端进程尚未加载本体更新服务；请先彻底重启一次项目，重启后即可选择任意历史 Release 升级或降级。')
+            } else {
+              setUpdateNote(`读取 GitHub Release 失败：${err?.message || err}`)
+            }
           } finally {
             if (seq === updateState.loadSeq) updateState.loading = false
+          }
+        }
+
+        const resolveFallbackInfo = async () => {
+          let version = appVersion
+          try {
+            const data = await api.get('/version')
+            if (data?.version) version = data.version
+          } catch (_) {
+            /* 旧后端即使没有 app-update 插件，通常也还有 /api/version */
+          }
+          const kind = runtimeKind()
+          return {
+            ok: true,
+            version,
+            kind,
+            kindLabel: kind === 'desktop' ? 'EXE 桌面版' : 'Web 版',
+            defaultSource: 'mirror',
+            updateSupported: true,
+            restartSupported: true,
           }
         }
 
@@ -503,12 +542,11 @@ export function apply(ctx) {
           if (updateEls.source) updateEls.source.value = updateState.source
           try {
             updateState.info = await api.appUpdateInfo()
+            updateState.infoFailed = false
           } catch (err) {
-            updateState.releases = []
-            renderCurrent()
-            renderReleases()
-            setUpdateNote(`读取当前版本信息失败：${err?.message || err}（旧后端可能尚未加载本体更新服务，请重启后再试）`)
-            return
+            updateState.infoFailed = true
+            ctx.logger.debug(`读取当前版本信息失败：${err?.message || err}`)
+            updateState.info = await resolveFallbackInfo()
           }
           renderCurrent()
           await loadVersions(false)
@@ -542,7 +580,15 @@ export function apply(ctx) {
               updateState.busy = false
               clearMaintenance()
               removeMaintenanceOverlay()
-              await modal.open({ title: '更新未开始', description: updateErrorMessage(err), hideCancel: true, confirmText: '知道了' })
+              const needsRestart = err.status === 404 || err.status === 405
+              await modal.open({
+                title: needsRestart ? '需要先重启一次' : '更新未开始',
+                description: needsRestart
+                  ? '当前后端进程还没有加载新版在线更新接口。请先点击「重启念风」，或手动彻底重启一次项目；重启后即可选择任意历史 Release 升级或降级。'
+                  : updateErrorMessage(err),
+                hideCancel: true,
+                confirmText: '知道了',
+              })
               syncUpdateButtons()
               return
             }
@@ -572,7 +618,24 @@ export function apply(ctx) {
           try {
             await api.appRestart()
           } catch (err) {
-            if (err?.status) {
+            const canFallbackToLegacy = err?.status === 404 || err?.status === 405 || err?.status === 501
+            if (canFallbackToLegacy) {
+              try {
+                await api.restartSystem()
+                ctx.logger.debug('新版重启接口不可用，已回退旧版 /api/system/restart')
+              } catch (legacyErr) {
+                updateState.busy = false
+                clearMaintenance()
+                removeMaintenanceOverlay()
+                await modal.open({
+                  title: '需要手动重启一次',
+                  description: '当前后端进程尚未加载新版重启接口。请用项目目录里的停止 / 启动脚本手动重启一次，之后版本选择和在线更新即可正常使用。',
+                  hideCancel: true,
+                  confirmText: '知道了',
+                })
+                return
+              }
+            } else if (err?.status) {
               updateState.busy = false
               clearMaintenance()
               removeMaintenanceOverlay()
