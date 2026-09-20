@@ -12,7 +12,7 @@
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HELPER_FILE = fileURLToPath(new URL('./update-helper.mjs', import.meta.url))
@@ -27,12 +27,13 @@ export async function spawnUpdateHelper(plan = {}) {
     workDir,
     planFile,
     logFile: join(workDir, 'update.log'),
+    statusFile: join(workDir, 'update-status.json'),
   }
   await writeFile(script, source, 'utf8')
   await writeFile(planFile, JSON.stringify(nextPlan, null, 2), 'utf8')
 
   const child = spawn(process.execPath, [script, planFile], {
-    cwd: workDir,
+    cwd: dirname(workDir),
     detached: true,
     stdio: 'ignore',
     windowsHide: true,

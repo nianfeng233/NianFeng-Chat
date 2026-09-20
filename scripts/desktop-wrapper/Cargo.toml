@@ -3,7 +3,7 @@
 # 仓库：https://github.com/nianfeng233/NianFeng-Chat
 [package]
 name = "nianfeng-desktop"
-version = "2.2.0-preview.7"
+version = "2.2.0-preview.8"
 edition = "2021"
 description = "念风Chat 无边框桌面壳（WebView2）"
 license = "Apache-2.0"
