@@ -545,7 +545,7 @@ export const plugins = [
   },
   {
     "id": "plugin-manager",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "插件管理器",
     "description": "业务服务 · 插件启停 / 安装 / 卸载与状态整理。",
     "author": "念风内核",
@@ -1209,7 +1209,7 @@ export const plugins = [
   },
   {
     "id": "backend-client",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "后端连接",
     "description": "基础服务 · WebUI ↔ 本地后端的 REST / SSE 通道与在线状态。",
     "author": "念风内核",
@@ -1418,7 +1418,7 @@ export const plugins = [
   },
   {
     "id": "modal-host",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "弹窗宿主",
     "description": "基础服务 · 统一的模态弹窗（确认 / 输入 / 提示）。",
     "author": "念风内核",
@@ -2468,7 +2468,7 @@ export const plugins = [
   },
   {
     "id": "market-view",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "视图 · 插件市场",
     "description": "独立视图：浏览官方 / 自定义插件源，搜索、排序、查看详情并一键安装更新。",
     "author": "念风内核",
@@ -3087,7 +3087,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-plugins",
-    "version": "3.1.0",
+    "version": "3.2.0",
     "displayName": "设置项 · 插件",
     "description": "设置页 · 插件自检、健康状态、启停与详情。",
     "author": "念风内核",
@@ -3305,9 +3305,9 @@ export const plugins = [
   },
   {
     "id": "welcome-view",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "视图 · 欢迎",
-    "description": "独立视图：项目介绍、官方仓库 / QQ 群与免费开源声明，首次打开 WebUI 自动进入。",
+    "description": "独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。",
     "author": "念风内核",
     "core": true,
     "enabled": true,
@@ -3315,11 +3315,15 @@ export const plugins = [
     "unavailable": false,
     "unavailableReason": "",
     "depends": {
+      "backend-client": "^1.0.0",
+      "modal-host": "^1.0.0",
       "storage": "^1.0.0",
       "view-router": "^1.0.0"
     },
     "optionalDepends": {},
     "inject": [
+      "api",
+      "modal",
       "storage",
       "view-router"
     ],

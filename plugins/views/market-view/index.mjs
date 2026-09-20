@@ -15,7 +15,7 @@
  * 插件源格式与安装安全策略见 src/shared/market-format.mjs 与 server/plugins/market.mjs。
  */
 export const name = 'market-view'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '视图 · 插件市场'
 export const description = '独立视图：浏览官方 / 自定义插件源，搜索、排序、查看详情并一键安装更新。'
 export const author = '念风内核'

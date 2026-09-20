@@ -12,24 +12,27 @@
  * 因为共享偏好而互相覆盖。
  */
 export const name = 'welcome-view'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '视图 · 欢迎'
-export const description = '独立视图：项目介绍、官方仓库 / QQ 群与免费开源声明，首次打开 WebUI 自动进入。'
+export const description = '独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。'
 export const author = '念风内核'
 export const icon = '👋'
 export const core = true
 export const enabled = true
 export const depends = {
+  'backend-client': '^1.0.0',
+  'modal-host': '^1.0.0',
   'storage': '^1.0.0',
   'view-router': '^1.0.0',
 }
 export const optionalDepends = {}
-export const inject = ['storage', 'view-router']
+export const inject = ['api', 'modal', 'storage', 'view-router']
 export const provides = [{ name: 'welcome-view', type: 'singleton' }]
 
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { BRAND_LOGO } from '../../../src/util/identity.mjs'
+import { compareVersions } from '../../../src/runtime/semver.mjs'
 import {
   PROJECT_FULL_NAME,
   PROJECT_LICENSE,
@@ -42,6 +45,103 @@ import { WELCOME_CSS } from './style.mjs'
 
 const SEEN_NS = 'onboarding'
 const SEEN_KEY = 'welcomeSeen'
+const UPDATE_SOURCE_KEY = 'appUpdate.source'
+const MAINTENANCE_KEY = 'nianfeng:maintenance'
+
+const formatBytes = value => {
+  const size = Number(value) || 0
+  if (size <= 0) return ''
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`
+  return `${size} B`
+}
+
+const readUpdateSource = () => {
+  try {
+    return localStorage.getItem(UPDATE_SOURCE_KEY) === 'official' ? 'official' : 'mirror'
+  } catch (_) {
+    return 'mirror'
+  }
+}
+
+const saveUpdateSource = source => {
+  try {
+    localStorage.setItem(UPDATE_SOURCE_KEY, source === 'official' ? 'official' : 'mirror')
+  } catch (_) {
+    /* storage 不可用时仅当前会话生效 */
+  }
+}
+
+const writeMaintenance = (type, kind) => {
+  try {
+    localStorage.setItem(MAINTENANCE_KEY, JSON.stringify({ type, kind, at: Date.now() }))
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+const clearMaintenance = () => {
+  try {
+    localStorage.removeItem(MAINTENANCE_KEY)
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+let maintenanceOverlay = null
+
+const removeMaintenanceOverlay = () => {
+  try {
+    maintenanceOverlay?.remove?.()
+  } catch (_) {
+    /* ignore */
+  }
+  maintenanceOverlay = null
+}
+
+const showMaintenanceOverlay = (title, tip) => {
+  removeMaintenanceOverlay()
+  const overlay = document.createElement('div')
+  overlay.className = 'app-maintenance-overlay'
+  overlay.innerHTML = `
+    <div class="app-maintenance-card">
+      <div class="app-maintenance-spinner"></div>
+      <div class="app-maintenance-title">${escapeHtml(title)}</div>
+      <div class="app-maintenance-tip">${escapeHtml(tip)}</div>
+    </div>`
+  document.body.appendChild(overlay)
+  maintenanceOverlay = overlay
+}
+
+const pollBackendAndReload = kind => {
+  let sawOffline = false
+  const startedAt = Date.now()
+  const tick = async () => {
+    if (Date.now() - startedAt > 30 * 60 * 1000) return
+    try {
+      const response = await fetch(`/api/health?ts=${Date.now()}`, {
+        cache: 'no-store',
+        signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(4000) : undefined,
+      })
+      if (response.ok) {
+        // 正常情况下至少会看到旧服务离线一次；6 秒内既没离线也没重启完成，
+        // 说明本次操作没有真正触发，直接恢复页面而不是无限停在加载动画里。
+        if (kind === 'desktop' || sawOffline || Date.now() - startedAt > 6000) {
+          clearMaintenance()
+          removeMaintenanceOverlay()
+          location.reload()
+          return
+        }
+      } else {
+        sawOffline = true
+      }
+    } catch (_) {
+      sawOffline = true
+    }
+    setTimeout(tick, 1500)
+  }
+  setTimeout(tick, 1000)
+}
 
 /** 本项目本体的主要组成部分；按需求不介绍外部扩展插件。 */
 const PROJECT_PARTS = [
@@ -118,6 +218,8 @@ async function copyText(text) {
 export function apply(ctx) {
   const router = ctx.inject('view-router')
   const storage = ctx.inject('storage')
+  const api = ctx.inject('api')
+  const modal = ctx.inject('modal')
 
   useStyle(ctx, WELCOME_CSS)
 
@@ -162,6 +264,40 @@ export function apply(ctx) {
             </header>
 
             <p class="welcome-firstrun-tip">首次部署打开 WebUI 时会自动跳转到本页；之后可随时从侧栏「欢迎」入口再次打开。</p>
+
+            <section class="welcome-section welcome-update-section">
+              <div class="welcome-section-head">
+                <div class="welcome-section-title">版本与更新</div>
+                <div class="welcome-section-desc">默认国内镜像源；可切换 GitHub 官方源，按 Release 升级或降级；自动识别 Web / EXE</div>
+              </div>
+              <div class="welcome-update-card">
+                <div class="welcome-update-row">
+                  <div class="welcome-update-label">更新源</div>
+                  <select class="welcome-update-select" data-update-source>
+                    <option value="mirror">国内 GitHub 镜像源（默认）</option>
+                    <option value="official">GitHub 官方源</option>
+                  </select>
+                  <button class="welcome-copy" type="button" data-update-refresh>刷新版本</button>
+                </div>
+                <div class="welcome-update-row">
+                  <div class="welcome-update-label">当前版本</div>
+                  <div class="welcome-update-current" data-update-current>读取中…</div>
+                </div>
+                <div class="welcome-update-row">
+                  <div class="welcome-update-label">目标版本</div>
+                  <select class="welcome-update-select" data-update-release disabled><option value="">正在读取 Releases…</option></select>
+                  <button class="welcome-update-run" type="button" data-update-run disabled>更新</button>
+                </div>
+                <div class="welcome-update-note" data-update-note>正在读取当前版本与 Release 列表…</div>
+                <div class="welcome-update-actions">
+                  <button class="welcome-update-restart" type="button" data-app-restart>重启念风</button>
+                  <span class="welcome-update-actions-tip">更新 / 重启会完全关闭当前项目，随后自动重新运行</span>
+                </div>
+                <div class="welcome-update-repo">
+                  <a class="welcome-link" href="${PROJECT_REPO}/releases" target="_blank" rel="noopener noreferrer">${PROJECT_REPO}/releases</a>
+                </div>
+              </div>
+            </section>
 
             <section class="welcome-section">
               <div class="welcome-section-head">
@@ -226,8 +362,263 @@ export function apply(ctx) {
           </div>
         </div>`
 
-      const copyTimers = new Map()
-      const onClick = async event => {
+        const updateEls = {
+          source: container.querySelector('[data-update-source]'),
+          refresh: container.querySelector('[data-update-refresh]'),
+          current: container.querySelector('[data-update-current]'),
+          release: container.querySelector('[data-update-release]'),
+          run: container.querySelector('[data-update-run]'),
+          note: container.querySelector('[data-update-note]'),
+          restart: container.querySelector('[data-app-restart]'),
+        }
+        const updateState = {
+          info: null,
+          source: readUpdateSource(),
+          releases: [],
+          selectedTag: '',
+          loading: false,
+          loadSeq: 0,
+          busy: false,
+        }
+
+        const setUpdateNote = text => {
+          if (updateEls.note) updateEls.note.textContent = String(text || '')
+        }
+
+        const selectedRelease = () => updateState.releases.find(item => item.tag === updateState.selectedTag) || null
+        const currentVersion = () => String(updateState.info?.version || appVersion || '').replace(/^v/i, '')
+        const kindLabel = () => updateState.info?.kindLabel || '当前版本'
+        const runtimeKind = () =>
+          updateState.info?.kind || (typeof window.windHost?.window === 'function' ? 'desktop' : 'web')
+
+        const renderCurrent = () => {
+          if (!updateEls.current) return
+          if (!updateState.info) {
+            updateEls.current.textContent = versionLabel
+            return
+          }
+          updateEls.current.textContent = `v${updateState.info.version || appVersion} · ${updateState.info.kindLabel || 'Web'}`
+          if (updateEls.restart) updateEls.restart.disabled = updateState.info.restartSupported === false
+        }
+
+        const syncUpdateButtons = () => {
+          const release = selectedRelease()
+          const target = String(release?.version || '').replace(/^v/i, '')
+          const current = currentVersion()
+          const canRun = updateState.info?.updateSupported !== false
+          const runnable = canRun && !!release && release.compatible !== false && target !== current
+          if (updateEls.run) {
+            updateEls.run.disabled = !runnable
+            if (!release) updateEls.run.textContent = '更新'
+            else if (!release.compatible) updateEls.run.textContent = '无安装包'
+            else if (target === current) updateEls.run.textContent = '已是当前版本'
+            else {
+              const compared = compareVersions(target, current)
+              updateEls.run.textContent = Number.isFinite(compared) && compared < 0 ? `降级到 ${release.tag}` : `更新到 ${release.tag}`
+            }
+          }
+          if (!release) {
+            setUpdateNote('请选择要安装的 Release。')
+            return
+          }
+          if (!release.compatible) {
+            setUpdateNote(`Release ${release.tag} 没有适配当前运行方式（${kindLabel()}）的安装包。`)
+            return
+          }
+          if (!canRun) {
+            setUpdateNote(`当前运行方式（${kindLabel()}）仅支持查看版本，请手动替换安装。`)
+            return
+          }
+          const compared = compareVersions(target, current)
+          const action = Number.isFinite(compared) && compared < 0 ? '降级' : '更新'
+          const assetSize = formatBytes(release.asset?.size)
+          const assetInfo = release.asset?.name ? ` · 安装包 ${release.asset.name}${assetSize ? `（${assetSize}）` : ''}` : ''
+          setUpdateNote(`目标 ${release.tag}（${action}）${assetInfo}；点击按钮后会自动关闭当前项目，完成后自动重新运行。`)
+        }
+
+        const renderReleases = () => {
+          if (!updateEls.release) return
+          const select = updateEls.release
+          const releases = updateState.releases
+          select.innerHTML = ''
+          if (!releases.length) {
+            const option = document.createElement('option')
+            option.value = ''
+            option.textContent = '没有读取到可用 Release'
+            select.appendChild(option)
+            select.disabled = true
+            updateState.selectedTag = ''
+            syncUpdateButtons()
+            return
+          }
+          const versionOfCurrent = currentVersion()
+          if (!updateState.selectedTag || !releases.some(item => item.tag === updateState.selectedTag)) {
+            const preferred =
+              releases.find(item => item.version === versionOfCurrent && item.compatible) ||
+              releases.find(item => item.compatible) ||
+              releases[0]
+            updateState.selectedTag = preferred?.tag || ''
+          }
+          for (const release of releases) {
+            const option = document.createElement('option')
+            option.value = release.tag
+            option.disabled = release.compatible === false
+            const flags = []
+            if (release.version === versionOfCurrent) flags.push('当前')
+            if (release.prerelease) flags.push('预览')
+            if (release.compatible === false) flags.push('无当前平台安装包')
+            option.textContent = `${release.tag}${flags.length ? ` · ${flags.join(' · ')}` : ''}`
+            select.appendChild(option)
+          }
+          select.disabled = false
+          select.value = updateState.selectedTag
+          syncUpdateButtons()
+        }
+
+        const loadVersions = async (force = false) => {
+          const seq = ++updateState.loadSeq
+          updateState.loading = true
+          if (updateEls.release) {
+            updateEls.release.disabled = true
+            updateEls.release.innerHTML = '<option value="">正在读取 Releases…</option>'
+          }
+          setUpdateNote(force ? '正在刷新 GitHub Release 列表…' : '正在读取 GitHub Release 列表…')
+          try {
+            const data = await api.appReleases(updateState.source, force)
+            if (seq !== updateState.loadSeq) return
+            updateState.releases = Array.isArray(data?.releases) ? data.releases : []
+            renderReleases()
+            if (data?.stale) setUpdateNote(`网络暂时不可用，展示的是缓存版本列表：${data.warning || '请稍后刷新'}`)
+          } catch (err) {
+            if (seq !== updateState.loadSeq) return
+            updateState.releases = []
+            renderReleases()
+            setUpdateNote(`读取 GitHub Release 失败：${err?.message || err}`)
+          } finally {
+            if (seq === updateState.loadSeq) updateState.loading = false
+          }
+        }
+
+        const initUpdate = async () => {
+          if (updateEls.source) updateEls.source.value = updateState.source
+          try {
+            updateState.info = await api.appUpdateInfo()
+          } catch (err) {
+            updateState.releases = []
+            renderCurrent()
+            renderReleases()
+            setUpdateNote(`读取当前版本信息失败：${err?.message || err}（旧后端可能尚未加载本体更新服务，请重启后再试）`)
+            return
+          }
+          renderCurrent()
+          await loadVersions(false)
+        }
+
+        const updateErrorMessage = err => String(err?.message || err || '未知错误')
+
+        const beginUpdate = async () => {
+          if (updateState.busy) return
+          const release = selectedRelease()
+          if (!release || release.compatible === false) return
+          const compared = compareVersions(String(release.version).replace(/^v/i, ''), currentVersion())
+          const downgrade = Number.isFinite(compared) && compared < 0
+          const answer = await modal.confirm(
+            downgrade ? '降级念风？' : '更新念风？',
+            `将完全关闭当前${kindLabel()}，${downgrade ? '降级' : '更新'}到 ${release.tag}，完成后自动重新运行。\n\n更新期间请保持此页面打开，加载动画结束后会自动刷新。`,
+          )
+          if (!answer?.ok) return
+          updateState.busy = true
+
+          writeMaintenance('update', runtimeKind())
+          showMaintenanceOverlay(
+            downgrade ? '正在降级念风' : '正在更新念风',
+            `当前项目已完全关闭，正在下载并替换为 ${release.tag}；完成后会自动加载新版本…`,
+          )
+          if (updateEls.run) updateEls.run.disabled = true
+          try {
+            await api.appUpdate({ tag: release.tag, source: updateState.source })
+          } catch (err) {
+            if (err?.status) {
+              updateState.busy = false
+              clearMaintenance()
+              removeMaintenanceOverlay()
+              await modal.open({ title: '更新未开始', description: updateErrorMessage(err), hideCancel: true, confirmText: '知道了' })
+              syncUpdateButtons()
+              return
+            }
+            // 连接被旧进程主动切断属于预期流程，继续等待新后端恢复。
+          }
+          pollBackendAndReload(runtimeKind())
+        }
+
+        const restartApp = async () => {
+          if (updateState.busy) return
+          const answer = await modal.confirm('重启念风？', '将完全关闭当前项目，然后自动重新运行。\n\n重启期间请保持此页面打开，服务恢复后会自动刷新。')
+          if (!answer?.ok) return
+          updateState.busy = true
+          const kind = runtimeKind()
+          writeMaintenance('restart', kind)
+          showMaintenanceOverlay('正在重启念风', '当前项目已完全关闭，正在等待服务恢复；完成后会自动加载…')
+
+          if (kind === 'desktop' && typeof window.windHost?.restart === 'function') {
+            try {
+              window.windHost.restart()
+              return
+            } catch (err) {
+              ctx.logger.debug(`桌面宿主重启调用失败，改用后端接口：${err?.message || err}`)
+            }
+          }
+
+          try {
+            await api.appRestart()
+          } catch (err) {
+            if (err?.status) {
+              updateState.busy = false
+              clearMaintenance()
+              removeMaintenanceOverlay()
+              await modal.open({ title: '重启未开始', description: updateErrorMessage(err), hideCancel: true, confirmText: '知道了' })
+              return
+            }
+          }
+          pollBackendAndReload(kind)
+        }
+
+        const onUpdateClick = event => {
+          const target = event.target.closest('[data-update-refresh], [data-update-run], [data-app-restart]')
+          if (!target || !container.contains(target)) return
+          if (target.matches('[data-update-refresh]')) {
+            loadVersions(true)
+            return
+          }
+          if (target.matches('[data-update-run]')) {
+            beginUpdate().catch(err => ctx.logger.error(`触发更新失败：${err?.message || err}`))
+            return
+          }
+          if (target.matches('[data-app-restart]')) {
+            restartApp().catch(err => ctx.logger.error(`触发重启失败：${err?.message || err}`))
+          }
+        }
+
+        const onUpdateChange = event => {
+          if (event.target.matches('[data-update-source]')) {
+            updateState.source = event.target.value === 'official' ? 'official' : 'mirror'
+            saveUpdateSource(updateState.source)
+            updateState.selectedTag = ''
+            loadVersions(true)
+            return
+          }
+          if (event.target.matches('[data-update-release]')) {
+            updateState.selectedTag = event.target.value
+            syncUpdateButtons()
+          }
+        }
+
+        container.addEventListener('click', onUpdateClick)
+        container.addEventListener('change', onUpdateChange)
+        initUpdate()
+
+        const copyTimers = new Map()
+        const onClick = async event => {
         const button = event.target.closest('[data-welcome-copy]')
         if (!button) return
         const text = button.dataset.welcomeCopy || ''
@@ -262,6 +653,8 @@ export function apply(ctx) {
       container.addEventListener('click', onClick)
       return () => {
         container.removeEventListener('click', onClick)
+        container.removeEventListener('click', onUpdateClick)
+        container.removeEventListener('change', onUpdateChange)
         for (const { timer } of copyTimers.values()) clearTimeout(timer)
         copyTimers.clear()
       }

@@ -14,7 +14,7 @@
  *  - 禁用 / 启用 / 卸载（运行时生效，无需重启）
  */
 export const name = 'settings-item-plugins'
-export const version = '3.1.0'
+export const version = '3.2.0'
 export const displayName = '设置项 · 插件'
 export const description = '设置页 · 插件自检、健康状态、启停与详情。'
 export const author = '念风内核'

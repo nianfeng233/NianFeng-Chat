@@ -31,6 +31,7 @@ import * as memoriesPlugin from './plugins/memories.mjs'
 import * as logsPlugin from './plugins/logs.mjs'
 import { attachRuntimeLogStore } from './plugins/logs.mjs'
 import * as marketPlugin from './plugins/market.mjs'
+import * as appUpdatePlugin from './plugins/app-update.mjs'
 import { printFreeSoftwareNotice } from '../src/shared/project-info.mjs'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -221,6 +222,7 @@ export async function startBackend({
   accessTokenHash = '',
   internalAgentSecret = '',
   onRestart = null,
+  onStop = null,
   onPluginsChanged = null,
   allowedOrigins = [],
   allowedHosts = [],
@@ -311,6 +313,15 @@ export async function startBackend({
       },
     ],
     [marketPlugin, {}],
+    [
+      appUpdatePlugin,
+      {
+        root: ROOT,
+        version: pkg.version,
+        onStop: typeof onStop === 'function' ? onStop : null,
+        onRestart: typeof onRestart === 'function' ? onRestart : null,
+      },
+    ],
     [memoriesPlugin, { dataDir: paths.dataDir }],
     [logsPlugin, {}],
   ]
@@ -507,13 +518,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   }
 
-  const backend = await startBackend({
+  let backend = null
+  const stopForUpdate = async () => {
+    try {
+      await backend?.close?.()
+    } catch (_) {
+      /* 更新前尽力优雅关闭，失败也继续退出 */
+    }
+    process.exit(0)
+  }
+  backend = await startBackend({
     port,
     host,
     staticDir: process.env.NIANFENG_STATIC_DIR || process.env.FENGYU_STATIC_DIR || undefined,
     dataDir: process.env.NIANFENG_DATA_DIR || process.env.FENGYU_DATA_DIR || undefined,
     accessToken,
     accessTokenHash,
+    onStop: stopForUpdate,
   })
   console.log('')
   console.log(`  ┌──────────────────────────────────────────────┐`)

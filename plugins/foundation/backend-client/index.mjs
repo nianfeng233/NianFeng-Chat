@@ -14,7 +14,7 @@
  * 也可以在 config['backend.url'] 里指定绝对地址，例如 http://127.0.0.1:8788/api。
  */
 export const name = 'backend-client'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '后端连接'
 export const description = '基础服务 · WebUI ↔ 本地后端的 REST / SSE 通道与在线状态。'
 export const author = '念风内核'
@@ -224,6 +224,17 @@ export function apply(ctx) {
       return request(`/market/plugins${query ? `?${query}` : ''}`, { timeoutMs: options.refresh ? 60000 : 30000 })
     },
     restartSystem: () => request('/system/restart', { method: 'POST', timeoutMs: 8000 }),
+
+    /** 本体更新：当前运行方式、Release 列表、更新与重启。 */
+    appUpdateInfo: () => request('/app/update/info', { timeoutMs: 8000, retries: 0 }),
+    appReleases: (source = 'mirror', refresh = false) =>
+      request(`/app/releases?source=${encodeURIComponent(source || 'mirror')}${refresh ? '&refresh=1' : ''}`, {
+        timeoutMs: 30000,
+        retries: 0,
+      }),
+    appUpdate: payload =>
+      request('/app/update', { method: 'POST', body: payload || {}, timeoutMs: 30000, retries: 0 }),
+    appRestart: () => request('/app/restart', { method: 'POST', timeoutMs: 8000, retries: 0 }),
 
     sessions: (options = {}) => request(`/sessions${options?.compact ? '?compact=1' : ''}`),
     session: (id, options = {}) => request(`/sessions/${encodeURIComponent(id)}${options?.compact ? '?compact=1' : ''}`),

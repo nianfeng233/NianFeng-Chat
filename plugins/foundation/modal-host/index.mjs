@@ -8,7 +8,7 @@
  * 弹窗宿主。所有插件共用同一个遮罩与动效，避免各写各的。
  */
 export const name = 'modal-host'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '弹窗宿主'
 export const description = '基础服务 · 统一的模态弹窗（确认 / 输入 / 提示）。'
 export const author = '念风内核'

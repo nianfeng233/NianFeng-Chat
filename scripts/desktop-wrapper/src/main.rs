@@ -298,6 +298,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
           setMinimizeOnClose: function (value) { post('wind:minimize-on-close:' + (value ? '1' : '0')); },
           minimize: function () { post('wind:min'); },
           maximize: function () { post('wind:max'); },
+          restart: function () { post('wind:restart'); },
           notify: function (payload) {
             try {
               var p = payload || {};
@@ -657,6 +658,10 @@ fn spawn_node(
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let _ = fs::remove_file(home_dir.join(".webui-port"));
     let _ = fs::remove_file(home_dir.join(".webui-token"));
+    // 本体更新服务需要知道宿主 EXE 路径与 PID，更新时才重启对应的桌面版。
+    let desktop_exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let child = Command::new(node_path)
         .arg("start.mjs")
         .arg("--serve")
@@ -665,6 +670,8 @@ fn spawn_node(
         .env("PORT", port.to_string())
         .env("NIANFENG_HOME_DIR", home_dir)
         .env("NIANFENG_NO_OPEN", "1")
+        .env("NIANFENG_DESKTOP_EXE", desktop_exe)
+        .env("NIANFENG_DESKTOP_PID", std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -682,6 +689,10 @@ fn spawn_node(
 ) -> Result<Child, Box<dyn std::error::Error>> {
     let _ = fs::remove_file(home_dir.join(".webui-port"));
     let _ = fs::remove_file(home_dir.join(".webui-token"));
+    // 本体更新服务需要知道宿主 EXE 路径与 PID，更新时才重启对应的桌面版。
+    let desktop_exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let child = Command::new(node_path)
         .arg("start.mjs")
         .arg("--serve")
@@ -690,6 +701,8 @@ fn spawn_node(
         .env("PORT", port.to_string())
         .env("NIANFENG_HOME_DIR", home_dir)
         .env("NIANFENG_NO_OPEN", "1")
+        .env("NIANFENG_DESKTOP_EXE", desktop_exe)
+        .env("NIANFENG_DESKTOP_PID", std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -14,13 +14,15 @@
  */
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
-import { extname, join, resolve } from 'node:path'
+import { dirname, extname, join, resolve } from 'node:path'
 import { hostname as osHostname, networkInterfaces } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startBackend } from './server/index.mjs'
+import { spawnUpdateHelper } from './server/update-runner.mjs'
 import { resolveDataDir } from './server/data-dir.mjs'
 import { resolveStartupAccessToken } from './server/access-token.mjs'
 import { ensurePortsFree } from './server/port-utils.mjs'
@@ -309,6 +311,53 @@ function openBrowser(url) {
   }
 }
 
+/** 重启时优先寻找用户实际双击过的启动脚本，保证重新运行后仍有一个可见终端。 */
+function visibleLaunchTarget() {
+  const candidates = []
+  const homeDir = String(process.env.NIANFENG_HOME_DIR || '').trim()
+  if (homeDir) {
+    if (!autoOpen) candidates.push(join(homeDir, '启动念风-无浏览器.cmd'))
+    candidates.push(join(homeDir, '启动念风.cmd'))
+    candidates.push(join(homeDir, '启动念风-无浏览器.cmd'))
+  }
+  candidates.push(join(ROOT, singlePort ? 'serve.cmd' : 'start.cmd'))
+  candidates.push(join(ROOT, singlePort ? 'start.cmd' : 'serve.cmd'))
+  for (const file of candidates) {
+    if (existsSync(file)) return { file, cwd: dirname(file) }
+  }
+  return null
+}
+
+/** 以用户双击脚本的方式启动新实例：新开一个可见控制台窗口。 */
+async function launchVisibleTarget(target) {
+  if (!target?.file || process.platform !== 'win32') return false
+  try {
+    const child = spawn('cmd.exe', ['/c', 'start', '', target.file], {
+      cwd: target.cwd,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    })
+    await new Promise((resolve, reject) => {
+      const onSpawn = () => {
+        child.off('error', onError)
+        resolve()
+      }
+      const onError = err => {
+        child.off('spawn', onSpawn)
+        reject(err)
+      }
+      child.once('spawn', onSpawn)
+      child.once('error', onError)
+    })
+    child.on('error', () => {})
+    child.unref()
+    return true
+  } catch (_) {
+    return false
+  }
+}
+
 /** 把崩溃信息写到 user_data/logs/error.log，便于排查偶发问题（而不是只弹一个系统窗口） */
 async function logCrash(kind, error) {
   const line = `[${new Date().toISOString()}] ${kind}: ${error?.stack || error?.message || error}\n`
@@ -419,26 +468,72 @@ async function main() {
       timer.unref?.()
     })
 
-  /** 一键重启：关闭当前服务后以相同参数拉起新进程（设置页保存监听地址后使用） */
+  /**
+   * 一键重启：完全关闭当前实例后，Web 版以“双击启动脚本”的方式新开可见终端；
+   * 桌面版交给 detached 助手结束并重启 EXE，避免浏览器 / WebView 失去宿主。
+   */
   const restart = async () => {
     if (restarting) return
     restarting = true
     shuttingDown = true
     stopHeadlessAgent()
     console.log('正在重启念风…')
+
+    const desktopExe = String(process.env.NIANFENG_DESKTOP_EXE || '').trim()
+    let desktopHelperStarted = false
+    if (desktopExe) {
+      try {
+        await spawnUpdateHelper({
+          action: 'restart',
+          kind: 'desktop',
+          nodePid: process.pid,
+          desktopPid: Number(process.env.NIANFENG_DESKTOP_PID || process.ppid || 0),
+          desktopExe,
+        })
+        desktopHelperStarted = true
+      } catch (err) {
+        console.error(`桌面版重启助手启动失败：${err?.message || err}`)
+      }
+    }
+
     try {
       await closeWebServer()
     } catch (_) {
       /* ignore */
     }
     await backend?.close?.().catch(() => {})
+
+    if (desktopExe) {
+      if (!desktopHelperStarted) console.error('桌面版重启助手未启动，已停止自动重启，请手动重新打开念风 Chat。')
+      process.exit(desktopHelperStarted ? 0 : 1)
+    }
+    const target = visibleLaunchTarget()
+    if (target && (await launchVisibleTarget(target))) process.exit(0)
+
+    // 找不到可见启动脚本时退回原来的后台重启方式，至少保证服务能恢复。
     const child = spawn(process.execPath, process.argv.slice(1), {
       cwd: ROOT,
       detached: true,
       stdio: 'ignore',
       env: process.env,
     })
+    child.on('error', () => {})
     child.unref()
+    process.exit(0)
+  }
+
+  /** 更新时优雅关闭当前实例；真正的下载 / 替换 / 拉起由 detached 助手接管。 */
+  const stopForUpdate = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    stopHeadlessAgent()
+    console.log('正在关闭念风以完成更新…')
+    try {
+      await closeWebServer()
+    } catch (_) {
+      /* ignore */
+    }
+    await backend?.close?.().catch(() => {})
     process.exit(0)
   }
 
@@ -613,6 +708,7 @@ async function main() {
     accessTokenHash,
     internalAgentSecret: agentInternalSecret,
     onRestart: restart,
+    onStop: stopForUpdate,
     onPluginsChanged: payload => reloadHeadlessAgent(payload?.action),
     // 开发模式下 WebUI 与 API 不同端口，需把 WebUI 的 Origin 显式放行给后端；
     // 单端口模式也会包含同一端口，便于本机 IP / hostname 访问。

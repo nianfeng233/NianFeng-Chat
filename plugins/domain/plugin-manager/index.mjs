@@ -9,7 +9,7 @@
  * 真正的加载由 plugin-loader 执行，这里只负责策略、持久化与事件。
  */
 export const name = 'plugin-manager'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '插件管理器'
 export const description = '业务服务 · 插件启停 / 安装 / 卸载与状态整理。'
 export const author = '念风内核'

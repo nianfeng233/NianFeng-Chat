@@ -87,6 +87,57 @@ export const WELCOME_CSS = `
     font-size:11.5px;color:var(--text-4);
   }
 
+  .welcome-update-section .welcome-section-head{align-items:flex-start;}
+  .welcome-update-card{
+    border:1px solid var(--border);border-radius:16px;padding:14px 18px 16px;
+    background:linear-gradient(180deg,rgba(255,255,255,.62),rgba(255,255,255,.42));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.7);
+  }
+  .welcome-update-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:38px;}
+  .welcome-update-row + .welcome-update-row{border-top:1px dashed var(--border);}
+  .welcome-update-label{width:70px;flex:0 0 70px;font-size:12.5px;color:var(--text-3);}
+  .welcome-update-select{
+    flex:1;min-width:180px;max-width:420px;height:32px;padding:0 10px;
+    border:1px solid var(--border-strong);border-radius:9px;background:rgba(255,255,255,.82);
+    color:var(--text-2);font:inherit;font-size:12px;outline:none;cursor:pointer;
+  }
+  .welcome-update-select:focus{border-color:var(--accent-soft-2);box-shadow:0 0 0 2px var(--accent-soft);}
+  .welcome-update-select:disabled{opacity:.6;cursor:default;}
+  .welcome-update-current{font-size:12.5px;line-height:1.7;color:var(--text-2);font-weight:600;}
+  .welcome-update-run,
+  .welcome-update-restart{
+    height:32px;padding:0 14px;border-radius:9px;cursor:pointer;font:inherit;font-size:12px;font-weight:700;
+    border:1px solid rgba(112,161,90,.42);background:linear-gradient(135deg,#edf7e7,#d9efcb);color:#5c8a45;
+    transition:filter .15s ease,opacity .15s ease,transform .15s ease;
+  }
+  .welcome-update-run:hover:not(:disabled),
+  .welcome-update-restart:hover:not(:disabled){filter:brightness(.97);transform:translateY(-1px);}
+  .welcome-update-run:disabled{cursor:default;opacity:.55;filter:grayscale(.18);}
+  .welcome-update-restart{border-color:var(--border-strong);background:rgba(255,255,255,.82);color:var(--text-2);font-weight:600;}
+  .welcome-update-note{margin-top:10px;font-size:11.5px;line-height:1.8;color:var(--text-4);word-break:break-word;}
+  .welcome-update-actions{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px dashed var(--border);}
+  .welcome-update-actions-tip{font-size:11.5px;line-height:1.7;color:var(--text-4);}
+  .welcome-update-repo{margin-top:9px;font-size:11.5px;}
+
+  .app-maintenance-overlay{
+    position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.88);backdrop-filter:blur(7px);
+    animation:app-maintenance-fade .22s ease both;
+  }
+  .app-maintenance-card{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    width:min(360px,calc(100vw - 48px));padding:30px 24px;text-align:center;
+  }
+  .app-maintenance-spinner{
+    width:38px;height:38px;border-radius:50%;
+    border:3px solid rgba(112,161,90,.2);border-top-color:#70a15a;
+    animation:app-maintenance-spin .86s linear infinite;
+  }
+  .app-maintenance-title{font-size:14.5px;font-weight:700;color:var(--text);}
+  .app-maintenance-tip{font-size:12px;line-height:1.8;color:var(--text-3);}
+  @keyframes app-maintenance-spin{to{transform:rotate(360deg);}}
+  @keyframes app-maintenance-fade{from{opacity:0;}to{opacity:1;}}
+
   html[data-theme="dark"] .welcome-tag,
   html[data-theme="dark"] .welcome-card,
   html[data-theme="dark"] .welcome-copy{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);}
@@ -99,12 +150,24 @@ export const WELCOME_CSS = `
   }
   html[data-theme="dark"] .welcome-link{color:#9ecbff;}
   html[data-theme="dark"] .welcome-copy.copied{color:#b8d9a6;border-color:rgba(112,161,90,.38);background:rgba(112,161,90,.18);}
+  html[data-theme="dark"] .welcome-update-card{
+    border-color:rgba(255,255,255,.12);
+    background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.035));
+    box-shadow:none;
+  }
+  html[data-theme="dark"] .welcome-update-select,
+  html[data-theme="dark"] .welcome-update-restart{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.14);color:var(--text-2);}
+  html[data-theme="dark"] .welcome-update-run{background:rgba(112,161,90,.2);border-color:rgba(112,161,90,.4);color:#b8d9a6;}
+  html[data-theme="dark"] .app-maintenance-overlay{background:rgba(18,20,24,.9);}
+  html[data-theme="dark"] .app-maintenance-title{color:#eef2e8;}
 
   @media(max-width:820px){
     .welcome-page{padding:20px 16px 40px;}
     .welcome-hero{align-items:flex-start;gap:14px;padding-bottom:20px;}
     .welcome-logo{width:58px;height:58px;flex-basis:58px;border-radius:16px;}
     .welcome-title{font-size:21px;}
+    .welcome-update-label{width:100%;flex-basis:100%;}
+    .welcome-update-select{max-width:none;}
     .welcome-footer{flex-direction:column;align-items:flex-start;}
   }
   @media(max-width:480px){
