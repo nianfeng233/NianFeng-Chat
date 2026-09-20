@@ -19,7 +19,7 @@ a Windows desktop application.
 > “Security and Privacy” and configure an access token. For production, run `npm run release:gate`
 > before publishing.
 
-- Current version: v2.2.0-preview.6 (preview)
+- Current version: v2.2.0-preview.7 (preview)
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
 - Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
