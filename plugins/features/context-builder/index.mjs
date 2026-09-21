@@ -13,7 +13,7 @@
  *   - 人设、时间 / 时区 / 渠道元数据与工具规则统一作为 system 段落注入
  */
 export const name = 'context-builder'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = '上下文构建'
 export const description = '业务功能 · 工作记忆 + 渠道记忆合并、去重、排序与 token 预算截断。'
 export const author = '念风内核'
@@ -472,6 +472,7 @@ export function apply(ctx) {
     }
     if (message.role !== 'user') return null
     const text = String(message.content ?? '')
+    const mentionOnly = message.meta?.mentionOnly === true
     const groupSpeaker = context.isGroup ? groupSpeakerOf(message) : null
     // 每条 user 消息都带一次“必须调用工具回复”的短提醒：长上下文里比只靠顶层
     // system prompt 更靠近当前输入，能明显降低模型直接输出 assistant 正文的概率。
@@ -499,7 +500,7 @@ export function apply(ctx) {
           ? message.meta.cards.find(item => item && typeof item === 'object') || null
           : null
     const referenceParts = [quoteToText(quote, context), forwardToText(forward), cardToText(card)].filter(Boolean)
-    if (!text.trim() && !images.length && !referenceParts.length) return null
+    if (!text.trim() && !images.length && !referenceParts.length && !mentionOnly) return null
     const perMessage = Math.max(0, Number(config.get('chat.imagesPerMessage', 2)) || 0)
     const selected = images.slice(0, perMessage)
     // 被引用消息里如果本身是图片，原样注入，不只是一个 [图片] 占位。
@@ -517,8 +518,13 @@ export function apply(ctx) {
       }
     }
     const modelImages = [...selected, ...quoteImages, ...forwardPreviewImages]
+    // 只 @ 机器人、没有正文时，把渠道落库用的可读占位替换成明确的“结合聊天记录回应”
+    // 提示，避免模型看到「空消息 / 无法解析正文」后要求用户重新发送。
+    const mentionOnlyNotice = mentionOnly
+      ? '[用户只 @ 了机器人，没有输入文字；请结合最近的聊天记录自然回应，不要要求用户重新发送，也不要声称消息无法解析。]'
+      : ''
     const bodyText =
-      [text, ...referenceParts].filter(part => String(part || '').trim()).join('\n') ||
+      [mentionOnlyNotice || text, ...referenceParts].filter(part => String(part || '').trim()).join('\n') ||
       (allImages.length || Number(forward?.image_total) ? '[图片]' : '')
     // 群聊身份标识：把发言人写进正文第一条，而不是只放在 JSON meta 里。
     // 模型在同一条 user 消息里就能直接看到“谁在说话”，避免把群友当成主人。

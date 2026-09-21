@@ -22,7 +22,7 @@ import { NAPCAT_CSS } from './style.mjs'
 import { createOutboundPlanner } from './outbound.mjs'
 
 export const name = 'napcat'
-export const version = '1.0.1'
+export const version = '1.0.2'
 export const displayName = 'NapCat'
 export const description = '渠道插件 · NapCatQQ / OneBot 11：私聊、群聊、隐私、连接复用与群聊规则。'
 export const author = '念风插件'
@@ -970,6 +970,7 @@ export function apply(ctx) {
         senderRole: message.senderRole || '',
         messageId: message.messageId,
         mentionedSelf: message.mentionedSelf === true,
+        mentionOnly: message.mentionOnly === true,
         atUserIds: Array.isArray(message.atUserIds) ? message.atUserIds : [],
         quote: message.quote || null,
           forward: message.forward || null,

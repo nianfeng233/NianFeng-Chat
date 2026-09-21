@@ -177,6 +177,7 @@ function publicInbound(message) {
     senderOpenid: message.senderId || '',
     groupOpenid: message.sessionType === 'group' ? message.peerId : '',
     mentionedSelf: message.mentionedSelf === true,
+    mentionOnly: message.mentionOnly === true,
     fullGroupMessage: message.fullGroupMessage === true,
     parseFallback: message.parseFallback === true,
     eventType: message.eventType || '',
@@ -956,21 +957,30 @@ function detectGroupMention(account, input) {
     else if (!text && media) text = quoteEvent ? '[引用媒体]' : '[QQ 媒体消息]'
     if (!peerId) return null
     const qqMessageId = String(d.id || d.message_id || root.id || '')
-    // 事件名 / payload 结构对，但正文和附件都解析不出来时，生成一条占位消息，
-    // 保证它至少能路由到渠道并写入聊天记录，同时标记 parseFallback 便于排查。
-    let parseFallback = false
-    if (!text && !media) {
-      const looksLikeMessage = /(?:MESSAGE|MSG).*CREATE|CREATE.*(?:MESSAGE|MSG)/i.test(String(eventType || ''))
-      if (looksLikeMessage && (qqMessageId || senderId || author.member_openid || author.user_openid)) {
-        text = '[QQ 消息：插件无法解析正文，请把 runtime 日志里的 payload keys 反馈]'
-        parseFallback = true
-      } else {
-        return null
-      }
-    }
     const eventId = String(raw?.id || '')
     const atBotEvent = String(eventType || '') === 'GROUP_AT_MESSAGE_CREATE'
     const mentionedSelf = sessionType === 'group' ? atBotEvent || detectGroupMention(account, d) : false
+    // “只 @ 机器人、不发文字”是完整意图明确的正常消息：不能生成“无法解析正文”的
+    // 技术占位，否则模型会回答“没解析出来，麻烦重发”。这里换成人能读懂的描述，
+    // 并在 context-builder 里提示模型结合最近聊天记录自然回应。
+    let parseFallback = false
+    let mentionOnly = false
+    if (!text && !media) {
+      if (mentionedSelf || atBotEvent) {
+        text = quoteEvent ? '[只 @ 了机器人，并引用了一条消息，没有输入文字]' : '[只 @ 了机器人，没有输入文字]'
+        mentionOnly = true
+      } else {
+        // 事件名 / payload 结构对，但正文和附件都解析不出来时，生成一条占位消息，
+        // 保证它至少能路由到渠道并写入聊天记录，同时标记 parseFallback 便于排查。
+        const looksLikeMessage = /(?:MESSAGE|MSG).*CREATE|CREATE.*(?:MESSAGE|MSG)/i.test(String(eventType || ''))
+        if (looksLikeMessage && (qqMessageId || senderId || author.member_openid || author.user_openid)) {
+          text = '[QQ 消息：插件无法解析正文，请把 runtime 日志里的 payload keys 反馈]'
+          parseFallback = true
+        } else {
+          return null
+        }
+      }
+    }
     return {
       id: messageKey(sessionType, peerId, qqMessageId, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
       sessionType,
@@ -979,6 +989,7 @@ function detectGroupMention(account, input) {
       senderName,
       senderNameResolved,
       mentionedSelf,
+      mentionOnly,
       fullGroupMessage: sessionType === 'group' && !atBotEvent,
       eventType: String(eventType || ''),
       parseFallback,

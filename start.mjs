@@ -561,13 +561,24 @@ async function main() {
     shuttingDown = true
     stopHeadlessAgent()
     console.log('正在关闭念风以完成更新…')
+    // 兜底：个别情况下旧实例关闭会因为等待中的连接 / 写盘而卡住。旧进程不退出，
+    // 新进程就无法安全接管（用户会看到旧终端没关、两个实例同时吃内存）。
+    // 更新助手已经在运行，所以这里超时后强制退出也没有服务空窗风险。
+    const forceExitTimer = setTimeout(() => {
+      console.error('关闭旧实例超时，已强制退出以继续更新。')
+      process.exit(0)
+    }, 12000)
     try {
-      await closeWebServer()
-    } catch (_) {
-      /* ignore */
+      try {
+        await closeWebServer()
+      } catch (_) {
+        /* ignore */
+      }
+      await backend?.close?.().catch(() => {})
+    } finally {
+      clearTimeout(forceExitTimer)
+      process.exit(0)
     }
-    await backend?.close?.().catch(() => {})
-    process.exit(0)
   }
 
   /** server-agent 能力只在 Worker 真正 ready 后才上报，避免 WebUI 误以为后端能处理入站。 */

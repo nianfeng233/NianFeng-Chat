@@ -375,6 +375,30 @@ async function main() {
       groupStatus.bindings?.some(item => item.sessionType === 'group' && item.peerId === 'group-openid-1'),
       JSON.stringify(groupStatus.bindings),
     )
+    const mentionOnlyEvent = {
+      id: 'event-group-mention-only',
+      op: 0,
+      s: 6,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'msg-group-mention-only',
+        content: '@MockQQBot',
+        timestamp: new Date().toISOString(),
+        group_openid: 'group-openid-1',
+        author: { id: 'member-openid-1', member_openid: 'member-openid-1' },
+      },
+    }
+    await api(base, '/api/qqbot/webhook', { method: 'POST', headers: { 'X-Bot-Appid': 'mock-app-1' }, body: mentionOnlyEvent })
+    await sleep(260)
+    const mentionOnlyInbox = await (await api(base, '/api/qqbot/inbox?channelId=ch-group')).json()
+    const mentionOnlyMessage = (mentionOnlyInbox.messages || []).find(item => item.id.includes('msg-group-mention-only'))
+    check(
+      '只 @ 机器人没有说话时生成可读事件，不再落成无法解析占位',
+      mentionOnlyMessage?.text === '[只 @ 了机器人，没有输入文字]' &&
+        mentionOnlyMessage?.mentionOnly === true &&
+        mentionOnlyMessage?.parseFallback !== true,
+      JSON.stringify({ text: mentionOnlyMessage?.text, mentionOnly: mentionOnlyMessage?.mentionOnly, parseFallback: mentionOnlyMessage?.parseFallback }),
+    )
     const groupReply = await (await api(base, '/api/qqbot/send', {
       method: 'POST',
       body: { channelId: 'ch-group', text: '群聊回复', sessionType: 'group', peerId: 'group-openid-1', msgId: 'msg-group-adapted' },

@@ -39,9 +39,12 @@ function logLine(plan, message) {
   return appendFile(file, `${text}\n`, 'utf8').catch(() => {})
 }
 
+/** 更新进度窗口 PID；失败路径重新读取 plan 时也能靠它关掉残留窗口。 */
+let activeProgressPid = 0
+
 /** 等进度窗口读到最终状态自行关闭；超时则强制结束，避免残留后台窗口。 */
 async function closeUpdateWindow(plan) {
-  const pid = Number(plan?._progressPid) || 0
+  const pid = Number(plan?._progressPid) || activeProgressPid || 0
   if (!pid) return
   const deadline = Date.now() + 12000
   while (Date.now() < deadline && isProcessAlive(pid)) await sleep(250)
@@ -52,7 +55,8 @@ async function closeUpdateWindow(plan) {
       /* ignore */
     }
   }
-  plan._progressPid = 0
+  activeProgressPid = 0
+  if (plan) plan._progressPid = 0
 }
 
 function formatBytes(value) {
@@ -146,6 +150,7 @@ async function openUpdateWindow(plan) {
     child.on('error', () => {})
     child.unref()
     plan._progressPid = child.pid
+    activeProgressPid = child.pid
     return child
   } catch (err) {
     await logLine(plan, `进度窗口启动失败（不影响更新）：${err?.message || err}`)
@@ -174,7 +179,7 @@ async function waitPidGone(plan, pid, timeoutMs = 90000) {
     await sleep(350)
   }
   const alive = isProcessAlive(pid)
-  await logLine(plan, `等待进程 ${pid} 退出超时${alive ? '，将继续执行' : ''}`)
+  await logLine(plan, `等待进程 ${pid} 退出超时${alive ? '，将强制结束旧实例' : ''}`)
   return !alive
 }
 
@@ -262,6 +267,34 @@ async function killProcess(plan, pid, label = '进程') {
   if (alive) throw new Error(`无法关闭旧${label} ${value}，为避免更新后新旧实例冲突已停止`)
   return true
 }
+
+/**
+ * 确保旧实例进程真正退出后再继续。
+ *
+ * 旧逻辑只是等待并在超时后继续下载 / 替换：如果旧终端里的后端没有正常退出，
+ * 新版本会被提前拉起，表现为旧终端还开着、两个实例同时占内存和端口。
+ * 这里超时后主动结束旧进程；仍然结束不了就中止更新，绝不让新旧实例并存。
+ */
+async function ensurePidGone(plan, pid, { timeoutMs = 90000, label = '旧实例' } = {}) {
+  const value = Number(pid)
+  if (!value) return true
+  const gone = await waitPidGone(plan, value, timeoutMs)
+  if (gone) return true
+  await writeUpdateStatus(plan, {
+    phase: 'stop',
+    phaseText: '正在结束旧实例',
+    message: `${label}（PID ${value}）没有按时退出，正在强制结束，稍后继续更新…`,
+    received: plan?._status?.received || 0,
+    total: plan?._status?.total || 0,
+    percent: plan?._status?.percent || 0,
+  })
+  await killProcess(plan, value, label.replace(/^旧/, '') || '实例')
+  if (isProcessAlive(value)) {
+    throw new Error(`${label} ${value} 仍然没有退出，已停止更新以避免新旧实例冲突；请手动关闭旧窗口后重试`)
+  }
+  return true
+}
+
 
 async function downloadFile(plan, urls, dest, expectedSize = 0) {
   const list = (Array.isArray(urls) ? urls : [urls]).map(value => toText(value).trim()).filter(Boolean)
@@ -353,6 +386,22 @@ async function extractZip(plan, zipFile, destDir) {
   if (tarResult.code === 0) return
 
   if (process.platform === 'win32') {
+    // 先优先用 .NET 的 ZipFile：它按流式读取，不会像 Expand-Archive 那样在
+    // 大更新包 / 低内存机器上出现“内存不足”或长时间卡住。
+    await rm(destDir, { recursive: true, force: true }).catch(() => {})
+    const zipFileCommand =
+      `$ErrorActionPreference='Stop'; ` +
+      `Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+      `[System.IO.Compression.ZipFile]::ExtractToDirectory('${escapePowerShellLiteral(zipFile)}', '${escapePowerShellLiteral(destDir)}')`
+    const zipFileResult = await runCommand(
+      plan,
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', zipFileCommand],
+      { timeoutMs: 15 * 60 * 1000 },
+    )
+    if (zipFileResult.code === 0) return
+
+    await mkdir(destDir, { recursive: true })
     const command =
       `$ErrorActionPreference='Stop'; ` +
       `Expand-Archive -LiteralPath '${escapePowerShellLiteral(zipFile)}' -DestinationPath '${escapePowerShellLiteral(destDir)}' -Force`
@@ -362,7 +411,9 @@ async function extractZip(plan, zipFile, destDir) {
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command],
       { timeoutMs: 15 * 60 * 1000 },
     )
-    if (result.code !== 0) throw new Error(`解压失败（tar=${tarResult.code}，powershell=${result.code}）：${result.output.slice(-600)}`)
+    if (result.code !== 0) {
+      throw new Error(`解压失败（tar=${tarResult.code}，zipfile=${zipFileResult.code}，expand=${result.code}）：${result.output.slice(-600)}`)
+    }
     return
   }
   throw new Error(`解压失败（退出码 ${tarResult.code}）：${tarResult.output.slice(-600)}`)
@@ -594,6 +645,8 @@ async function applyWebUpdate(plan) {
     await replaceEntry(plan, sourceApp, join(homeDir, 'app'), 'Web app 目录')
     await copyRootFiles(plan, sourceDir, homeDir, new Set(['app', 'runtime', 'user_data', 'data']))
     await logLine(plan, `Web 部署版已更新到：${homeDir}`)
+    // 替换完成后再确认一次旧后端确实不在：避免极端情况下旧进程晚重启导致端口 / 内存冲突。
+    await ensurePidGone(plan, plan.waitPid || plan.nodePid, { timeoutMs: 5000, label: '旧实例' })
     await launchVisible(plan, homeDir)
     return
   }
@@ -613,12 +666,17 @@ async function applyWebUpdate(plan) {
   ])
   await copyRootFiles(plan, sourceDir, rootDir, preserve)
   await logLine(plan, `Web 源码版已更新到：${rootDir}`)
+  // 替换完成后再确认一次旧后端确实不在，再拉起新终端。
+  await ensurePidGone(plan, plan.waitPid || plan.nodePid, { timeoutMs: 5000, label: '旧实例' })
   await launchVisible(plan, rootDir)
 }
 
 async function applyRestart(plan) {
   const kind = toText(plan.kind).trim()
-  await waitPidGone(plan, plan.waitPid || plan.nodePid, 90000)
+  await ensurePidGone(plan, plan.waitPid || plan.nodePid, {
+    timeoutMs: Number(plan.pidWaitMs) || 90000,
+    label: '旧实例',
+  })
   if (kind === 'desktop') {
     if (plan.desktopPid) await killProcess(plan, plan.desktopPid, '桌面进程')
     const exePath = toText(plan.desktopExe).trim()
@@ -643,12 +701,15 @@ async function main() {
     await writeUpdateStatus(plan, {
       phase: 'preparing',
       phaseText: '准备更新',
-      message: plan.kind === 'desktop' ? '正在等待旧实例退出，准备下载更新包…' : '正在准备下载更新包…',
+      message: '正在等待旧实例退出，准备下载更新包…',
       received: 0,
       total: 0,
       percent: 0,
     })
-    await waitPidGone(plan, plan.waitPid || plan.nodePid, 90000)
+    await ensurePidGone(plan, plan.waitPid || plan.nodePid, {
+      timeoutMs: Number(plan.pidWaitMs) || 90000,
+      label: '旧实例',
+    })
     if (toText(plan.kind).trim() === 'desktop') {
       // 先下载完并校验，再关闭旧窗口；下载期间用户能看到明确进度。
       await applyDesktopUpdate(plan)
@@ -723,6 +784,7 @@ if (isDirectRun) {
         message: `更新失败：${err?.message || err}`,
         percent: plan._status?.percent || 0,
       })
+      await closeUpdateWindow(plan).catch(() => {})
       await recoverAfterFailure(plan)
     } catch (_) {
       console.error(err)

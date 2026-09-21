@@ -383,21 +383,28 @@ export function apply(ctx, config = {}) {
     }
 
     ctx.logger.info(`本体更新已启动：${release.tag} · ${KIND_LABELS[kind] || kind} · ${release.asset.name}`)
-    http.sendJson(res, 200, {
-      ok: true,
-      message: `正在更新到 ${release.tag}…`,
-      kind,
-      kindLabel: KIND_LABELS[kind] || kind,
-      tag: release.tag,
-      asset: release.asset.name,
-    })
-
-    const timer = setTimeout(() => {
-      Promise.resolve()
-        .then(onStop)
-        .catch(err => ctx.logger.error(`关闭旧实例失败：${err?.message || err}`))
-    }, 300)
-    timer.unref?.()
+    const scheduleStop = () => {
+      // 即使响应写出阶段出意外，也必须安排旧实例退出；否则更新助手只能等到
+      // 等待超时后强杀，用户就会看到“旧终端没关、又拉起新终端”的异常流程。
+      const timer = setTimeout(() => {
+        Promise.resolve()
+          .then(onStop)
+          .catch(err => ctx.logger.error(`关闭旧实例失败：${err?.message || err}`))
+      }, 300)
+      timer.unref?.()
+    }
+    try {
+      http.sendJson(res, 200, {
+        ok: true,
+        message: `正在更新到 ${release.tag}…`,
+        kind,
+        kindLabel: KIND_LABELS[kind] || kind,
+        tag: release.tag,
+        asset: release.asset.name,
+      })
+    } finally {
+      scheduleStop()
+    }
   })
 
   http.route('POST', '/api/app/restart', async (req, res) => {

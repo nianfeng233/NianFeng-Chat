@@ -12,7 +12,7 @@
 export const plugins = [
   {
     "id": "napcat",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "displayName": "NapCat",
     "description": "渠道插件 · NapCatQQ / OneBot 11：私聊、群聊、隐私、连接复用与群聊规则。",
     "author": "念风插件",
@@ -64,7 +64,7 @@ export const plugins = [
   },
   {
     "id": "qqbot",
-    "version": "1.5.0",
+    "version": "1.5.1",
     "displayName": "QQ官方机器人",
     "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。",
     "author": "念风插件",
@@ -1109,7 +1109,7 @@ export const plugins = [
   },
   {
     "id": "context-builder",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "上下文构建",
     "description": "业务功能 · 工作记忆 + 渠道记忆合并、去重、排序与 token 预算截断。",
     "author": "念风内核",

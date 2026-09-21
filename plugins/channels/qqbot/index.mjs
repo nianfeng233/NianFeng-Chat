@@ -20,7 +20,7 @@ import { QQBOT_CSS } from './style.mjs'
 import { renderQrSvg, isQrImageContent } from './qrcode.mjs'
 
 export const name = 'qqbot'
-export const version = '1.5.0'
+export const version = '1.5.1'
 export const displayName = 'QQ官方机器人'
 export const description = '渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。'
 export const author = '念风插件'
@@ -1096,6 +1096,7 @@ export function apply(ctx) {
         linkFromAccountId: message.linkFromAccountId || '',
         linkFromChannelId: message.linkFromChannelId || '',
         mentionedSelf: message.mentionedSelf === true,
+        mentionOnly: message.mentionOnly === true,
         fullGroupMessage: message.fullGroupMessage === true,
         eventType: message.eventType || '',
         qqMessageId: message.qqMessageId,

@@ -1179,6 +1179,22 @@ export function apply(ctx) {
     const quoted = segmentQuote(segments)
     const cards = segmentCards(segments)
     const forwardSources = segmentForwardSources(segments)
+    const mentionedSelf = segmentMentionedSelf(segments, selfIds) || segmentMentionedSelf(rawSegments, selfIds)
+    // 只有“@机器人”没有正文时，不要把 @QQ号 这种模型看不懂的裸文本直接塞给它，
+    // 更不能再落成“空消息 / 无法解析”占位；换成人能读懂、模型也能读懂的事件描述，
+    // 模型会结合最近的群聊上下文自然回应。
+    const hasContentBeyondMention = [...(Array.isArray(segments) ? segments : []), ...(Array.isArray(rawSegments) ? rawSegments : [])].some(segment => {
+      const type = String(segment?.type || '').toLowerCase()
+      if (!type || type === 'at' || type === 'reply') return false
+      if (type === 'text') return String(segment?.data?.text ?? '').trim() !== ''
+      return true
+    })
+    const mentionOnly = mentionedSelf && !hasContentBeyondMention && !images.length && !cards.length && !forwardSources.length
+    const storedText = mentionOnly
+      ? (quoted
+          ? '[只 @ 了机器人，并引用了一条消息，没有输入文字]'
+          : '[只 @ 了机器人，没有输入文字]')
+      : text
     const messageId = String(payload.message_id ?? payload.message_seq ?? `${payload.time || Date.now()}-${senderId}`)
     return {
       key: `${messageType}:${peerId}:${messageId}`,
@@ -1193,12 +1209,13 @@ export function apply(ctx) {
       senderCard: safeString(messageType === 'group' ? sender.card || '' : '', 80),
       senderRole: safeString(sender.role || '', 20),
       selfId,
-      mentionedSelf: segmentMentionedSelf(segments, selfIds) || segmentMentionedSelf(rawSegments, selfIds),
+      mentionedSelf,
+      mentionOnly,
       atUserIds,
       mentionAll: [...(Array.isArray(segments) ? segments : []), ...(Array.isArray(rawSegments) ? rawSegments : [])].some(
         segment => segment?.type === 'at' && normalizeQqId(segment?.data?.qq) === 'all',
       ),
-      text,
+      text: storedText,
       images: [],
       rawImages: images,
       quote: quoted,

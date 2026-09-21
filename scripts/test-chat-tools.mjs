@@ -1255,6 +1255,29 @@ async function main() {
     String(referenceJson?.content?.text || '').slice(0, 300),
   )
 
+  const mentionOnlyWire = builder.toModelMessage(
+    {
+      role: 'user',
+      content: '[只 @ 了机器人，没有输入文字]',
+      message_id: 'msg-mention-only-test',
+      sender_name: 'QQ用户',
+      sender_id: 'qq:10002',
+      channel_id: 'napcat:test',
+      timestamp: new Date().toISOString(),
+      meta: { mentionOnly: true, groupId: '22222', senderCard: '群昵称', senderNickname: 'QQ用户' },
+    },
+    { roleId: 'role-ref', channelId: 'napcat:test', timezone: 'UTC', isGroup: true },
+  )
+  const mentionOnlyJson = JSON.parse(String(mentionOnlyWire?.content || '{}'))
+  check(
+    '只 @ 机器人没有说话时进入模型的是“结合聊天记录回应”提示，而不是解析失败占位',
+    !!mentionOnlyWire &&
+      String(mentionOnlyJson?.content?.text || '').includes('只 @ 了机器人') &&
+      String(mentionOnlyJson?.content?.text || '').includes('结合最近的聊天记录') &&
+      !String(mentionOnlyJson?.content?.text || '').includes('插件无法解析正文'),
+    String(mentionOnlyJson?.content?.text || '').slice(0, 200),
+  )
+
   const quotePreviewPng =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg=='
   const quoteImageWire = builder.toModelMessage(

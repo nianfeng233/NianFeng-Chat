@@ -291,6 +291,39 @@ async function main() {
       JSON.stringify({ selfId: fallbackMessage?.selfId, mentionedSelf: fallbackMessage?.mentionedSelf, atUserIds: fallbackMessage?.atUserIds }),
     )
 
+    // 3b-2) 只 @ 机器人、没有说话：必须生成一条正常事件，而不是空消息 / 解析失败占位。
+    pushEvent({
+      post_type: 'message',
+      message_type: 'group',
+      sub_type: 'normal',
+      message_id: 10021,
+      group_id: 22222,
+      user_id: 10002,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      raw_message: '[CQ:at,qq=10001]',
+      message: [{ type: 'at', data: { qq: '10001' } }],
+      sender: { user_id: 10002, nickname: 'QQ昵称甲', card: '群昵称甲', role: 'member' },
+    })
+    const mentionOnlyMessage = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(channelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '10021')?.message || null
+    })
+    check(
+      '只 @ 机器人没有说话时生成可读事件，不落成空消息',
+      mentionOnlyMessage?.mentionedSelf === true &&
+        mentionOnlyMessage?.mentionOnly === true &&
+        mentionOnlyMessage?.text === '[只 @ 了机器人，没有输入文字]' &&
+        mentionOnlyMessage?.atUserIds?.includes('10001'),
+      JSON.stringify({
+        mentionedSelf: mentionOnlyMessage?.mentionedSelf,
+        mentionOnly: mentionOnlyMessage?.mentionOnly,
+        text: mentionOnlyMessage?.text,
+        atUserIds: mentionOnlyMessage?.atUserIds,
+      }),
+    )
+
+
     // 3c) 引用 / 合并转发 / QQ 卡片：模型侧必须能拿到原文与转发条目
     const inviteCard = JSON.stringify({
       app: 'com.tencent.qqconnect.group',
