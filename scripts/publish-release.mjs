@@ -111,7 +111,7 @@ if (createRelease) {
   releaseArgs.push('--title', `念风Chat ${tag}`)
   if (notesFile && existsSync(notesFile)) releaseArgs.push('--notes-file', notesFile)
   else releaseArgs.push('--generate-notes')
-  const prerelease = /-(alpha|beta|rc)/i.test(tag)
+  const prerelease = /-(alpha|beta|rc|preview)/i.test(tag)
   if (prerelease) releaseArgs.push('--prerelease')
   run('gh', releaseArgs, { cwd: ROOT })
 }

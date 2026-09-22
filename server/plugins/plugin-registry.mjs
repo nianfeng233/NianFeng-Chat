@@ -40,6 +40,8 @@ export function apply(ctx, config = {}) {
   const hub = ctx.hub
   const builtinDir = resolve(config.builtinDir || join(process.cwd(), 'plugins'))
   const appVersion = String(config.appVersion || '').trim()
+  /* 进程级 build：/api/plugins 返回给 WebUI 插件清单缓存做版本校验。 */
+  const build = String(config.build || '').trim()
   const appMajor = (() => {
     const parsed = Number.parseInt(String(appVersion).split('.')[0], 10)
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 2
@@ -136,15 +138,80 @@ export function apply(ctx, config = {}) {
     return out
   }
 
+  /** 外部插件版本段里不再包含目录层级，避免影响插件相对 import 的深度计算。 */
+  const REVISION_SKIP_DIRS = new Set([...SKIP_DIRS, 'release', 'target'])
+  const MAX_REVISION_FILES = 3000
+
+  /**
+   * 计算插件目录的稳定 revision。
+   *
+   * 不能只看 index.mjs 的 mtime：插件升级常见情况是 index 没变、只替换了
+   * lib/*.mjs。这里把目录内所有普通文件的大小 / mtime 纳入摘要，任一文件变化
+   * 都会得到新的 revision，插件整棵模块图因此换到新的 URL 前缀下。
+   */
+  async function pluginRevision(root, fallbackFile, fallbackInfo) {
+    const hash = createHash('sha1')
+    let latest = Number(fallbackInfo?.mtimeMs) || 0
+    let count = 0
+    let truncated = false
+    const addFile = async file => {
+      const info = await stat(file)
+      count += 1
+      const mtime = Number(info.mtimeMs) || 0
+      latest = Math.max(latest, mtime)
+      hash.update(`${relative(root, file).split(sep).join('/')}:${Number(info.size) || 0}:${Math.round(mtime)}\n`)
+    }
+    const walk = async (dir, depth) => {
+      if (depth > 8 || count >= MAX_REVISION_FILES) {
+        truncated = true
+        return
+      }
+      let entries = []
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch (_) {
+        return
+      }
+      entries.sort((a, b) => a.name.localeCompare(b.name))
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || REVISION_SKIP_DIRS.has(entry.name)) continue
+        const full = join(dir, entry.name)
+        try {
+          if (entry.isDirectory()) {
+            await walk(full, depth + 1)
+          } else if (entry.isFile()) {
+            await addFile(full)
+          }
+        } catch (_) {
+          /* 读不到的单个文件不阻断扫描 */
+        }
+        if (count >= MAX_REVISION_FILES) {
+          truncated = true
+          break
+        }
+      }
+    }
+    try {
+      await walk(root, 0)
+      if (!count && fallbackFile) await addFile(fallbackFile)
+    } catch (_) {
+      const mtime = Number(fallbackInfo?.mtimeMs) || Date.now()
+      return `${Math.round(mtime).toString(36)}-fallback`
+    }
+    const digest = hash.digest('hex').slice(0, 12)
+    return `${Math.round(latest).toString(36)}-${digest}${truncated ? 't' : ''}`
+  }
+
   /** 读取单个外部插件的元信息（在 Node 侧动态 import，与 sync-plugins 的做法一致） */
   async function readExternalEntry(file, root) {
     const info = await stat(file)
     const dir = dirname(file)
     const relFile = relative(root, file).split(sep).join('/')
     const folder = relative(root, dir).split(sep).join('/') || relFile.replace(/\/index\.mjs$/, '')
-    const revision = Math.round(info.mtimeMs || Date.now())
-    // 保持与内置插件相同的“三层目录”URL 结构，插件里 ../../../src/... 的相对引用仍可解析。
-    const urlPath = '/user-plugins/' + relFile.split('/').map(encodeURIComponent).join('/') + '?v=' + revision
+    const revision = await pluginRevision(dir, file, info).catch(() => Math.round(info.mtimeMs || Date.now()).toString(36))
+    // 版本段放在插件目录之前，插件内部的相对 import 会继续解析到
+    // `/user-plugins/__nfv/<revision>/<folder>/...`，整棵模块图一起换版本。
+    const urlPath = `/user-plugins/__nfv/${revision}/${relFile.split('/').map(encodeURIComponent).join('/')}`
     const base = { external: true, source: 'external', path: urlPath, dir: folder, __file: file }
 
     let manifest = null
@@ -218,6 +285,23 @@ export function apply(ctx, config = {}) {
 
   const publicEntry = ({ __file, ...rest }) => rest
 
+  /**
+   * 外部插件代码签名：包含进程 build 与每个插件入口的版本路径。
+   *
+   * 前端 / 服务端代聊都靠它区分“只是启停偏好变了（可以热同步）”与
+   * “插件文件 / revision 变了（Node ESM 模块图必须换新，Worker 需重启）”。
+   */
+  const snapshotSignature = value =>
+    createHash('sha256')
+      .update(
+        `${value?.build || ''}|${(value?.externalEntries || [])
+          .map(entry => `${entry.id}:${entry.path}`)
+          .sort()
+          .join('|')}`,
+      )
+      .digest('hex')
+      .slice(0, 24)
+
   async function scan({ force = false } = {}) {
     const root = externalDir()
     if (!force && snapshot && Date.now() - snapshot.scannedAt < 1500) return snapshot
@@ -251,6 +335,7 @@ export function apply(ctx, config = {}) {
 
     snapshot = {
       plugins,
+      build,
       builtinDir,
       externalDir: root,
       defaultExternalDir: resolve(defaultExternalDir()),
@@ -296,6 +381,7 @@ export function apply(ctx, config = {}) {
 
   const publicSnapshot = value => ({
     plugins: value.plugins,
+    build: value.build || build,
     ...pluginPreferences(),
     ...publicDirs(value),
   })
@@ -316,7 +402,7 @@ export function apply(ctx, config = {}) {
       await settings.update({ plugins: { dir: target } })
     }
     const next = await scan({ force: true })
-    broadcastPluginsChanged({ action: 'dir-changed', externalDir: next.externalDir })
+    broadcastPluginsChanged({ action: 'dir-changed', externalDir: next.externalDir, signature: snapshotSignature(next) })
     return publicDirs(next)
   }
 
@@ -330,7 +416,7 @@ export function apply(ctx, config = {}) {
     }
     await rm(target, { recursive: true, force: true })
     const next = await scan({ force: true })
-    broadcastPluginsChanged({ action: 'removed', id })
+    broadcastPluginsChanged({ action: 'removed', id, signature: snapshotSignature(next) })
     return { ok: true, pluginId: id, dirs: publicDirs(next) }
   }
 
@@ -343,6 +429,15 @@ export function apply(ctx, config = {}) {
     } catch (_) {
       /* 保持原样 */
     }
+    // `/user-plugins/__nfv/<revision>/<plugin>/...`：revision 只用于浏览器 URL
+    // 版本隔离，真实文件路径不包含该段。旧的无版本 URL 继续兼容。
+    let versioned = false
+    const versionMatch = /^__nfv\/[A-Za-z0-9._+-]{1,160}\/(.+)$/.exec(rel)
+    if (versionMatch) {
+      rel = versionMatch[1]
+      versioned = true
+    }
+    if (!rel) return null
     const target = normalize(join(root, rel))
     if (!isInside(root, target)) return null
     const ext = extname(target).toLowerCase()
@@ -353,7 +448,7 @@ export function apply(ctx, config = {}) {
     } catch (_) {
       return null
     }
-    return { file: target, ext }
+    return { file: target, ext, versioned }
   }
 
   function openExternalDir() {
@@ -607,7 +702,7 @@ export function apply(ctx, config = {}) {
     }
 
     const next = await scan({ force: true })
-    broadcastPluginsChanged({ action: 'installed', ids: installed.map(item => item.id) })
+    broadcastPluginsChanged({ action: 'installed', ids: installed.map(item => item.id), signature: snapshotSignature(next) })
     return {
       ok: true,
       installed,
@@ -653,9 +748,10 @@ export function apply(ctx, config = {}) {
     defaultExternalDir: () => resolve(defaultExternalDir()),
     list: options => scan(options).then(publicSnapshot),
     dirs: () => scan().then(publicDirs),
+    signature: () => scan().then(snapshotSignature),
     refresh: async () => {
       const next = await scan({ force: true })
-      broadcastPluginsChanged({ action: 'rescan', count: next.count })
+      broadcastPluginsChanged({ action: 'rescan', count: next.count, signature: snapshotSignature(next) })
       return publicSnapshot(next)
     },
     setExternalDir,

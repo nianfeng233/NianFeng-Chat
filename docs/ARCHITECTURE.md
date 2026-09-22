@@ -255,3 +255,12 @@ session-service 在新增 / 更新消息后防抖写回 /api/sessions/:id
 
 安全回归测试：`npm run test:security`。
 
+## 十、资源版本与缓存失效
+
+- 后端启动时生成进程级 `build`（版本号 + 启动时间），通过 `/api/version` 与 `/api/plugins` 返回。
+- WebUI 入口先读取 `build`，再用 `import('/__nfv/<build>/src/main.mjs')` 加载内核；相对 import 会继承路径前缀，因此一次重启 / 升级后整棵模块图都换新 URL，不依赖浏览器或反向代理是否遵守 `Cache-Control`。
+- 静态服务只剥掉 `/__nfv/<build>` 前缀，路径边界校验仍在剥前缀后的真实路径上执行；版本化请求使用 immutable 强缓存，未版本化源码继续 `no-cache + ETag` 协商。
+- 外部插件入口使用 `/user-plugins/__nfv/<revision>/<plugin>/index.mjs`。revision 来自插件目录内文件的大小 / mtime 摘要，只改 `lib/*`、`bridge.mjs` 或 `manifest.json` 也会变化；插件内部相对 import 落在同一版本目录下，避免入口更新而子模块仍命中旧缓存。
+- `localStorage` 中的插件清单快照带 `build`，构建号不一致时直接丢弃；页面保持打开而发生后端升级 / 独立重启时，后台同步检测到 `build` 变化后刷新页面。
+- 公开 Webhook 路由统一位于 `/api/webhooks/*`：框架只负责免访问令牌放行与 Host 放宽，注册方必须使用路径密钥 + HMAC 等方式完成验签，`/api/webhooks/*` 下的普通业务数据接口不会被自动暴露。
+- 外部插件代码签名（build + 各插件入口 revision）变化时，`start.mjs` 会重启 `server-agent` Worker：Node ESM 对已加载的相对子模块没有失效机制，只热同步入口会留下旧 `lib`；仅启停偏好变化时仍走原有热同步，不中断在途会话。

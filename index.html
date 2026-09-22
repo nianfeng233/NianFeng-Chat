@@ -101,8 +101,47 @@
       }
     }
 
+    /**
+     * 读取后端 build 号。
+     * 后端进程每次启动都会生成新的 build，用它作为 WebUI 模块图的路径版本：
+     *   /__nfv/<build>/src/main.mjs
+     * 相对 import 会继承这个路径前缀，升级 / 重启后整棵模块图换 URL，不再被
+     * 浏览器 HTTP 缓存、ESM 模块缓存或反向代理旧缓存命中。
+     */
+    async function readBuild() {
+      try {
+        const response = await fetch(`./api/version?ts=${Date.now()}`, {
+          cache: 'no-store',
+          signal:
+            typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+              ? AbortSignal.timeout(3000)
+              : undefined,
+        })
+        if (!response.ok) return ''
+        const data = await response.json()
+        return String(data?.build || data?.version || '').trim()
+      } catch (_) {
+        return ''
+      }
+    }
+
+    async function importBootModule() {
+      const build = await readBuild()
+      if (build) {
+        try {
+          globalThis.__NF_BUILD__ = build
+          globalThis.__NF_RELOADABLE__ = true
+          return await import(`./__nfv/${encodeURIComponent(build)}/src/main.mjs`)
+        } catch (err) {
+          // 老后端 / 静态服务不支持版本前缀时回退到源码入口；新后端二者都可用。
+          console.warn('[nianfeng] 版本化入口加载失败，回退到源码入口', err)
+        }
+      }
+      return import('./src/main.mjs')
+    }
+
     function normalBoot() {
-      import('./src/main.mjs')
+      importBootModule()
         .then(({ boot }) => boot({ scope: 'webui' }))
         .catch(err => {
           console.error('[nianfeng] boot failed', err)

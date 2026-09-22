@@ -247,11 +247,16 @@ export async function startBackend({
       .map(value => value.trim())
       .filter(Boolean)
 
+  const startedAt = Date.now()
+  /* 静态资源构建版本号：进程每次启动都会变化。WebUI 入口用它把整棵模块图
+   * 放到 `/__nfv/<build>/...` 下加载，后端升级 / 重启后旧 URL 自动失效。 */
+  const build = `${pkg.version}-${startedAt.toString(36)}`
   ctx.provide('info', {
     name: '念风chat 后端',
     version: pkg.version,
+    build,
     node: process.version,
-    startedAt: Date.now(),
+    startedAt,
   })
 
   const listening = new Promise((resolve, reject) => {
@@ -297,7 +302,7 @@ export async function startBackend({
     [hubPlugin, {}],
     [modelsPlugin, {}],
     [instancePlugin, paths],
-    [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins'), appVersion: pkg.version }],
+    [pluginRegistryPlugin, { builtinDir: join(ROOT, 'plugins'), appVersion: pkg.version, build }],
     [
       httpPlugin,
       {
@@ -398,8 +403,9 @@ export async function startBackend({
     wrapBridgeReload('resetExternalDir')
   }
 
-  // 外部插件清单变化（安装 / 删除 / 重新扫描 / 切换目录）时，通知宿主重启服务端代聊 Worker，
-  // 让 QQ / NapCat 等由代聊处理的渠道也能拿到最新工具；800ms 合并连续的目录变更。
+  // 外部插件清单变化（安装 / 删除 / 重新扫描 / 切换目录）时，通知宿主同步服务端代聊 Worker；
+  // 只有代码签名真正变化（入口 revision / 文件变了）时宿主才重启 Worker，让 QQ / NapCat
+  // 等由代聊处理的渠道拿到最新模块图，同时避免启停偏好变化也中断在途会话。800ms 合并连续目录变更。
   if (typeof onPluginsChanged === 'function') {
     let pluginChangeTimer = null
     ctx.on('plugins/changed', payload => {

@@ -10,8 +10,13 @@
  *   - 旧实现给所有静态资源发 `Cache-Control: no-store`，远程部署时每次刷新
  *     WebUI 都要重新下载 100+ 个 JS/插件模块，RTT 叠加后动辄半分钟；
  *   - 没有 gzip / brotli，1.5MB+ 的源码在慢速上行链路上传输很慢；
- *   - 有 `?v=` 版本号的插件模块可以长期缓存，没有版本号的源码至少应该走
- *     ETag / Last-Modified 条件请求，命中后返回 304。
+ *   - 有 `?v=` / `/__nfv/<build>/` 版本号的模块可以长期缓存，没有版本号的
+ *     源码至少应该走 ETag / Last-Modified 条件请求，命中后返回 304。
+ *
+ * 版本化路径前缀：
+ *   WebUI 入口根据后端 build 号把整棵模块图放到 `/__nfv/<build>/...` 下加载，
+ *   静态服务只把前缀剥掉再按原路径找文件。相对 import 会继承前缀，因此一次
+ *   更新后模块图中所有文件都会换成新 URL，不再命中浏览器 / 代理的旧缓存。
  */
 import { readFile, stat } from 'node:fs/promises'
 import { extname } from 'node:path'
@@ -20,6 +25,21 @@ import { gzipSync } from 'node:zlib'
 const MAX_CACHE_ENTRIES = 256
 const MAX_CACHE_BYTES = 24 * 1024 * 1024
 const COMPRESS_MIN_BYTES = 1024
+
+/** `/__nfv/<build>/...` 构建版本前缀：build 段只允许安全字符。 */
+const BUILD_PREFIX_RE = /^\/__nfv\/([A-Za-z0-9._+-]{1,160})(?=\/|$)/
+
+/**
+ * 拆出 `/__nfv/<build>` 前缀。
+ * @returns {{ pathname: string, build: string, versioned: boolean }}
+ */
+export function stripBuildPrefix(pathname) {
+  const value = String(pathname || '')
+  const match = BUILD_PREFIX_RE.exec(value)
+  if (!match) return { pathname: value, build: '', versioned: false }
+  const rest = value.slice(match[0].length)
+  return { pathname: rest || '/', build: match[1], versioned: true }
+}
 
 const COMPRESSIBLE_TYPES = [
   'text/',
@@ -158,10 +178,23 @@ export async function serveStaticFile(req, res, filePath, {
   return true
 }
 
-/** 根据请求 URL 是否有版本号判断能否 immutable。 */
+/**
+ * 根据请求 URL 是否带版本号判断能否 immutable。
+ * 同时识别：
+ *   - 查询串 `?v= / ?__nfv= / ?version= / ?rev=`
+ *   - WebUI 构建路径 `/__nfv/<build>/...`
+ *   - 外部插件版本路径 `/user-plugins/__nfv/<revision>/...`
+ */
 export function isVersionedRequest(req) {
   const url = String(req?.url || '')
-  return /[?&](v|__nfv|version|rev)=/i.test(url)
+  if (/[?&](v|__nfv|version|rev)=/i.test(url)) return true
+  try {
+    const pathname = new URL(url, 'http://localhost').pathname
+    if (BUILD_PREFIX_RE.test(pathname)) return true
+    return /^\/user-plugins\/__nfv\/[A-Za-z0-9._+-]{1,160}(?=\/|$)/.test(pathname)
+  } catch (_) {
+    return false
+  }
 }
 
 /**

@@ -39,7 +39,7 @@ import {
   parseCookieValue,
 } from './server/web-security.mjs'
 import { MIME } from './server/http-io.mjs'
-import { serveStaticFile, isVersionedRequest } from './server/static-cache.mjs'
+import { serveStaticFile, isVersionedRequest, stripBuildPrefix } from './server/static-cache.mjs'
 import { printFreeSoftwareNotice } from './src/shared/project-info.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)))
@@ -161,6 +161,14 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
     return { headerOk, cookieOk, queryOk, ok: headerOk || cookieOk || queryOk }
   }
 
+  /**
+   * 公开 Webhook 路由前缀：第三方服务无法携带 WebUI 令牌，必须由后端注册方
+   * 在 handler 内完成路径密钥 / HMAC 校验；这里只放行代理与 Host 校验。
+   */
+  const PUBLIC_API_PREFIX = '/api/webhooks/'
+  const isPublicApiPath = pathname => String(pathname || '').startsWith(PUBLIC_API_PREFIX)
+  const isOpenApiPath = pathname => pathname === '/api/health' || pathname === '/api/version' || isPublicApiPath(pathname)
+
   const setSecurityHeaders = res => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('X-Frame-Options', 'DENY')
@@ -189,7 +197,10 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
     // 远程部署（公网 IP / 域名 / 反向代理）通常不在默认的本机 Host 列表里，
     // 但令牌本身已是可信凭证；DNS rebinding 的恶意网页拿不到这个令牌。
     const tokenState = isTokenRequired() ? evaluateToken(req, url, pathname) : null
-    if (!isAllowedHost(req.headers.host) && !tokenState?.ok) {
+    const publicApi = isPublicApiPath(pathname)
+    // Webhook 回调通常来自反向代理域名，Host 不在本机白名单里；公开路径的
+    // 安全边界由后端路由自己的路径密钥 / HMAC 承担，Origin 仍照常校验。
+    if (!isAllowedHost(req.headers.host) && !tokenState?.ok && !publicApi) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('403 Forbidden')
       return
     }
@@ -198,9 +209,9 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
       return
     }
 
-    // 访问令牌：health / version 放行（供宿主探活）。
+    // 访问令牌：health / version 放行（供宿主探活），公开 Webhook 放行由后端验签。
     // ?token= 只允许用于首次 HTML 导航换 Cookie；API 请求只认 Cookie / 请求头。
-    if (isTokenRequired() && req.method !== 'OPTIONS' && pathname !== '/api/health' && pathname !== '/api/version') {
+    if (isTokenRequired() && req.method !== 'OPTIONS' && !isOpenApiPath(pathname)) {
       const state = tokenState || evaluateToken(req, url, pathname)
       if (!state.ok) {
         res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
@@ -290,13 +301,16 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
       return
     }
 
-    // 2) 静态资源；resolve + 目录边界校验，阻止 `..` 与 `public-backup` 之类兄弟目录越界；
+    // 2) 静态资源；先剥掉 WebUI 构建版本前缀 `/__nfv/<build>`，再做
+    //    resolve + 目录边界校验，阻止 `..` 与 `public-backup` 之类兄弟目录越界；
     //    同时不把 user_data / .git / config.json 等本机数据当静态文件发出去。
-    if (String(pathname).includes('\0') || isSensitiveStaticPath(pathname)) {
+    const parsedStatic = stripBuildPrefix(pathname)
+    const staticPath = parsedStatic.pathname
+    if (String(staticPath).includes('\0') || isSensitiveStaticPath(staticPath)) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('404 Not Found')
       return
     }
-    let target = resolve(ROOT, `.${pathname}`)
+    let target = resolve(ROOT, `.${staticPath}`)
     if (!isInsideDir(ROOT, target)) {
       res.writeHead(403).end('403 Forbidden')
       return
@@ -313,10 +327,10 @@ function createWebServer({ backendPort, accessToken = '', accessTokenHash = '', 
       const fileInfo = await stat(target)
       if (!fileInfo.isFile()) throw Object.assign(new Error('not a file'), { code: 'ENOENT' })
       const html = extname(target).toLowerCase() === '.html'
-      // 带 ?v= 的插件 / 资源强缓存；其它源码 ETag 304；index.html 永远回源。
+      // 带 build 前缀 / ?v= 的模块强缓存；其它源码 ETag 304；index.html 永远回源。
       await serveStaticFile(req, res, target, {
         mime: MIME,
-        immutable: !html && isVersionedRequest(req),
+        immutable: !html && (parsedStatic.versioned || isVersionedRequest(req)),
         cacheControl: html ? 'no-cache, no-store, must-revalidate' : undefined,
       })
     } catch (_) {
@@ -700,23 +714,37 @@ async function main() {
   }
 
   let agentReloadTimer = null
+  /* 上一次外部插件代码签名：签名变化说明 revision / 文件变了，Node ESM
+   * 模块图无法原地刷新，必须重启 Worker；只是启停偏好变化则继续热同步。 */
+  let agentPluginSignature = ''
   /**
-   * 外部插件清单变化时通知服务端代聊 Worker 热同步，而不是终止 / 重启它。
-   * 旧实现会重启 Worker，导致 NapCat / QQ 等渠道在几秒内无法处理消息；
-   * 现在 Worker 内部走 App.syncEntries()，工具与设置无中断更新。
+   * 外部插件清单变化时优先通知服务端代聊 Worker 热同步。
+   * 只有插件入口版本路径 / build 真正变化时，才终止并重启 Worker：
+   * Node ESM 对已加载的相对子模块没有失效机制，lib 更新后继续热同步会留下旧代码。
    */
-  const reloadHeadlessAgent = reason => {
+  const reloadHeadlessAgent = (reason, payload = {}) => {
     if (!headlessAgentEnabled || shuttingDown) return
     if (agentReloadTimer) clearTimeout(agentReloadTimer)
     agentReloadTimer = setTimeout(() => {
       agentReloadTimer = null
       if (shuttingDown) return
+      const nextSignature = String(payload?.signature || '').trim()
+      if (nextSignature) {
+        if (agentPluginSignature && nextSignature !== agentPluginSignature) {
+          agentPluginSignature = nextSignature
+          console.log('[plugins] 插件代码版本变化，重启服务端代聊 Worker 以刷新模块图')
+          stopHeadlessAgent()
+          startHeadlessAgent()
+          return
+        }
+        agentPluginSignature = nextSignature
+      }
       if (!agentWorker) {
         startHeadlessAgent()
         return
       }
       try {
-        agentWorker.postMessage({ type: 'plugins-changed', payload: { action: reason || 'changed' } })
+        agentWorker.postMessage({ type: 'plugins-changed', payload: { action: reason || 'changed', signature: nextSignature } })
         console.log(`[plugins] 插件变化（${reason || 'changed'}），已通知服务端代聊热同步`)
       } catch (err) {
         console.warn(`[plugins] 通知服务端代聊失败，改用重启兜底：${err?.message || err}`)
@@ -753,11 +781,16 @@ async function main() {
     internalAgentSecret: agentInternalSecret,
     onRestart: restart,
     onStop: stopForUpdate,
-    onPluginsChanged: payload => reloadHeadlessAgent(payload?.action),
+    onPluginsChanged: payload => reloadHeadlessAgent(payload?.action, payload),
     // 开发模式下 WebUI 与 API 不同端口，需把 WebUI 的 Origin 显式放行给后端；
     // 单端口模式也会包含同一端口，便于本机 IP / hostname 访问。
     allowedOrigins: webuiOriginList(webuiHost, webPort),
   })
+  try {
+    agentPluginSignature = await backend.ctx.pluginRegistry.signature()
+  } catch (err) {
+    console.warn(`[plugins] 读取插件代码签名失败，首次代码变化将重启服务端代聊：${err?.message || err}`)
+  }
   startHeadlessAgent()
   if (singlePort) await writeRuntimeHints(backend.port)
   let webUrl = backend.url

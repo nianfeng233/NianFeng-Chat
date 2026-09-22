@@ -29,7 +29,7 @@ import {
 } from '../web-security.mjs'
 import { fetchPublicText } from '../net-guard.mjs'
 import { MIME, readBody, sendError, sendJson } from '../http-io.mjs'
-import { serveStaticFile, isVersionedRequest } from '../static-cache.mjs'
+import { serveStaticFile, isVersionedRequest, stripBuildPrefix } from '../static-cache.mjs'
 
 export const name = 'http'
 export const inject = ['settings', 'sessions', 'models', 'hub', 'info', 'instance', 'pluginRegistry']
@@ -219,7 +219,17 @@ export function apply(ctx, config = {}) {
     return checkAccessToken(req, url, pathname).ok
   }
 
-  const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version'
+  /**
+   * 公开 Webhook 路由前缀。
+   *
+   * 第三方服务（GitHub / CI / 渠道回调）无法携带念风访问令牌，因此这些路径
+   * 必须免登录。安全边界交给注册方：路由必须位于该前缀下，并在 handler 内
+   * 用路径密钥 + HMAC / 签名校验请求；框架只负责不把 /api/webhooks/* 直接
+   * 当成用户数据接口暴露。
+   */
+  const PUBLIC_API_PREFIX = '/api/webhooks/'
+  const isPublicWebhookPath = pathname => String(pathname || '').startsWith(PUBLIC_API_PREFIX)
+  const openRoute = pathname => pathname === '/api/health' || pathname === '/api/version' || isPublicWebhookPath(pathname)
   const sendAuthPage = res => {
     res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
     res.end(buildAuthPage())
@@ -256,13 +266,18 @@ export function apply(ctx, config = {}) {
   /* ---------------- 路由表 ---------------- */
 
   const routes = []
-  const route = (method, pattern, handler) => {
+  const route = (method, pattern, handler, options = {}) => {
+    const isPublic = options?.public === true
+    if (isPublic && !String(pattern || '').startsWith(PUBLIC_API_PREFIX)) {
+      throw new Error(`公开 Webhook 路由必须以 ${PUBLIC_API_PREFIX} 开头：${pattern}`)
+    }
     // 热重载同一插件的 bridge 时会重新注册相同 method + pattern：
     // 直接替换旧 entry 的 handler，避免旧 handler（已 close 的数据库等）
     // 继续命中请求，出现“读取正常、写入 database is not open”这类问题。
     const existing = routes.find(item => item.method === method && item.pattern === pattern)
     if (existing) {
       existing.handler = handler
+      existing.public = isPublic
       existing.version = (Number(existing.version) || 0) + 1
       return existing
     }
@@ -277,7 +292,7 @@ export function apply(ctx, config = {}) {
           .replace(/\//g, '\\/') +
         '$',
     )
-    const entry = { method, pattern, regex, keys, handler, version: 1 }
+    const entry = { method, pattern, regex, keys, handler, public: isPublic, version: 1 }
     routes.push(entry)
     return entry
   }
@@ -307,6 +322,9 @@ export function apply(ctx, config = {}) {
    * 渠道 bridge.mjs 等后端插件可以注册自己的 /api/... 路由，无需修改本文件。
    *   const dispose = ctx.httpApi.route('GET', '/api/my-channel/status', handler)
    * handler(req, res, params, url)，返回值忽略；抛出的错误会按 err.status 返回。
+   *
+   * 公开 Webhook 路由（免访问令牌，必须自行验签）：
+   *   const dispose = ctx.httpApi.publicRoute('POST', '/api/webhooks/my-service/:token', handler)
    */
   const extraCapabilities = new Set()
   const register = route
@@ -317,6 +335,16 @@ export function apply(ctx, config = {}) {
       return () => {
         // 只有当前 entry 仍然是本次注册的 handler 时才移除；
         // 已被热重载新 bridge 替换过的旧 route，dispose 不能误删新 handler。
+        if (!routes.includes(entry) || entry.handler !== handler || entry.version !== version) return
+        const index = routes.indexOf(entry)
+        if (index >= 0) routes.splice(index, 1)
+      }
+    },
+    /** 注册免访问令牌的 Webhook 路由；注册方必须自行完成路径密钥 / HMAC 校验。 */
+    publicRoute: (method, pattern, handler) => {
+      const entry = register(method, pattern, handler, { public: true })
+      const version = entry.version
+      return () => {
         if (!routes.includes(entry) || entry.handler !== handler || entry.version !== version) return
         const index = routes.indexOf(entry)
         if (index >= 0) routes.splice(index, 1)
@@ -343,12 +371,14 @@ export function apply(ctx, config = {}) {
       ok: true,
       name: ctx.info.name,
       version: ctx.info.version,
+      build: ctx.info.build || '',
       uptime: Date.now() - startedAt,
       time: new Date().toISOString(),
       // 前端用它判断后端进程是否加载了最新功能（旧进程会缺少这些能力）
       capabilities: [
         'builtin-models', 'provider-crud', 'model-crud', 'model-params', 'data-dir', 'proxy', 'tools',
         'external-plugins', 'plugin-dirs', 'plugin-upload', 'webui-auth', 'system-restart', 'plugin-http-routes',
+        'public-plugin-routes', 'versioned-static-build',
         'preferences-sync', 'cors-origin-guard', 'ssrf-guard', 'constant-time-token', 'hashed-access-token', 'health-detail-auth', 'provider-model-discover',
         'embeddings', 'memory', 'session-message-pagination',
         ...extraCapabilities,
@@ -375,7 +405,12 @@ export function apply(ctx, config = {}) {
   })
 
   route('GET', '/api/version', async (req, res) =>
-    sendJson(res, 200, { version: ctx.info.version, node: process.version, authRequired: isAccessTokenRequired() }),
+    sendJson(res, 200, {
+      version: ctx.info.version,
+      build: ctx.info.build || '',
+      node: process.version,
+      authRequired: isAccessTokenRequired(),
+    }),
   )
 
   /** 重启：由宿主/启动脚本接管；桌面版请在设置页走 windHost.restart() */
@@ -833,10 +868,14 @@ export function apply(ctx, config = {}) {
 
   const serveStatic = async (req, res, pathname) => {
     if (!staticDir) return false
-    if (String(pathname).includes('\0') || isSensitiveStaticPath(pathname)) return false
+    // WebUI 入口使用 `/__nfv/<build>/...` 加载模块图；这里剥掉版本前缀后
+    // 仍按原目录边界校验，避免加前缀绕过 user_data / .git 之类敏感路径。
+    const parsed = stripBuildPrefix(pathname)
+    const staticPath = parsed.pathname
+    if (String(staticPath).includes('\0') || isSensitiveStaticPath(staticPath)) return false
     // path.resolve + 目录边界校验：`public2` / `public-backup` 这类兄弟目录
     // 不能再用 startsWith(staticDir) 之前缀绕过。
-    let target = resolve(staticDir, `.${pathname}`)
+    let target = resolve(staticDir, `.${staticPath}`)
     if (!isInsideDir(staticDir, target)) return false
     try {
       const info = await stat(target)
@@ -846,12 +885,12 @@ export function apply(ctx, config = {}) {
       }
       const fileInfo = await stat(target)
       if (!fileInfo.isFile()) return false
-      // index.html 永远 no-cache；带 ?v= 的插件 / 资源用 immutable；
+      // index.html 永远 no-cache；带版本前缀 / ?v= 的模块用 immutable；
       // 其它源码走 no-cache + ETag，命中 304 后不再重新传输整包。
       const html = extname(target).toLowerCase() === '.html'
       return await serveStaticFile(req, res, target, {
         mime: MIME,
-        immutable: !html && isVersionedRequest(req),
+        immutable: !html && (parsed.versioned || isVersionedRequest(req)),
         cacheControl: html ? 'no-cache, no-store, must-revalidate' : undefined,
       })
     } catch (_) {
@@ -886,9 +925,16 @@ export function apply(ctx, config = {}) {
     // DNS rebinding 的恶意网页拿不到这个令牌。
     const earlyTokenState = isAccessTokenRequired() ? checkAccessToken(req, url, rawPathname) : null
     const trustedPeer = !!earlyTokenState?.ok === true
+    // 公开 Webhook 由第三方服务主动回调，无法携带念风令牌，Host 也可能是反向代理
+    // 域名；这里只放行 Host 校验，Origin 仍按常规拒绝（GitHub 回调不带 Origin）。
+    const publicWebhook = isPublicWebhookPath(pathname)
     // Host / Origin 双重校验：DNS rebinding 的 Host 不是本机名，恶意网页的 Origin
     // 也不在放行列表里；两者都拒绝，不进入任何业务路由。
-    if ((!isAllowedHost(req.headers.host) || !isAllowedOrigin(req.headers.origin)) && !trustedPeer) {
+    if (!isAllowedHost(req.headers.host) && !trustedPeer && !publicWebhook) {
+      sendError(res, 403, '请求来源校验失败：仅允许本机或已配置的 Host / Origin')
+      return
+    }
+    if (!isAllowedOrigin(req.headers.origin) && !trustedPeer) {
       sendError(res, 403, '请求来源校验失败：仅允许本机或已配置的 Host / Origin')
       return
     }
@@ -944,10 +990,12 @@ export function apply(ctx, config = {}) {
       if (rawPathname.startsWith('/user-plugins/')) {
         const hit = await ctx.pluginRegistry.readExternalFile(rawPathname.slice('/user-plugins/'.length))
         if (!hit) return sendError(res, 404, '插件资源不存在')
-        // 外部插件 URL 本身带 ?v=mtime，可以长期强缓存；换版本时 URL 会变化。
+        // 带 `/__nfv/<revision>/` 或 `?v=` 的请求可以长期强缓存；
+        // 插件内部的相对 import 会继承路径版本段，整个模块图一起换 URL。
+        // 旧的无版本 URL 仍可访问，但走 no-cache + ETag，避免升级后长期缓存旧代码。
         await serveStaticFile(req, res, hit.file, {
           mime: MIME,
-          immutable: true,
+          immutable: hit.versioned || isVersionedRequest(req),
           headers: { 'Cross-Origin-Resource-Policy': 'same-origin' },
         })
         return

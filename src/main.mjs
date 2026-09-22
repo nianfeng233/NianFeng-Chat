@@ -79,13 +79,27 @@ function pluginApiBase() {
   }
 }
 
-/** 最近一次 /api/plugins 结果缓存：远程部署刷新时先用缓存秒开，再后台校验增量。 */
-function readPluginCache() {
+/** WebUI 入口写入的后端 build；没有时返回空字符串，避免误判缓存。 */
+function currentBuild() {
+  try {
+    return String(globalThis.__NF_BUILD__ || '')
+  } catch (_) {
+    return ''
+  }
+}
+
+/**
+ * 最近一次 /api/plugins 结果缓存：远程部署刷新时先用缓存秒开，再后台校验增量。
+ * 缓存带后端 build；build 不一致说明本体升级 / 重启过，旧清单里可能还有旧
+ * 外部插件版本路径，直接丢弃，宁可多等一次后端也不要先加载旧页面。
+ */
+function readPluginCache(build = currentBuild()) {
   try {
     const raw = localStorage.getItem(PLUGIN_CACHE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed?.entries) || !parsed.entries.length) return null
+    if (build && String(parsed?.build || '') !== build) return null
     return parsed
   } catch (_) {
     return null
@@ -99,12 +113,39 @@ function writePluginCache(snapshot) {
       JSON.stringify({
         entries: snapshot.entries,
         state: snapshot.state || null,
+        build: snapshot.build || currentBuild(),
         at: snapshot.at || Date.now(),
       }),
     )
   } catch (_) {
     /* localStorage 满了也不影响启动 */
   }
+}
+
+/**
+ * 后端 build 变化时重载页面：旧页面的模块图 / SSE 客户端还在旧版本上，
+ * 继续热同步很容易出现“版本更新了但页面还是旧的”。用 sessionStorage 防止
+ * 后端反复重启时陷入刷新循环。
+ */
+function reloadForNewBuild(build) {
+  const next = String(build || '').trim()
+  if (!next || typeof location === 'undefined' || typeof location.reload !== 'function') return false
+  const previous = currentBuild()
+  if (previous && previous === next) return false
+  try {
+    const key = 'nianfeng:build-reload'
+    if (sessionStorage.getItem(key) === next) return false
+    sessionStorage.setItem(key, next)
+  } catch (_) {
+    /* sessionStorage 不可用时允许刷新一次 */
+  }
+  try {
+    globalThis.__NF_BUILD__ = next
+  } catch (_) {
+    /* ignore */
+  }
+  location.reload()
+  return true
 }
 
 /**
@@ -171,6 +212,7 @@ export async function fetchPluginSnapshot({ timeoutMs = 8000 } = {}) {
   return {
     entries,
     state: readRemotePluginState(data) || { disabled: [], removed: [], enabled: [] },
+    build: String(data?.build || '').trim(),
     dirs: {
       builtinDir: data.builtinDir,
       externalDir: data.externalDir,
@@ -208,10 +250,30 @@ function updateBootProgress(progress) {
 
 let remoteSyncTimer = null
 let remoteSyncRetry = 0
+
+/** 当前是否运行在真实浏览器 WebUI 中（服务端代聊 Worker 使用 DOM 垫片，必须排除）。 */
+function isBrowserRuntime() {
+  try {
+    return (
+      globalThis.__NF_RELOADABLE__ === true &&
+      globalThis.__NIANFENG_SERVER_AGENT__ !== true &&
+      typeof window !== 'undefined' &&
+      typeof document !== 'undefined' &&
+      !!document.body
+    )
+  } catch (_) {
+    return false
+  }
+}
+
 /**
  * 运行期插件清单同步：新增 / 更新 / 删除 / 启停都由 App.syncEntries 热完成，
  * 不再用 location.reload()，也不再重启服务端代聊 Worker。
  * 失败按 1.5s ~ 30s 退避重试；页面重新可见 / 后端恢复在线时也会触发。
+ *
+ * 例外面板：snapshot.build 与当前页面 build 不一致（本体升级 / 重启后，旧页面
+ * 仍通过 SSE 活着）时，热同步无法安全替换已执行的内核模块图，浏览器端直接
+ * 刷新页面；代聊 Worker 由父进程在重启 / 构建版本变化时自行换新。
  */
 export function scheduleRemotePluginSync(app, { delay = 0, reason = 'background', scope = null } = {}) {
   if (!app) return null
@@ -221,6 +283,7 @@ export function scheduleRemotePluginSync(app, { delay = 0, reason = 'background'
     remoteSyncTimer = null
     try {
       const snapshot = await fetchPluginSnapshot({ timeoutMs: 10000 })
+      if (snapshot.build && isBrowserRuntime() && reloadForNewBuild(snapshot.build)) return null
       remotePluginState = snapshot.state
       remotePluginEntries = snapshot.entries
       writePluginCache(snapshot)
@@ -252,13 +315,14 @@ export async function boot({ awaitRemote = false, scope = 'all' } = {}) {
   const cached = readPluginCache()
   // 普通 WebUI：有缓存就直接用缓存启动；没有缓存时最多等后端 1.2 秒拿清单，
   // 拿不到就先用内置清单把界面拉起来，外部插件通过后台热同步补上。
-  let snapshot = cached || { entries: builtinPluginEntries, state: null, at: 0 }
+  // readPluginCache 已经按后端 build 校验，本体升级后不会再用旧插件快照启动。
+  let snapshot = cached || { entries: builtinPluginEntries, state: null, build: currentBuild(), at: 0 }
   if (awaitRemote) {
     try {
       snapshot = await loadPluginEntries()
     } catch (err) {
       console.warn(`[plugins] 启动时读取后端插件清单失败，先用内置清单启动：${err?.message || err}`)
-      snapshot = snapshot || { entries: builtinPluginEntries, state: null, at: 0 }
+      snapshot = snapshot || { entries: builtinPluginEntries, state: null, build: currentBuild(), at: 0 }
     }
   } else if (!cached) {
     try {
