@@ -32,7 +32,7 @@ export const provides = [{ name: 'welcome-view', type: 'singleton' }]
 import { useStyle } from '../../../src/util/style.mjs'
 import { escapeHtml } from '../../../src/util/format.mjs'
 import { BRAND_LOGO } from '../../../src/util/identity.mjs'
-import { compareVersions } from '../../../src/runtime/semver.mjs'
+import { updateDirection } from '../../../src/runtime/update-policy.mjs'
 import {
   PROJECT_FULL_NAME,
   PROJECT_LICENSE,
@@ -414,8 +414,8 @@ export function apply(ctx) {
             else if (!release.compatible) updateEls.run.textContent = '无安装包'
             else if (target === current) updateEls.run.textContent = '已是当前版本'
             else {
-              const compared = compareVersions(target, current)
-              updateEls.run.textContent = Number.isFinite(compared) && compared < 0 ? `降级到 ${release.tag}` : `更新到 ${release.tag}`
+              const direction = updateDirection(target, current)
+              updateEls.run.textContent = direction === 'downgrade' ? `降级到 ${release.tag}` : `更新到 ${release.tag}`
             }
           }
           if (!release) {
@@ -430,8 +430,7 @@ export function apply(ctx) {
             setUpdateNote(`当前运行方式（${kindLabel()}）仅支持查看版本，请手动替换安装。`)
             return
           }
-          const compared = compareVersions(target, current)
-          const action = Number.isFinite(compared) && compared < 0 ? '降级' : '更新'
+          const action = updateDirection(target, current) === 'downgrade' ? '降级' : '更新'
           const assetSize = formatBytes(release.asset?.size)
           const assetInfo = release.asset?.name ? ` · 安装包 ${release.asset.name}${assetSize ? `（${assetSize}）` : ''}` : ''
           setUpdateNote(`目标 ${release.tag}（${action}）${assetInfo}；点击按钮后会自动关闭当前项目，完成后自动重新运行。`)
@@ -558,8 +557,7 @@ export function apply(ctx) {
           if (updateState.busy) return
           const release = selectedRelease()
           if (!release || release.compatible === false) return
-          const compared = compareVersions(String(release.version).replace(/^v/i, ''), currentVersion())
-          const downgrade = Number.isFinite(compared) && compared < 0
+          const downgrade = updateDirection(String(release.version).replace(/^v/i, ''), currentVersion()) === 'downgrade'
           const answer = await modal.confirm(
             downgrade ? '降级念风？' : '更新念风？',
             `将完全关闭当前${kindLabel()}，${downgrade ? '降级' : '更新'}到 ${release.tag}，完成后自动重新运行。\n\n更新期间请保持此页面打开，加载动画结束后会自动刷新。`,
