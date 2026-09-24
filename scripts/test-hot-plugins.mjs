@@ -26,7 +26,7 @@ const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 let querySeq = 0
 /** 写一个外部插件目录，返回与后端 /api/plugins 相同形状的 entry。 */
-async function writePlugin(root, { id, version, depends = {}, optionalDepends = {}, inject = [], provides = [], source = '' }) {
+async function writePlugin(root, { id, version, depends = {}, optionalDepends = {}, inject = [], provides = [], minAppVersion = '', maxAppVersion = '', source = '' }) {
   const dir = join(root, id)
   await mkdir(dir, { recursive: true })
   const file = join(dir, 'index.mjs')
@@ -35,6 +35,8 @@ async function writePlugin(root, { id, version, depends = {}, optionalDepends = 
   const body = `
 export const name = ${JSON.stringify(id)}
 export const version = ${JSON.stringify(version)}
+export const minAppVersion = ${JSON.stringify(minAppVersion)}
+export const maxAppVersion = ${JSON.stringify(maxAppVersion)}
 export const displayName = ${JSON.stringify(`Hot ${id}`)}
 export const depends = ${JSON.stringify(depends)}
 export const optionalDepends = ${JSON.stringify(optionalDepends)}
@@ -62,6 +64,8 @@ export function apply(ctx) {
     optionalDepends,
     inject,
     provides,
+    minAppVersion,
+    maxAppVersion,
   }
 }
 
@@ -215,22 +219,37 @@ async function main() {
     check('热更新后旧实例清理函数被执行', globalThis.__nfHotEffectCleanup === 1, String(globalThis.__nfHotEffectCleanup))
     check('热更新后插件仍 active', app.get('hot-effect')?.status === 'active', app.get('hot-effect')?.reason || '')
 
-    console.log('\n⑨ 外部插件主版本低于内核时必须标红且不激活')
+    console.log('\n⑨ 外部插件兼容性：不再按插件自身主版本强制，只认显式内核版本声明')
+    // 1.x 插件在没有声明 minAppVersion 时不应被拦截。
     const oldUi = await writePlugin(root, { id: 'hot-old-ui', version: '1.0.0' })
-    oldUi.legacy = true
-    oldUi.legacyReason = '插件版本 1.0.0 未适配念风 2.x，需升级到 2.x 兼容版本'
     await app.syncEntries([oldUi], state())
     await wait(100)
     const oldRecord = app.list().find(record => record.id === 'hot-old-ui')
     check(
-      '旧版外部插件不会激活',
-      oldRecord?.status === 'inactive' && oldRecord?.legacy === true && /1\.0\.0/.test(oldRecord?.reason || ''),
-      JSON.stringify({ status: oldRecord?.status, reason: oldRecord?.reason }),
+      '1.0.0 外部插件不会因主版本被阻止',
+      oldRecord?.status === 'active' && oldRecord?.legacy !== true,
+      JSON.stringify({ status: oldRecord?.status, reason: oldRecord?.reason, legacy: oldRecord?.legacy }),
     )
     check(
-      '旧版外部插件在自检中标记为 error',
-      app.selfCheck().some(issue => issue.id === 'hot-old-ui' && issue.severity === 'error'),
+      '1.0.0 外部插件不会在自检中报错',
+      !app.selfCheck().some(issue => issue.id === 'hot-old-ui' && issue.severity === 'error'),
       JSON.stringify(app.selfCheck().filter(issue => issue.id === 'hot-old-ui')),
+    )
+
+    // 显式声明 minAppVersion 高于当前内核时才应拦截。
+    const futureUi = await writePlugin(root, { id: 'hot-future-ui', version: '1.0.0', minAppVersion: '99.0.0' })
+    await app.syncEntries([futureUi], state())
+    await wait(100)
+    const futureRecord = app.list().find(record => record.id === 'hot-future-ui')
+    check(
+      '声明 minAppVersion=99.0.0 的插件不会激活',
+      futureRecord?.status === 'inactive' && futureRecord?.legacy === true && /99\.0\.0/.test(futureRecord?.reason || ''),
+      JSON.stringify({ status: futureRecord?.status, reason: futureRecord?.reason, legacy: futureRecord?.legacy }),
+    )
+    check(
+      '内核不兼容插件在自检中标记为 error',
+      app.selfCheck().some(issue => issue.id === 'hot-future-ui' && issue.severity === 'error'),
+      JSON.stringify(app.selfCheck().filter(issue => issue.id === 'hot-future-ui')),
     )
   } finally {
     try {

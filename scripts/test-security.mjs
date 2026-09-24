@@ -619,16 +619,31 @@ async function main() {
     const installedFile = await readFile(join(externalRoot, 'demo-plugin', 'index.mjs'), 'utf8').catch(() => '')
     check('插件文件写入外部插件目录', installedFile.includes("name = 'demo-plugin'"), installedFile.slice(0, 60))
 
-    const legacyZip = makeZip([
-      { name: 'legacy-plugin/index.mjs', data: "export const name = 'legacy-plugin'\nexport const version = '1.0.0'\nexport function apply() {}\n" },
-      { name: 'legacy-plugin/manifest.json', data: '{"id":"legacy-plugin","name":"legacy-plugin","version":"1.0.0"}' },
+    const oldVersionZip = makeZip([
+      { name: 'old-version-plugin/index.mjs', data: "export const name = 'old-version-plugin'\nexport const version = '1.0.0'\nexport function apply() {}\n" },
+      { name: 'old-version-plugin/manifest.json', data: '{"id":"old-version-plugin","name":"old-version-plugin","version":"1.0.0"}' },
     ])
-    const legacyInstall = await uploadJsonRequest({ filename: 'legacy-plugin.zip', data: legacyZip.toString('base64') })
-    const legacyEntry = (legacyInstall.data?.plugins || []).find(item => item.id === 'legacy-plugin')
+    const oldVersionInstall = await uploadJsonRequest({ filename: 'old-version-plugin.zip', data: oldVersionZip.toString('base64') })
+    const oldVersionEntry = (oldVersionInstall.data?.plugins || []).find(item => item.id === 'old-version-plugin')
     check(
-      '旧版外部插件被登记为 legacy（主版本低于内核）',
-      legacyInstall.status === 200 && legacyEntry?.legacy === true && /1\.0\.0/.test(legacyEntry?.legacyReason || ''),
-      JSON.stringify(legacyEntry),
+      '1.x 外部插件不再被强制标记为旧版不兼容',
+      oldVersionInstall.status === 200 && oldVersionEntry && oldVersionEntry.legacy !== true,
+      JSON.stringify(oldVersionEntry),
+    )
+
+    const futureVersionZip = makeZip([
+      {
+        name: 'future-version-plugin/index.mjs',
+        data: "export const name = 'future-version-plugin'\nexport const version = '1.0.0'\nexport const minAppVersion = '99.0.0'\nexport function apply() {}\n",
+      },
+      { name: 'future-version-plugin/manifest.json', data: '{"id":"future-version-plugin","name":"future-version-plugin","version":"1.0.0","minAppVersion":"99.0.0"}' },
+    ])
+    const futureVersionInstall = await uploadJsonRequest({ filename: 'future-version-plugin.zip', data: futureVersionZip.toString('base64') })
+    const futureVersionEntry = (futureVersionInstall.data?.plugins || []).find(item => item.id === 'future-version-plugin')
+    check(
+      '显式声明 minAppVersion=99.0.0 的外部插件被登记为内核不兼容',
+      futureVersionInstall.status === 200 && futureVersionEntry?.legacy === true && /99\.0\.0/.test(futureVersionEntry?.legacyReason || ''),
+      JSON.stringify(futureVersionEntry),
     )
 
     const again = await uploadJsonRequest({ filename: 'demo-plugin.zip', data: demoZip.toString('base64') })

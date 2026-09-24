@@ -23,6 +23,7 @@ import { homedir } from 'node:os'
 import { dirname, extname, join, normalize, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isInsideDir } from '../security-utils.mjs'
+import { parseVersion, satisfies } from '../../src/runtime/semver.mjs'
 import { ZipError, isSafeZipEntryName, listZipEntries } from '../zip-utils.mjs'
 
 export const name = 'plugin-registry'
@@ -42,11 +43,28 @@ export function apply(ctx, config = {}) {
   const appVersion = String(config.appVersion || '').trim()
   /* 进程级 build：/api/plugins 返回给 WebUI 插件清单缓存做版本校验。 */
   const build = String(config.build || '').trim()
-  const appMajor = (() => {
-    const parsed = Number.parseInt(String(appVersion).split('.')[0], 10)
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 2
-  })()
-  const legacyReasonFor = version => `插件版本 ${version} 未适配念风 ${appMajor}.x，需升级到 ${appMajor}.x 兼容版本`
+  /**
+   * 外部插件内核兼容性：
+   *   - 不再要求插件版本与内核主版本一致（插件版本号和内核版本号本来就是两套语义）；
+   *   - 只有插件 / manifest 显式声明了 minAppVersion / maxAppVersion，且当前内核不满足时，
+   *     才标记为不兼容并阻止激活；
+   *   - 其它情况交给依赖、inject 与运行时错误正常处理。
+   */
+  const compatibilityOf = (mod, manifest) => {
+    if (!appVersion) return { legacy: false, reason: '', minAppVersion: '', maxAppVersion: '' }
+    const minAppVersion = String(mod?.minAppVersion || manifest?.minAppVersion || '').trim()
+    const maxAppVersion = String(mod?.maxAppVersion || manifest?.maxAppVersion || '').trim()
+    const minValid = !!minAppVersion && !!parseVersion(minAppVersion)
+    const maxValid = !!maxAppVersion && !!parseVersion(maxAppVersion)
+    const reasons = []
+    if (minValid && !satisfies(appVersion, `>=${minAppVersion}`)) {
+      reasons.push(`需要念风内核 ≥ ${minAppVersion}（当前 ${appVersion}）`)
+    }
+    if (maxValid && !satisfies(appVersion, `<=${maxAppVersion}`)) {
+      reasons.push(`仅支持念风内核 ≤ ${maxAppVersion}（当前 ${appVersion}）`)
+    }
+    return { legacy: reasons.length > 0, reason: reasons.join('；'), minAppVersion, maxAppVersion }
+  }
 
   let builtinEntries = null
   let snapshot = null
@@ -108,7 +126,7 @@ export function apply(ctx, config = {}) {
    * 关键边界：一旦某个目录本身包含 manifest.json（或非根目录下直接包含 index.mjs），
    * 就把它视为“一个插件根”，不再继续往它的 lib / vendor / node_modules 内部递归。
    * 否则插件自带的依赖包入口（例如 media-post/vendor/silk-wasm/lib/index.mjs）会被
-   * 误识别成名为 lib 的独立插件，版本 0.0.0 → 被标红“旧版不兼容”。
+   * 误识别成名为 lib 的独立插件，版本 0.0.0 → 被标红“模块读取失败”。
    */
   async function walkPlugins(dir, out = [], depth = 0) {
     let entries
@@ -233,16 +251,17 @@ export function apply(ctx, config = {}) {
       if (!manifest && !isPluginModule) return null
 
       const pluginVersion = String(mod.version || manifest?.version || '0.0.0')
-      const pluginMajor = Number.parseInt(pluginVersion.split('.')[0], 10)
-      const legacy = !Number.isFinite(pluginMajor) || pluginMajor < appMajor
+      const compatibility = compatibilityOf(mod, manifest)
       const pluginId = mod.name || manifest?.id || manifest?.name || folder || relFile
       return {
         ...base,
         id: pluginId,
         name: mod.name || manifest?.name || manifest?.id || folder || relFile,
         version: pluginVersion,
-        legacy,
-        legacyReason: legacy ? legacyReasonFor(pluginVersion) : '',
+        minAppVersion: compatibility.minAppVersion,
+        maxAppVersion: compatibility.maxAppVersion,
+        legacy: compatibility.legacy,
+        legacyReason: compatibility.reason,
         displayName: mod.displayName || manifest?.displayName || mod.name || manifest?.name || folder || relFile,
         description: mod.description || manifest?.description || '',
         author: mod.author || manifest?.author || '',

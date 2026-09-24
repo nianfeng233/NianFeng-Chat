@@ -78,6 +78,7 @@ export function apply(ctx) {
 
   let sortKey = 'status'
   let sortOrder = 'asc'
+  let searchQuery = ''
   /**
    * 市场安装元数据：为已上架的外部插件标注开发者（如清单未带 author 时）与 Star。
    * 读取失败时保持为空，不影响插件管理页其它功能。
@@ -104,6 +105,7 @@ export function apply(ctx) {
           </button>
           <button class="plugin-toolbar-btn" data-action="export">导出诊断</button>
           <button class="plugin-toolbar-btn" data-action="market">🛍️ 插件市场</button>
+          <input class="plugin-search" type="search" data-plugin-search placeholder="搜索插件：名称 / ID / 描述 / 开发者" autocomplete="off" spellcheck="false" />
           <div class="plugin-toolbar-right">
             <span>排序</span>
             <select class="plugin-sort-select" data-sort-key>
@@ -124,6 +126,11 @@ export function apply(ctx) {
       const summaryEl = container.querySelector('[data-plugin-summary]')
       const sortKeyEl = container.querySelector('[data-sort-key]')
       const sortOrderEl = container.querySelector('[data-sort-order]')
+      const searchInputEl = container.querySelector('[data-plugin-search]')
+      searchInputEl?.addEventListener('input', event => {
+        searchQuery = String(event?.target?.value ?? searchInputEl?.value ?? '')
+        render({ sideEffects: false })
+      })
 
       /* ---------------- 自检 ---------------- */
       const issues = () => {
@@ -149,7 +156,7 @@ export function apply(ctx) {
         const own = issuesOf(plugin.id, list)
         const ownWarning = own.some(i => i.severity === 'warning' || i.severity === 'error')
         const recordWarning = (plugin.warnings || []).some(item => item?.severity && item.severity !== 'info')
-        // 旧版外部插件主版本与内核不一致：明确标红，不再伪装成“正常”。
+        // 插件显式声明的内核版本范围不满足：明确标红，不再伪装成“正常”。
         if (plugin.legacy) return 'error'
         if (plugin.status === 'error' || plugin.conflict || own.some(i => i.severity === 'error')) return 'error'
         // 用户主动禁用的插件保持灰色，不因为它的依赖当前未启用而虚报红/黄。
@@ -169,7 +176,7 @@ export function apply(ctx) {
       }
 
       const tagOf = (plugin, severity) => {
-        if (plugin.legacy) return '<span class="plugin-tag error">旧版不兼容</span>'
+        if (plugin.legacy) return '<span class="plugin-tag error">内核不兼容</span>'
         if (plugin.conflict) return '<span class="plugin-tag error">服务冲突</span>'
         if (plugin.status === 'disabled') {
           const tag = STATUS_TAG.disabled
@@ -202,7 +209,7 @@ export function apply(ctx) {
         const own = issuesOf(plugin.id, list)
         const depIssues = plugin.status === 'disabled' ? [] : dependencyIssuesOf(plugin)
         const lines = []
-        if (plugin.legacy) lines.push(`<div class="plugin-issue error">✕ ${escapeHtml(plugin.legacyReason || '旧版插件未适配当前内核，请升级到 2.x 兼容版本')}</div>`)
+        if (plugin.legacy) lines.push(`<div class="plugin-issue error">✕ ${escapeHtml(plugin.legacyReason || '插件声明的内核版本范围不满足当前内核')}</div>`)
         else if (plugin.status === 'error') lines.push(`<div class="plugin-issue error">✕ 运行失败：${escapeHtml(plugin.error || plugin.reason || '未知错误')}</div>`)
         else if (plugin.conflict) lines.push(`<div class="plugin-issue error">✕ 冲突：${escapeHtml(plugin.reason || '服务被占用')}</div>`)
         else if (plugin.status === 'inactive') {
@@ -309,14 +316,35 @@ export function apply(ctx) {
         return arr
       }
 
-      const render = () => {
+      const searchTerms = () => String(searchQuery || '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+      const matchesSearch = (plugin, terms) => {
+        if (!terms.length) return true
+        const haystack = [
+          plugin?.id,
+          plugin?.name,
+          plugin?.displayName,
+          plugin?.version,
+          plugin?.description,
+          plugin?.developer,
+          plugin?.author,
+          plugin?.dir,
+        ]
+          .map(value => String(value || ''))
+          .join(' ')
+          .toLowerCase()
+        return terms.every(term => haystack.includes(term))
+      }
+
+      const render = ({ sideEffects = true } = {}) => {
         const list = manager.list({ includeCore: true, includeRemoved: true })
         const issueList = issues()
         const stats = manager.stats()
-        const removed = sortList(list.filter(p => p.removed), issueList)
-        const external = sortList(list.filter(p => p.external && !p.removed), issueList)
-        const third = sortList(list.filter(p => !p.core && !p.external && !p.removed), issueList)
-        const core = sortList(list.filter(p => p.core), issueList)
+        const terms = searchTerms()
+        const filtered = list.filter(plugin => matchesSearch(plugin, terms))
+        const removed = sortList(filtered.filter(p => p.removed), issueList)
+        const external = sortList(filtered.filter(p => p.external && !p.removed), issueList)
+        const third = sortList(filtered.filter(p => !p.core && !p.external && !p.removed), issueList)
+        const core = sortList(filtered.filter(p => p.core), issueList)
         const errorCount = list.filter(
           p => p.legacy || p.status === 'error' || p.conflict || (p.status !== 'disabled' && p.dependencyHealth === 'error'),
         ).length
@@ -328,28 +356,36 @@ export function apply(ctx) {
           <span class="plugin-chip ${stats.inactive ? 'warn' : ''}">未激活 <b>${stats.inactive}</b></span>
           <span class="plugin-chip ${stats.warnings ? 'warn' : ''}">自检提示 <b>${stats.warnings}</b></span>
           <span class="plugin-chip">服务 <b>${stats.services}</b></span>
-          ${removed.length ? `<span class="plugin-chip">已卸载 <b>${removed.length}</b></span>` : ''}`
+          ${removed.length || (terms.length && filtered.length) ? `<span class="plugin-chip">${terms.length ? `搜索到 <b>${filtered.length}</b> / ${list.length}` : `已卸载 <b>${removed.length}</b>`}</span>` : ''}`
 
-        listEl.innerHTML = `
-          ${
-            external.length
-              ? `<div class="settings-section-title" style="margin-top:22px">外部插件</div>
-                 <div class="plugin-list">${external.map(p => itemHtml(p, issueList)).join('')}</div>`
-              : ''
-          }
-          <div class="plugin-list">${third.map(p => itemHtml(p, issueList)).join('')}</div>
-          <div class="settings-section-title" style="margin-top:22px">核心插件（不可禁用）</div>
-          <div class="plugin-list">${core.map(p => itemHtml(p, issueList)).join('')}</div>
-          ${
-            removed.length
-              ? `<div class="settings-section-title" style="margin-top:22px">已卸载（数据保留，可恢复）</div>
-                 <div class="plugin-list">${removed.map(removedHtml).join('')}</div>`
-              : ''
-          }`
+        listEl.innerHTML = !filtered.length
+          ? `<div class="plugin-empty">${terms.length ? `没有找到匹配「${escapeHtml(String(searchQuery).trim())}」的插件` : '暂无插件'}</div>`
+          : `
+            ${
+              external.length
+                ? `<div class="settings-section-title" style="margin-top:22px">外部插件</div>
+                   <div class="plugin-list">${external.map(p => itemHtml(p, issueList)).join('')}</div>`
+                : ''
+            }
+            ${third.length ? `<div class="plugin-list">${third.map(p => itemHtml(p, issueList)).join('')}</div>` : ''}
+            ${
+              core.length
+                ? `<div class="settings-section-title" style="margin-top:22px">核心插件（不可禁用）</div>
+                   <div class="plugin-list">${core.map(p => itemHtml(p, issueList)).join('')}</div>`
+                : ''
+            }
+            ${
+              removed.length
+                ? `<div class="settings-section-title" style="margin-top:22px">已卸载（数据保留，可恢复）</div>
+                   <div class="plugin-list">${removed.map(removedHtml).join('')}</div>`
+                : ''
+            }`
         bindActionButtons()
-        loadPluginDirs()
-        loadMarketMeta()
-        ctx.setTimeout(() => promptNewPluginScopes(), 180)
+        if (sideEffects) {
+          loadPluginDirs()
+          loadMarketMeta()
+          ctx.setTimeout(() => promptNewPluginScopes(), 180)
+        }
       }
 
       /** 读取市场安装元数据 + 批量市场目录元数据，用于小字标注开发者 / Star；只拉取一次。 */

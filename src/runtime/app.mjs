@@ -15,12 +15,12 @@
  * 所有插件的依赖注入、fiber 生命周期、事件总线、日志系统均由 cordis 原生实现。
  */
 import { Context as CordisContext } from 'cordis'
-import { satisfies } from './semver.mjs'
+import { parseVersion, satisfies } from './semver.mjs'
 import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.2.1-preview.1'
+export const VERSION = '2.2.1-preview.2'
 
 export const STATUS = {
   PENDING: 'pending',
@@ -464,7 +464,7 @@ export class App {
         continue
       }
       const previousPath = record.path
-      const wasLegacy = !!record.manifest?.legacy
+      const wasLegacy = this.compatibilityIssues(record).length > 0
       record.entry = entry
       record.path = entry.path
       record.external = !!entry.external
@@ -472,7 +472,7 @@ export class App {
       const preservedRemoved = !!record.manifest.removed
       record.manifest = this.manifestFromEntry(entry, record.manifest)
       record.manifest.removed = preservedRemoved || this.removedIds.has(id)
-      const becameLegacy = !wasLegacy && !!record.manifest.legacy
+      const becameLegacy = !wasLegacy && this.compatibilityIssues(record).length > 0
       if (entry.error) {
         await this.disposeRecord(record)
         record.module = null
@@ -481,7 +481,7 @@ export class App {
         record.reason = `模块导入失败：${entry.error}`
         continue
       }
-      // 代码文件变化（外部插件 path 带 mtime）或清单从兼容变为旧版不兼容时，
+      // 代码文件变化（外部插件 path 带 mtime）或清单从兼容变为不兼容时，
       // 都先释放旧实例再重新判定，避免旧版插件继续以“正常”状态运行。
       if (previousPath && (previousPath !== entry.path || becameLegacy)) {
         await this.disposeRecord(record)
@@ -613,6 +613,8 @@ export class App {
       ...base,
       name: id || base.name,
       version: pick(entry.version, base.version) || '0.0.0',
+      minAppVersion: pick(entry.minAppVersion, base.minAppVersion) || '',
+      maxAppVersion: pick(entry.maxAppVersion, base.maxAppVersion) || '',
       legacy: entry.legacy !== undefined ? !!entry.legacy : !!base.legacy,
       legacyReason: pick(entry.legacyReason, base.legacyReason) || '',
       displayName: pick(entry.displayName, base.displayName) || id,
@@ -962,11 +964,27 @@ export class App {
     return this.dependsIssuesFor(record, record.manifest.optionalDepends || {})
   }
 
-  /** 运行环境兼容性：外部插件主版本必须与当前内核主版本一致。 */
+  /**
+   * 运行环境兼容性：
+   *   - 不再强制外部插件版本与内核主版本一致；
+   *   - 只有插件显式声明 minAppVersion / maxAppVersion，且当前内核不满足时才阻止激活；
+   *   - 没声明就交给依赖、inject 和运行时错误正常处理。
+   */
   compatibilityIssues(record) {
-    if (!record?.manifest?.legacy) return []
-    const reason = record.manifest.legacyReason || `外部插件版本 ${record.manifest.version || '0.0.0'} 未适配当前内核`
-    return [reason]
+    const manifest = record?.manifest || {}
+    const issues = []
+    const minAppVersion = String(manifest.minAppVersion || '').trim()
+    const maxAppVersion = String(manifest.maxAppVersion || '').trim()
+    if (minAppVersion && parseVersion(minAppVersion) && !satisfies(this.version, `>=${minAppVersion}`)) {
+      issues.push(`需要念风内核 ≥ ${minAppVersion}（当前 ${this.version}）`)
+    }
+    if (maxAppVersion && parseVersion(maxAppVersion) && !satisfies(this.version, `<=${maxAppVersion}`)) {
+      issues.push(`仅支持念风内核 ≤ ${maxAppVersion}（当前 ${this.version}）`)
+    }
+    if (manifest.legacy && !issues.length) {
+      issues.push(manifest.legacyReason || `插件 ${manifest.name || record?.id || ''} 声明的内核版本不兼容当前内核 ${this.version}`)
+    }
+    return [...new Set(issues)]
   }
 
   /**
@@ -1246,15 +1264,16 @@ export class App {
     return [...this.records.values()].map(record => {
       const dependencies = this.dependencyReport(record)
       const dependencyIssues = dependencies.filter(item => item.status !== 'ok' && item.status !== 'pending')
+      const compatibilityIssues = this.compatibilityIssues(record)
       return {
         id: record.id,
         dir: record.dir,
         path: record.path,
         status: record.status,
         reason: record.reason,
-        legacy: !!record.manifest.legacy,
-        legacyReason: record.manifest.legacyReason || '',
-        compatibilityIssues: this.compatibilityIssues(record),
+        legacy: compatibilityIssues.length > 0,
+        legacyReason: compatibilityIssues[0] || '',
+        compatibilityIssues,
         error: record.error ? String(record.error.message || record.error) : null,
         conflict: !!record.conflict,
         started: record.started,
@@ -1520,6 +1539,8 @@ function collectManifest(mod, entry) {
   return {
     name: mod.name || entry.id || entry.dir || 'unknown',
     version: mod.version || entry.version || '0.0.0',
+    minAppVersion: mod.minAppVersion || entry.minAppVersion || '',
+    maxAppVersion: mod.maxAppVersion || entry.maxAppVersion || '',
     legacy: entry.legacy !== undefined ? !!entry.legacy : false,
     legacyReason: entry.legacyReason || '',
     displayName: mod.displayName || mod.name || entry.id,

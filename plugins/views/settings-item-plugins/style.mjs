@@ -18,6 +18,18 @@ export const PLUGIN_PAGE_CSS = `
   .plugin-toolbar-btn.primary:hover{background:var(--accent-hover);}
   .plugin-toolbar-btn svg{width:14px;height:14px;}
   .plugin-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-3);}
+  .plugin-search{
+    height:34px;flex:1 1 220px;min-width:170px;max-width:320px;
+    border:1px solid rgba(0,0,0,.09);background:rgba(255,255,255,.72);
+    border-radius:8px;padding:0 11px;font:inherit;font-size:12.5px;color:var(--text);
+    outline:none;transition:border-color .14s, box-shadow .14s;
+  }
+  .plugin-search::placeholder{color:var(--text-4);}
+  .plugin-search:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  .plugin-empty{
+    padding:26px 10px;text-align:center;border:1px dashed var(--border);
+    border-radius:10px;color:var(--text-4);font-size:12.5px;
+  }
   .plugin-sort-select{
     height:32px;border:1px solid rgba(0,0,0,.09);background:rgba(255,255,255,.72);
     border-radius:7px;padding:0 26px 0 10px;font:inherit;font-size:12px;color:var(--text);
@@ -130,6 +142,7 @@ export const PLUGIN_PAGE_CSS = `
   .plugin-core-hint{font-size:11.5px;color:var(--text-4);padding-right:4px;}
   html[data-theme="dark"] .plugin-item,
   html[data-theme="dark"] .plugin-action-btn,
+  html[data-theme="dark"] .plugin-search,
   html[data-theme="dark"] .plugin-toolbar-btn{background:rgba(255,255,255,.06);color:var(--text);}
   /* ---------- 自检 / 健康状态 ---------- */
   .plugin-summary{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;}

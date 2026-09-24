@@ -1335,6 +1335,29 @@ async function main() {
     settingsContainer.open('plugins')
     return document.querySelectorAll('#pluginListContainer .plugin-item').length >= 20
   })(), `实际 ${document.querySelectorAll('#pluginListContainer .plugin-item').length}`)
+    const pluginSearchInput = document.querySelector('[data-plugin-search]')
+    check('插件页提供插件搜索框', !!pluginSearchInput)
+    if (pluginSearchInput) {
+      const pluginCountBeforeSearch = document.querySelectorAll('#pluginListContainer .plugin-item').length
+      pluginSearchInput.value = 'tooltip'
+      pluginSearchInput.dispatchEvent({ type: 'input' })
+      await sleep(80)
+      const filteredPluginNodes = [...document.querySelectorAll('#pluginListContainer .plugin-item')]
+      const filteredPluginText = filteredPluginNodes.map(node => String(node.textContent || '')).join(' ')
+      check(
+        '插件搜索框按名称 / ID / 描述过滤列表',
+        filteredPluginNodes.length > 0 && filteredPluginNodes.length < pluginCountBeforeSearch && /tooltip/i.test(filteredPluginText),
+        `过滤后 ${filteredPluginNodes.length} / ${pluginCountBeforeSearch}：${filteredPluginText.slice(0, 120)}`,
+      )
+      pluginSearchInput.value = ''
+      pluginSearchInput.dispatchEvent({ type: 'input' })
+      await sleep(80)
+      check(
+        '清空插件搜索后恢复完整列表',
+        document.querySelectorAll('#pluginListContainer .plugin-item').length === pluginCountBeforeSearch,
+        `恢复后 ${document.querySelectorAll('#pluginListContainer .plugin-item').length} / ${pluginCountBeforeSearch}`,
+      )
+    }
   const chatChannels = ctx.inject('channel-registry')
   const smokeGroup = chatChannels.groups('group')[0]
   const smokeGroupChannel = smokeGroup
