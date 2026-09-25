@@ -730,16 +730,45 @@ const adapters = {
     label: 'Google Gemini',
     async listModels(provider, ctx) {
       const apiBase = geminiApiBase(provider)
-      const res = await request(ctx, `${apiBase}/models`, {
-        headers: geminiHeaders(provider),
-        timeoutMs: providerTimeout(provider),
-        proxy: provider.proxy,
-      })
-      const json = await res.json()
-      return (json.models || [])
-        .filter(model => !model.supportedGenerationMethods || model.supportedGenerationMethods.includes('generateContent'))
-        .map(model => ({ id: String(model.name || '').replace(/^models\//, ''), name: model.displayName || String(model.name || '').replace(/^models\//, '') }))
-        .filter(model => model.id)
+      const models = []
+      const seenIds = new Set()
+      let pageToken = ''
+      let page = 0
+      do {
+        const params = new URLSearchParams({ pageSize: '100' })
+        if (pageToken) params.set('pageToken', pageToken)
+        const url = `${apiBase}/models?${params.toString()}`
+        ctx.logger.info(`[models] Gemini 获取模型列表：GET ${url}`)
+        const res = await request(ctx, url, {
+          headers: { Accept: 'application/json', ...geminiHeaders(provider) },
+          timeoutMs: providerTimeout(provider),
+          proxy: provider.proxy,
+          debug: true,
+        })
+        let json
+        try {
+          json = await res.json()
+        } catch (err) {
+          throw createError(502, `解析 ${url} 响应失败：${err.message}`)
+        }
+        const list = Array.isArray(json?.models) ? json.models : Array.isArray(json?.data) ? json.data : null
+        if (!list) {
+          throw createError(502, `${url} 未返回模型数组：${JSON.stringify(json).slice(0, 300)}`)
+        }
+        for (const item of list) {
+          const methods = Array.isArray(item.supportedGenerationMethods) ? item.supportedGenerationMethods : null
+          // 新模型可能只声明 streamGenerateContent；两种都算可聊模型，缺字段时按兼容处理。
+          if (methods && !methods.includes('generateContent') && !methods.includes('streamGenerateContent')) continue
+          const id = String(item.name || item.id || '').replace(/^models\//, '').trim()
+          if (!id || seenIds.has(id)) continue
+          seenIds.add(id)
+          models.push({ id, name: item.displayName || item.name || id })
+        }
+        pageToken = String(json.nextPageToken || '')
+        page += 1
+      } while (pageToken && page < 10)
+      ctx.logger.info(`[models] Gemini 模型列表响应：共 ${models.length} 个（${apiBase}/models）`)
+      return models
     },
     async test(provider, ctx) {
       const models = await adapters.gemini.listModels(provider, ctx)
@@ -1897,7 +1926,12 @@ function abortableDelay(ms, signal) {
 
 function normalizeError(err) {
   if (!err) return '未知错误'
-  if (err.name === 'AbortError' || err.code === 'ABORT_ERR') return '请求超时或被取消'
+  if (err.name === 'AbortError' || err.code === 'ABORT_ERR') {
+    const text = String(err.message || '').trim()
+    // fetch 原生 abort 只会给 "This operation was aborted" 这类无意义文案；
+    // 我们主动抛出的 AbortError 会带具体阶段（例如代理隧道 TLS 未完成）。
+    return text && !/operation was aborted/i.test(text) ? text : '请求超时或被取消'
+  }
   // Node fetch 的网络错误会被包成 TypeError('fetch failed')，真实原因在 cause 链里
   let cause = err.cause
   while (cause?.cause) cause = cause.cause
@@ -1921,27 +1955,82 @@ function normalizeError(err) {
  * - 默认走全局 fetch；
  * - provider.proxy 配置了 http(s) 代理时，走真实代理隧道（CONNECT / absolute-form），
  *   轻量实现，无第三方依赖。
+ * - 超时覆盖「建连 + 响应头」；非流式的 json()/text() 读取另有同一时长的兜底，
+ *   避免上游隧道半死不活时请求永远不落地。
  */
-async function request(ctx, url, { method = 'GET', headers = {}, body, signal, timeoutMs = 30000, proxy = '' } = {}) {
+async function request(ctx, url, { method = 'GET', headers = {}, body, signal, timeoutMs = 30000, proxy = '', debug = false } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
   const onAbort = () => controller.abort(signal?.reason || new Error('已取消'))
   signal?.addEventListener?.('abort', onAbort, { once: true })
   try {
     const res = proxy
-      ? await proxyRequest(url, { method, headers, body, signal: controller.signal, proxy })
+      ? await proxyRequest(url, { method, headers, body, signal: controller.signal, proxy, debug, logger: ctx?.logger })
       : await fetch(url, { method, headers, body, signal: controller.signal })
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      const err = new Error(`${res.status} ${res.statusText || ''}${text ? ' · ' + text.slice(0, 600) : ''}`)
-      err.status = res.status
+    const wrapped = withResponseReadTimeout(res, controller, timeoutMs)
+    if (!wrapped.ok) {
+      const text = await wrapped.text().catch(() => '')
+      const err = new Error(`${wrapped.status} ${wrapped.statusText || ''}${text ? ' · ' + text.slice(0, 600) : ''}`)
+      err.status = wrapped.status
       throw err
     }
-    return res
+    return wrapped
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener?.('abort', onAbort)
   }
+}
+
+/**
+ * 非流式响应体的兜底超时：json()/text() 超过 timeoutMs 仍未读完时，中止底层请求并抛错。
+ * 之前超时只覆盖到响应头，body 读取阶段如果卡住（代理隧道半开、连接假死），Promise 会永远挂着。
+ * 流式调用方直接消费 res.body，不经过 json()/text()，因此不会影响长连接聊天。
+ */
+function withResponseReadTimeout(res, controller, timeoutMs) {
+  const wrap = method => {
+    const original = typeof res[method] === 'function' ? res[method].bind(res) : null
+    if (!original) return
+    Object.defineProperty(res, method, {
+      configurable: true,
+      writable: true,
+      value: (...args) =>
+        new Promise((resolve, reject) => {
+          let done = false
+          const timer = setTimeout(() => {
+            if (done) return
+            done = true
+            try {
+              controller.abort(new Error('读取响应超时'))
+            } catch (_) {
+              /* ignore */
+            }
+            try {
+              res.destroy?.()
+            } catch (_) {
+              /* ignore */
+            }
+            reject(Object.assign(new Error('响应读取超时'), { code: 'ETIMEDOUT' }))
+          }, timeoutMs)
+          Promise.resolve(original(...args)).then(
+            value => {
+              if (done) return
+              done = true
+              clearTimeout(timer)
+              resolve(value)
+            },
+            err => {
+              if (done) return
+              done = true
+              clearTimeout(timer)
+              reject(err)
+            },
+          )
+        }),
+    })
+  }
+  wrap('json')
+  wrap('text')
+  return res
 }
 
 /** 把 Node IncomingMessage 包成 fetch Response 的最小可用子集 */
@@ -1953,13 +2042,32 @@ function wrapNodeResponse(res) {
     statusText: res.statusMessage || '',
     headers: { get: name => res.headers[String(name).toLowerCase()] ?? null },
     body,
-    text() {
-      return new Promise((resolve, reject) => {
-        const chunks = []
-        res.on('data', chunk => chunks.push(chunk))
-        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-        res.on('error', reject)
-      })
+    async text() {
+      // 必须走同一个 web body 读，不能一边 Readable.toWeb(res) 一边 res.on('data')：
+      // 两边抢同一条流时，真实网络下可能永远等不到 end，表现就是“响应头 200 后卡死”。
+      const reader = body.getReader()
+      const chunks = []
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) chunks.push(Buffer.from(value))
+        }
+      } finally {
+        try {
+          reader.releaseLock()
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return Buffer.concat(chunks).toString('utf8')
+    },
+    destroy() {
+      try {
+        res.destroy()
+      } catch (_) {
+        /* ignore */
+      }
     },
   }
   tiny.json = async () => JSON.parse(await tiny.text())
@@ -1973,7 +2081,7 @@ function proxyAuthorization(proxy) {
 }
 
 /** 通过 http(s) 代理发起请求：http 目标用 absolute-form，https 目标用 CONNECT 隧道 */
-function proxyRequest(url, { method = 'GET', headers = {}, body, signal, proxy } = {}) {
+function proxyRequest(url, { method = 'GET', headers = {}, body, signal, proxy, debug = false, logger = null } = {}) {
   const target = new URL(url)
   let proxyURL
   try {
@@ -1987,48 +2095,115 @@ function proxyRequest(url, { method = 'GET', headers = {}, body, signal, proxy }
   const proxyModule = proxyURL.protocol === 'https:' ? https : http
   const proxyPort = proxyURL.port || (proxyURL.protocol === 'https:' ? 443 : 80)
   const auth = proxyAuthorization(proxyURL)
-  const proxyHeaders = { Host: proxyURL.host, ...(auth ? { 'Proxy-Authorization': auth } : {}) }
+  const log = debug && typeof logger?.info === 'function' ? message => logger.info(message) : () => {}
 
   return new Promise((resolve, reject) => {
-    const fail = err => reject(err instanceof Error ? err : new Error(String(err)))
+    let settled = false
+    let connectReq = null
+    let tlsSocket = null
+    let innerReq = null
+
+    const detach = () => signal?.removeEventListener?.('abort', onAbort)
+    const dispose = () => {
+      try {
+        innerReq?.destroy?.()
+      } catch (_) {
+        /* ignore */
+      }
+      if (tlsSocket) {
+        try {
+          tlsSocket.destroy()
+        } catch (_) {
+          /* ignore */
+        }
+      } else {
+        try {
+          connectReq?.destroy?.()
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+    const succeed = res => {
+      if (settled) return
+      settled = true
+      detach()
+      resolve(wrapNodeResponse(res))
+    }
+    const fail = err => {
+      if (settled) return
+      settled = true
+      const error = err instanceof Error ? err : new Error(String(err))
+      log(`[models][proxy] 失败：${error.message}`)
+      detach()
+      dispose()
+      reject(error)
+    }
+    const onAbort = () => {
+      const reason = signal?.reason
+      const text = reason instanceof Error ? String(reason.message || '').trim() : ''
+      const message = text && !/abort|cancel|取消/i.test(text) ? `代理隧道未在超时时间内完成：${text}` : text || '请求已取消'
+      fail(Object.assign(new Error(message), { name: 'AbortError', code: 'ABORT_ERR' }))
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener?.('abort', onAbort, { once: true })
 
     if (target.protocol === 'http:') {
       // 明文 HTTP 通过 absolute-form 直接发给代理；Host 用目标站点的
       const targetHeaders = { ...headers }
       if (!Object.keys(targetHeaders).some(key => key.toLowerCase() === 'host')) targetHeaders.Host = target.host
-      const req = proxyModule.request(
+      const forwardHeaders = { ...(auth ? { 'Proxy-Authorization': auth } : {}), ...targetHeaders }
+      log(`[models][proxy] HTTP ${method} ${url} via ${proxyURL.host}`)
+      innerReq = proxyModule.request(
         {
           host: proxyURL.hostname,
           port: proxyPort,
           method,
           path: url,
-          headers: { ...proxyHeaders, ...targetHeaders },
+          headers: forwardHeaders,
           signal,
         },
-        res => resolve(wrapNodeResponse(res)),
+        res => succeed(res),
       )
-      req.on('error', fail)
-      if (body) req.write(body)
-      req.end()
+      innerReq.on('error', fail)
+      if (body) innerReq.write(body)
+      innerReq.end()
       return
     }
 
     if (target.protocol !== 'https:') return fail(new Error(`不支持的协议：${target.protocol}`))
     const targetPort = target.port || 443
-    const connectReq = proxyModule.request({
+    // 和 curl 保持一致：CONNECT 的 Host 用目标 authority，并带 Proxy-Connection；
+    // 某些代理实现（包括 Mihomo/Clash 的部分版本）会按这个头处理隧道。
+    const connectHeaders = {
+      Host: `${target.hostname}:${targetPort}`,
+      'Proxy-Connection': 'Keep-Alive',
+      ...(auth ? { 'Proxy-Authorization': auth } : {}),
+    }
+    log(`[models][proxy] CONNECT ${target.hostname}:${targetPort} via ${proxyURL.host}`)
+    connectReq = proxyModule.request({
       host: proxyURL.hostname,
       port: proxyPort,
       method: 'CONNECT',
       path: `${target.hostname}:${targetPort}`,
-      headers: proxyHeaders,
+      headers: connectHeaders,
       signal,
     })
     connectReq.on('error', fail)
     connectReq.on('connect', (res, socket, head) => {
-      if (res.statusCode !== 200) return fail(new Error(`代理 CONNECT 失败：HTTP ${res.statusCode}`))
+      log(`[models][proxy] CONNECT 响应 HTTP ${res.statusCode}`)
+      if (res.statusCode !== 200) {
+        try {
+          socket.destroy()
+        } catch (_) {
+          /* ignore */
+        }
+        return fail(new Error(`代理 CONNECT 失败：HTTP ${res.statusCode}`))
+      }
       if (head?.length) socket.unshift(head)
-      const tlsSocket = tls.connect({ socket, servername: target.hostname }, () => {
-        const req = https.request(
+      tlsSocket = tls.connect({ socket, servername: target.hostname }, () => {
+        log('[models][proxy] TLS 握手完成')
+        innerReq = https.request(
           {
             createConnection: () => tlsSocket,
             method,
@@ -2038,13 +2213,21 @@ function proxyRequest(url, { method = 'GET', headers = {}, body, signal, proxy }
             headers: { ...headers, Host: target.host },
             signal,
           },
-          r => resolve(wrapNodeResponse(r)),
+          r => {
+            log(`[models][proxy] 响应头 HTTP ${r.statusCode}`)
+            succeed(r)
+          },
         )
-        req.on('error', fail)
-        if (body) req.write(body)
-        req.end()
+        innerReq.on('error', fail)
+        if (body) innerReq.write(body)
+        innerReq.end()
+        log(`[models][proxy] 已发送 ${method} ${target.pathname}${target.search}`)
       })
       tlsSocket.on('error', fail)
+      // CONNECT 成功但 TLS 握手一直不完成：close/超时都必须让 Promise 落地，避免“获取中”永久卡住。
+      tlsSocket.once('close', () => {
+        if (!settled) fail(new Error('代理隧道在 TLS 握手完成前关闭'))
+      })
     })
     connectReq.end()
   })
