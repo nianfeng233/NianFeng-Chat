@@ -8,7 +8,7 @@
  * 渠道视图入口：注册 'channel' 视图，提供列表与详情两个插槽。
  */
 export const name = 'channel-view'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = '渠道视图'
 export const description = '视觉内容 · 渠道视图入口。'
 export const author = '念风内核'

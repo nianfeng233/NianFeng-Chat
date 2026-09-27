@@ -12,9 +12,9 @@
  * 因为共享偏好而互相覆盖。
  */
 export const name = 'welcome-view'
-export const version = '1.2.0'
+export const version = '1.3.0'
 export const displayName = '视图 · 欢迎'
-export const description = '独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。'
+export const description = '独立视图：项目介绍、进入页面时的版本更新通知 / 欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。'
 export const author = '念风内核'
 export const icon = '👋'
 export const core = true
@@ -47,6 +47,10 @@ const SEEN_NS = 'onboarding'
 const SEEN_KEY = 'welcomeSeen'
 const UPDATE_SOURCE_KEY = 'appUpdate.source'
 const MAINTENANCE_KEY = 'nianfeng:maintenance'
+// 免费声明弹窗按“后端进程 build”记录：同一进程内 UI 刷新不再弹，
+// 项目重启后 build 变化，重新弹出（符合“重启项目而不是重启 UI”）。
+const FREE_NOTICE_KEY = 'freeNoticeBuild'
+const FREE_NOTICE_FALLBACK_KEY = 'nianfeng:freeNoticeSession'
 
 const formatBytes = value => {
   const size = Number(value) || 0
@@ -223,6 +227,232 @@ export function apply(ctx) {
 
   useStyle(ctx, WELCOME_CSS)
 
+  /** 最近一次检测到的可更新版本（模块 / 页面级缓存，欢迎页挂载时复用）。 */
+  let updateNotice = null
+  let updateNotificationSent = false
+  let freeNoticeShown = false
+  let startupNoticesStarted = false
+
+  /** 更新欢迎页上的「发现新版本」标志：没有更新时保持隐藏。 */
+  const syncUpdateBadges = () => {
+    if (typeof document === 'undefined') return
+    for (const node of document.querySelectorAll('[data-welcome-update-badge]')) {
+      if (!updateNotice) {
+        node.hidden = true
+        continue
+      }
+      node.hidden = false
+      node.dataset.updateTag = updateNotice.tag
+      node.title = `发现新版本 ${updateNotice.tag}${updateNotice.current ? `（当前 ${updateNotice.current}）` : ''}，点击查看更新`
+      const versionLabel = node.querySelector('[data-welcome-update-version]')
+      if (versionLabel) versionLabel.textContent = updateNotice.tag
+      const currentLabel = node.querySelector('[data-welcome-update-current]')
+      if (currentLabel) currentLabel.textContent = updateNotice.current ? `当前 ${updateNotice.current}` : ''
+    }
+  }
+
+  /** 从后端 /version 或 /health 读取进程 build；同一 build 视为同一次项目运行。 */
+  const fetchBackendBuild = async () => {
+    try {
+      const data = await api.get('/version')
+      if (data?.build) return String(data.build)
+    } catch (_) {
+      /* 旧后端可能没有 build 字段，继续尝试 health */
+    }
+    try {
+      const health = await api.get('/health')
+      if (health?.build) return String(health.build)
+    } catch (_) {
+      /* 后端离线：下面退回 sessionStorage 兜底 */
+    }
+    return ''
+  }
+
+  /**
+   * 免费声明弹窗：按后端进程 build 只弹一次。
+   * UI 刷新 / 前端重载时 build 不变，不会重复弹出；重启项目后 build 改变，
+   * 下次进入页面会重新弹出。无法读取 build 时退回 sessionStorage，至少保证
+   * 当前标签页会话内只弹一次。
+   */
+  const showFreeSoftwareNotice = async () => {
+    if (freeNoticeShown) return
+    freeNoticeShown = true
+    if (typeof document === 'undefined') return
+
+    const build = await fetchBackendBuild()
+    let alreadySeen = false
+    try {
+      if (build) alreadySeen = storage.get(SEEN_NS, FREE_NOTICE_KEY, '') === build
+      else alreadySeen = sessionStorage.getItem(FREE_NOTICE_FALLBACK_KEY) === '1'
+    } catch (_) {
+      alreadySeen = false
+    }
+    if (alreadySeen) return
+
+    await new Promise(resolve => {
+      let closed = false
+      const overlay = document.createElement('div')
+      overlay.className = 'free-notice-mask'
+      overlay.dataset.freeNotice = '1'
+      overlay.innerHTML = `
+        <div class="free-notice-card" role="dialog" aria-modal="true" aria-labelledby="free-notice-title">
+          <button class="free-notice-close" type="button" data-free-notice-close aria-label="关闭">×</button>
+          <div class="free-notice-badge">完全免费 · 开源发布</div>
+          <h2 class="free-notice-title" id="free-notice-title">念风 Chat 完全免费，请勿付费购买</h2>
+          <p class="free-notice-text">
+            本项目全部代码均按 ${escapeHtml(PROJECT_LICENSE)} 开源发布，官方没有任何收费版本。
+            如果你是通过<strong>付费购买</strong>获得本项目，请<strong>立即申请退款</strong>，并向交易平台和卖家举报；
+            遇到倒卖、捆绑收费或冒充官方，也欢迎向我们提供线索。
+          </p>
+          <div class="free-notice-group">
+            <div class="free-notice-group-label">官方交流群号</div>
+            <div class="free-notice-group-number">${escapeHtml(PROJECT_QQ_GROUP)}</div>
+            <div class="free-notice-group-help">欢迎进群交流、反馈问题、获取版本通知，一起保持项目活跃。</div>
+            <button class="welcome-copy" type="button" data-free-notice-copy>复制群号</button>
+          </div>
+          <div class="free-notice-actions">
+            <a class="welcome-link" href="${PROJECT_REPO}" target="_blank" rel="noopener noreferrer">${PROJECT_REPO}</a>
+            <button class="free-notice-confirm" type="button" data-free-notice-close>我知道了</button>
+          </div>
+          <div class="free-notice-foot">本弹窗只在每次启动项目后显示一次；刷新 / 重开 UI 不会重复弹出。</div>
+        </div>`
+      document.body.appendChild(overlay)
+
+      const onKey = event => {
+        if (event.key === 'Escape') close()
+      }
+      const close = () => {
+        if (closed) return
+        closed = true
+        try {
+          if (build) storage.set(SEEN_NS, FREE_NOTICE_KEY, build)
+          else sessionStorage.setItem(FREE_NOTICE_FALLBACK_KEY, '1')
+        } catch (_) {
+          /* 存储不可用时仅当前页面生效 */
+        }
+        document.removeEventListener('keydown', onKey)
+        overlay.remove()
+        resolve()
+      }
+      for (const button of overlay.querySelectorAll('[data-free-notice-close]')) {
+        button.addEventListener('click', close)
+      }
+      const copyButton = overlay.querySelector('[data-free-notice-copy]')
+      copyButton?.addEventListener('click', async event => {
+        event.stopPropagation()
+        const toast = ctx.registry.get('toast')
+        try {
+          await copyText(PROJECT_QQ_GROUP)
+          toast?.success?.('群号已复制')
+        } catch (err) {
+          toast?.info?.(`群号：${PROJECT_QQ_GROUP}`)
+        }
+      })
+      overlay.addEventListener('click', event => {
+        if (event.target === overlay) close()
+      })
+      document.addEventListener('keydown', onKey)
+    })
+  }
+
+  const openUpdatePanel = () => {
+    try {
+      if (router.active() !== 'welcome') router.switch('welcome')
+    } catch (_) {
+      /* 视图未注册时忽略 */
+    }
+    if (typeof document === 'undefined') return
+    setTimeout(() => {
+      document.querySelector('.welcome-update-section')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    }, 120)
+  }
+
+  const showUpdateNotification = notice => {
+    if (!notice || updateNotificationSent) return
+    updateNotificationSent = true
+    const body = `检测到新版本 ${notice.tag}${notice.current ? `（当前 ${notice.current}）` : ''}，可在欢迎页选择更新。`
+    const notification = ctx.registry.get('notification')
+    if (notification?.notify) {
+      try {
+        notification.notify({
+          kind: 'system',
+          title: '发现念风 Chat 新版本',
+          body,
+          sound: false,
+          system: true,
+          onClick: openUpdatePanel,
+        })
+        return
+      } catch (err) {
+        ctx.logger.debug(`发送更新通知失败：${err?.message || err}`)
+      }
+    }
+    ctx.registry.get('toast')?.info?.(body)
+  }
+
+  /** 进入 WebUI 时检查 Release：有兼容的新版本就提示并写欢迎页标志。 */
+  const checkForUpdates = async () => {
+    try {
+      const source = readUpdateSource()
+      const [info, data] = await Promise.all([
+        api.appUpdateInfo().catch(() => null),
+        api.appReleases(source, false),
+      ])
+      const current = String(info?.version || ctx.registry.get('app')?.version || '')
+        .trim()
+        .replace(/^v/i, '')
+      const releases = Array.isArray(data?.releases) ? data.releases : []
+      const currentPreview = /-/.test(current)
+      let matched = null
+      for (const release of releases) {
+        if (!release?.tag || release.compatible === false) continue
+        // 稳定版用户默认不提示预览版，避免把预览线当成正式更新；
+        // 预览版用户可以看到预览 / 转正更新。
+        if (!currentPreview && release.prerelease === true) continue
+        const version = String(release.version || release.tag).replace(/^v/i, '')
+        if (updateDirection(version, current) !== 'update') continue
+        matched = { ...release, version }
+        break
+      }
+      if (!matched) {
+        updateNotice = null
+        syncUpdateBadges()
+        return null
+      }
+      updateNotice = {
+        tag: String(matched.tag),
+        version: String(matched.version),
+        source,
+        current,
+        release: matched,
+        kindLabel: data?.kindLabel || info?.kindLabel || '',
+      }
+      syncUpdateBadges()
+      showUpdateNotification(updateNotice)
+      return updateNotice
+    } catch (err) {
+      ctx.logger.debug(`检查版本更新失败：${err?.message || err}`)
+      return null
+    }
+  }
+
+  const startStartupNotices = () => {
+    if (startupNoticesStarted) return
+    startupNoticesStarted = true
+    // 先弹免费声明，关闭后再提示更新，避免更新通知被弹窗遮住。
+    void showFreeSoftwareNotice()
+      .then(() => checkForUpdates())
+      .catch(err => ctx.logger.debug(`启动通知执行失败：${err?.message || err}`))
+  }
+  // 只在实际浏览器 UI 里弹窗 / 发通知；服务端代聊 headless 也加载同一插件集合，
+  // 那里没有用户可见界面，不应创建弹窗或请求 /version。
+  const isServerAgent = typeof globalThis !== 'undefined' && globalThis.__NIANFENG_SERVER_AGENT__ === true
+  if (!isServerAgent) {
+    ctx.on('app:ready', startStartupNotices)
+    const startupNoticeTimer = setTimeout(startStartupNotices, 1800)
+    ctx.effect(() => () => clearTimeout(startupNoticeTimer))
+  }
+
   router.register('welcome', {
     label: '欢迎',
     // 放在会话 / 渠道前面，作为首次启动的引导入口。
@@ -259,6 +489,10 @@ export function apply(ctx) {
                   <span class="welcome-tag">本地优先</span>
                   <span class="welcome-tag">插件化</span>
                   <span class="welcome-tag">免费开源</span>
+                  <button class="welcome-update-badge" type="button" data-welcome-update-badge hidden>
+                    <span class="welcome-update-badge-dot"></span>
+                    发现新版本 <span data-welcome-update-version></span>
+                  </button>
                 </div>
               </div>
             </header>
@@ -362,6 +596,8 @@ export function apply(ctx) {
           </div>
         </div>`
 
+        syncUpdateBadges()
+
         const updateEls = {
           source: container.querySelector('[data-update-source]'),
           refresh: container.querySelector('[data-update-refresh]'),
@@ -454,6 +690,7 @@ export function apply(ctx) {
           const versionOfCurrent = currentVersion()
           if (!updateState.selectedTag || !releases.some(item => item.tag === updateState.selectedTag)) {
             const preferred =
+              (updateNotice?.tag && releases.find(item => item.tag === updateNotice.tag && item.compatible)) ||
               releases.find(item => item.version === versionOfCurrent && item.compatible) ||
               releases.find(item => item.compatible) ||
               releases[0]
@@ -645,8 +882,17 @@ export function apply(ctx) {
         }
 
         const onUpdateClick = event => {
-          const target = event.target.closest('[data-update-refresh], [data-update-run], [data-app-restart]')
+          const target = event.target.closest('[data-update-refresh], [data-update-run], [data-app-restart], [data-welcome-update-badge]')
           if (!target || !container.contains(target)) return
+          if (target.matches('[data-welcome-update-badge]')) {
+            container.querySelector('.welcome-update-section')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+            if (updateNotice?.tag && updateState.releases.some(release => release.tag === updateNotice.tag)) {
+              updateState.selectedTag = updateNotice.tag
+              if (updateEls.release) updateEls.release.value = updateNotice.tag
+              syncUpdateButtons()
+            }
+            return
+          }
           if (target.matches('[data-update-refresh]')) {
             loadVersions(true)
             return

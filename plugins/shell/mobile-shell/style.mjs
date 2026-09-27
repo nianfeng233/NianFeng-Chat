@@ -207,6 +207,51 @@ export const MOBILE_SHELL_CSS = `
   html[data-mobile-layout="1"] .channel-item,
   html[data-mobile-layout="1"] .group-head,
   html[data-mobile-layout="1"] .msg-row{-webkit-touch-callout:none;}
+
+  /* 手机端滚动与渠道详情：所有长页面统一支持原生惯性纵向滚动；渠道详情在
+     自定义渲染（NapCat / QQ官方 / 微信）下也能完整往下翻，不再被 overflow
+     hidden 的父面板裁掉。 */
+  html[data-mobile-layout="1"] .scroll,
+  html[data-mobile-layout="1"] .channel-detail-slot,
+  html[data-mobile-layout="1"] .logs-page,
+  html[data-mobile-layout="1"] .logs-list,
+  html[data-mobile-layout="1"] .welcome-page,
+  html[data-mobile-layout="1"] .lib-page,
+  html[data-mobile-layout="1"] .market-page,
+  html[data-mobile-layout="1"] .settings-content,
+  html[data-mobile-layout="1"] .record-list,
+  html[data-mobile-layout="1"] .record-main{
+    -webkit-overflow-scrolling:touch;
+    overscroll-behavior:contain;
+  }
+  html[data-mobile-layout="1"] .channel-item,
+  html[data-mobile-layout="1"] .group-head,
+  html[data-mobile-layout="1"] .conv-item,
+  html[data-mobile-layout="1"] .market-card,
+  html[data-mobile-layout="1"] .lib-card{touch-action:pan-y;}
+  html[data-mobile-layout="1"] .channel-detail-slot > *{width:100%;box-sizing:border-box;}
+  html[data-mobile-layout="1"] .channel-detail,
+  html[data-mobile-layout="1"] .channel-detail-slot > .wc-detail,
+  html[data-mobile-layout="1"] .channel-detail-slot > .nc-detail{padding:16px 14px 30px;}
+  html[data-mobile-layout="1"] .channel-detail-head,
+  html[data-mobile-layout="1"] .wc-detail-head,
+  html[data-mobile-layout="1"] .nc-detail-head{flex-wrap:wrap;gap:10px;}
+  html[data-mobile-layout="1"] .wc-kv,
+  html[data-mobile-layout="1"] .nc-kv{grid-template-columns:minmax(0,1fr);gap:2px 0;}
+  html[data-mobile-layout="1"] .wc-kv .k,
+  html[data-mobile-layout="1"] .nc-kv .k{margin-top:8px;font-weight:600;}
+  html[data-mobile-layout="1"] .wc-bind-row,
+  html[data-mobile-layout="1"] .nc-row{flex-direction:column;align-items:flex-start;gap:7px;}
+  html[data-mobile-layout="1"] .wc-bind-actions,
+  html[data-mobile-layout="1"] .nc-row-actions{width:100%;justify-content:flex-start;flex-wrap:wrap;}
+  html[data-mobile-layout="1"] .wc-bind-actions input{width:100%;min-width:0;}
+  html[data-mobile-layout="1"] .setting-textarea,
+  html[data-mobile-layout="1"] textarea.setting-input,
+  html[data-mobile-layout="1"] .wc-field textarea,
+  html[data-mobile-layout="1"] .nc-field textarea{width:100% !important;max-width:100%;}
+  /* 底部导航项较多时允许横向滑动，避免渠道 / 日志等标签被压成省略号。 */
+  html[data-mobile-layout="1"] .mobile-tabbar{overflow-x:auto;overflow-y:hidden;}
+  html[data-mobile-layout="1"] .mobile-tab{min-width:62px;}
   @media (max-height:700px){
     html[data-mobile-layout="1"] .composer{min-height:48px;padding:6px 8px 8px;}
     html[data-mobile-layout="1"] .settings-content{padding:14px 12px 26px;}

@@ -5,10 +5,17 @@
  */
 /** channel-detail-host 样式 */
 export const CHANNEL_DETAIL_CSS = `
-  .channel-detail{
-    flex:1;min-height:0;overflow-y:auto;
-    padding:26px 34px 40px;
+  .channel-detail{min-height:0;padding:26px 34px 40px;}
+  /* 渠道插件自定义详情根节点（NapCat / QQ官方 / 微信）没有统一的 .channel-detail
+     外层，这里补上和内置详情一致的留白，避免内容贴边、按钮被裁掉。 */
+  .channel-detail-slot > .wc-detail,
+  .channel-detail-slot > .nc-detail,
+  .channel-detail-slot > .clawbot-detail{
+    width:100%;box-sizing:border-box;min-height:0;padding:26px 34px 44px;
   }
+  .channel-detail-slot > .wc-detail .settings-card,
+  .channel-detail-slot > .nc-detail .settings-card,
+  .channel-detail-slot > .clawbot-detail .settings-card{max-width:100%;}
   .channel-detail-head{display:flex;align-items:center;gap:14px;}
   .channel-avatar{
     width:48px;height:48px;border-radius:50%;flex:0 0 48px;

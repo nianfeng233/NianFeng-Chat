@@ -20,9 +20,9 @@ import { QQBOT_CSS } from './style.mjs'
 import { renderQrSvg, isQrImageContent } from './qrcode.mjs'
 
 export const name = 'qqbot'
-export const version = '1.5.1'
+export const version = '1.6.0'
 export const displayName = 'QQ官方机器人'
-export const description = '渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。'
+export const description = '渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则（文本 / 原生艾特）、多机器人联动、SILK 语音与被动回复。'
 export const author = '念风插件'
 export const icon = '🐧'
 export const core = false
@@ -120,6 +120,10 @@ const DEFAULT_GROUP_RULES = {
   // 与 NapCat 同名开关：默认不强制引用触发消息，也不强行 @ 触发者。
   quote: false,
   mention: false,
+  // 艾特方式：text = 正文前加“@群昵称”（所有 QQ 版本都至少能看到）；
+  // native = 使用 QQ 官方群消息的 <@!member_openid> 原生 @ 语法（是否渲染成
+  // 真正的 @ 气泡取决于 QQ 官方接口 / 客户端版本，失败时正文仍可正常阅读）。
+  mentionStyle: 'text',
   silentContext: true,
   // 0 = 继承 通用 → 群聊上下文条数（chat.groupMessages，默认 20）；>0 = 本群单独覆盖。
   contextMessages: 0,
@@ -841,12 +845,21 @@ export function apply(ctx) {
     const isGroupReply = target.sessionType === 'group'
     const quoteEnabled = isGroupReply && rules.quote === true
     const shouldMention = isGroupReply && rules.mention === true && !!activeMessage && activeMessage.linkedBot !== true
+    // QQ 官方群消息没有独立的 at 消息段：text 模式在正文前加“@群昵称”，
+    // native 模式尝试使用官方内容里的 <@!member_openid> 原生 @ 语法。
     let mentionName = ''
+    let mentionNative = false
     if (shouldMention) {
-      mentionName = String(activeMessage.senderName || '').trim() || `QQ成员·${shortId(activeMessage.senderId || activeMessage.peerId)}`
+      const senderId = String(activeMessage.senderId || '').trim()
+      mentionNative = rules.mentionStyle === 'native' && /^[A-Za-z0-9_-]{1,128}$/.test(senderId)
+      if (!mentionNative) {
+        mentionName = String(activeMessage.senderName || '').trim() || `QQ成员·${shortId(activeMessage.senderId || activeMessage.peerId)}`
+      }
     }
     let outboundText = buildOutboundText(message)
-    if (mentionName && !outboundText.trimStart().startsWith('@')) {
+    if (mentionNative && !outboundText.trimStart().startsWith('<@')) {
+      outboundText = `<@!${String(activeMessage.senderId || '').trim()}> ${outboundText}`
+    } else if (mentionName && !outboundText.trimStart().startsWith('@')) {
       outboundText = `@${mentionName} ${outboundText}`
     }
     // 对齐 AstrBot：
@@ -901,6 +914,7 @@ export function apply(ctx) {
         outboundMode: lastResult?.mode || 'passive',
         quoteMessageId: quoteEnabled ? target.msgId : '',
         mentionName,
+        mentionNative,
         ...(images.length && sent ? { imagesSent: true } : {}),
         ...(errors.length ? { outboundError: errors.join('；') } : { outboundError: '' }),
       },
@@ -1355,13 +1369,21 @@ export function apply(ctx) {
               </label>
               <label class="wc-perm">
                 <input type="checkbox" data-wc-rule-mention ${rules.mention === true ? 'checked' : ''} />
-                <span>回复时艾特触发者<small>默认关闭。开启后会在回复正文前加“@群昵称 ”；QQ 官方群接口没有真正的 at 消息段，这是文本 @。</small></span>
+                <span>回复时艾特触发者<small>默认关闭。开启后会按下面的「艾特方式」处理；文本 @ 兼容性最好，原生 @ 是否显示为气泡取决于 QQ 官方接口与客户端版本。</small></span>
               </label>
               <label class="wc-perm">
                 <input type="checkbox" data-wc-rule-silent ${rules.silentContext !== false ? 'checked' : ''} />
                 <span>未触发时也写入本群上下文<small>关掉后，未触发回复的消息不写进聊天记录</small></span>
               </label>
             </div>
+            <label class="wc-field" data-wc-mention-style-row>
+              <span>艾特方式（开启「回复时艾特触发者」后生效）</span>
+              <select data-wc-rule-mentionstyle>
+                <option value="text" ${rules.mentionStyle !== 'native' ? 'selected' : ''}>文本 @ 群昵称（兼容性最好）</option>
+                <option value="native" ${rules.mentionStyle === 'native' ? 'selected' : ''}>QQ 原生 @（实验性：尝试官方 &lt;@!member_openid&gt; 语法）</option>
+              </select>
+              <div class="wc-field-help">原生 @ 使用事件里的 member_openid 直接写入消息内容；若 QQ 客户端没有渲染成 @ 气泡，请改回文本 @，正文仍会正常显示。</div>
+            </label>
           </div>
 
           <details class="wc-details" style="margin-top:10px">
@@ -1439,6 +1461,8 @@ export function apply(ctx) {
     const ruleMentionAlwaysInput = overlay.querySelector('[data-wc-rule-mentionalways]')
     const ruleQuoteInput = overlay.querySelector('[data-wc-rule-quote]')
     const ruleMentionInput = overlay.querySelector('[data-wc-rule-mention]')
+    const ruleMentionStyleInput = overlay.querySelector('[data-wc-rule-mentionstyle]')
+    const ruleMentionStyleRow = overlay.querySelector('[data-wc-mention-style-row]')
     const ruleSilentInput = overlay.querySelector('[data-wc-rule-silent]')
     const linkGroupInput = overlay.querySelector('[data-wc-link-group]')
     const linkMaxInput = overlay.querySelector('[data-wc-link-max]')
@@ -1473,6 +1497,11 @@ export function apply(ctx) {
         ruleProbabilityInput.title = disabled ? '当前规则下概率不生效；可取消“被 @ 时必定回复”或“仅 @ 时回复”' : ''
       }
       if (ruleProbabilityRow) ruleProbabilityRow.style.opacity = disabled ? '.55' : '1'
+    }
+    const syncMentionStyle = () => {
+      const enabled = ruleMentionInput?.checked === true
+      if (ruleMentionStyleRow) ruleMentionStyleRow.style.opacity = enabled ? '1' : '.55'
+      if (ruleMentionStyleInput) ruleMentionStyleInput.disabled = !enabled
     }
     const updateBindingHint = () => {
       const manual = bindModeSelect.value === 'manual'
@@ -1526,6 +1555,7 @@ export function apply(ctx) {
       if (aliasInput) aliasInput.value = existing?.alias || ''
       updateBindingHint()
       syncProbability()
+      syncMentionStyle()
     }
 
     overlay.querySelectorAll('input[name="wc-access"]').forEach(input =>
@@ -1539,6 +1569,7 @@ export function apply(ctx) {
     peerIdInput?.addEventListener('input', updateBindingHint)
     ruleRequireAtInput?.addEventListener('change', syncProbability)
     ruleMentionAlwaysInput?.addEventListener('change', syncProbability)
+    ruleMentionInput?.addEventListener('change', syncMentionStyle)
     ruleContextInput?.addEventListener('input', () => {
       if (!ruleContextEffective) return
       const n = Math.floor(Number(ruleContextInput.value))
@@ -1594,6 +1625,7 @@ export function apply(ctx) {
               replyProbability: Math.max(0, Math.min(100, Math.floor(Number(ruleProbabilityInput?.value) || 0))),
               quote: ruleQuoteInput?.checked === true,
               mention: ruleMentionInput?.checked === true,
+              mentionStyle: ruleMentionStyleInput?.value === 'native' ? 'native' : 'text',
               silentContext: ruleSilentInput?.checked !== false,
               contextMessages: Math.max(0, Math.min(1000, Math.floor(Number(ruleContextInput?.value) || 0))),
               contextRounds: 0,
@@ -2220,6 +2252,7 @@ export function apply(ctx) {
               <span class="k">渠道分类</span><span class="v">${escapeHtml(TAB_LABELS[category] || category)}${category === 'private' ? '（参与角色工作记忆）' : category === 'group' ? '（仅本群上下文）' : '（仅本渠道上下文）'}</span>
               <span class="k">QQ 会话类型</span><span class="v">${escapeHtml(SESSION_LABEL[sessionType] || sessionType)}${sessionType === 'group' ? '（@机器人 / 群开启全量消息后的普通消息）' : ''}</span>
               ${sessionType === 'group' ? `<span class="k">群上下文</span><span class="v">最近 ${groupContextMessagesOf(channel)} 条消息 · channel-only</span>` : ''}
+              ${sessionType === 'group' ? `<span class="k">回复艾特</span><span class="v">${groupRulesOf(channel).mention ? (groupRulesOf(channel).mentionStyle === 'native' ? 'QQ 原生 @（实验性）' : '文本 @ 群昵称') : '关闭'}</span>` : ''}
               ${channel.meta?.linkGroupId ? `<span class="k">跨机器人联动</span><span class="v">${escapeHtml(channel.meta.linkGroupId)} · ${channel.meta.linkAutoReply === false ? '仅同步上下文' : `自动接话 ≤ ${clampLinkTurns(channel.meta.linkMaxTurns)} 轮/条`}</span>` : ''}
               <span class="k">机器人账号</span><span class="v">${escapeHtml(accountText)}</span>
               <span class="k">连接方式</span><span class="v">${escapeHtml(channel.meta?.transport === 'webhook' ? 'Webhook 回调' : 'WebSocket 网关')}</span>
@@ -2753,7 +2786,7 @@ export function apply(ctx) {
           ctx.logger?.info?.(`[qqbot] 渠道「${channel.name || channel.id}」未绑定 openid，已自动改为自动绑定`)
         }
         if (categoryOf(channel) === 'group' && nextMeta.rules && Number(nextMeta.rules.ruleSchema || 0) < 3) {
-          nextMeta.rules = { ...nextMeta.rules, quote: false, mention: false, mentionAlwaysReply: true, ruleSchema: 3 }
+          nextMeta.rules = { ...nextMeta.rules, quote: false, mention: false, mentionStyle: 'text', mentionAlwaysReply: true, ruleSchema: 3 }
           metaChanged = true
           ctx.logger?.info?.(`[qqbot] 渠道「${channel.name || channel.id}」已迁移群规则：引用 / 艾特默认关闭，@ 默认必定回复`)
         }

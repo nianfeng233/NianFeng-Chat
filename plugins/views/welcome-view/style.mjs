@@ -26,6 +26,18 @@ export const WELCOME_CSS = `
     color:var(--text-3);font-size:11px;white-space:nowrap;
   }
   .welcome-tag.accent{border-color:rgba(112,161,90,.34);background:rgba(237,247,231,.78);color:#5c8a45;}
+  .welcome-update-badge{
+    display:inline-flex;align-items:center;gap:6px;height:23px;padding:0 10px;border-radius:999px;
+    border:1px solid rgba(198,91,91,.34);background:linear-gradient(135deg,#fff1ef,#ffe3df);color:#b54a4a;
+    font:inherit;font-size:11px;font-weight:700;cursor:pointer;
+    animation:welcome-update-pulse 2.2s ease-in-out infinite;
+  }
+  .welcome-update-badge:hover{filter:brightness(.98);}
+  .welcome-update-badge-dot{width:6px;height:6px;border-radius:50%;background:#e06c75;box-shadow:0 0 0 3px rgba(224,108,117,.16);}
+  @keyframes welcome-update-pulse{
+    0%,100%{box-shadow:0 0 0 0 rgba(224,108,117,.0);}
+    50%{box-shadow:0 0 0 4px rgba(224,108,117,.12);}
+  }
   .welcome-firstrun-tip{margin:0 0 22px 2px;font-size:11.5px;line-height:1.7;color:var(--text-4);}
 
   .welcome-section{margin-top:24px;}
@@ -119,6 +131,52 @@ export const WELCOME_CSS = `
   .welcome-update-actions-tip{font-size:11.5px;line-height:1.7;color:var(--text-4);}
   .welcome-update-repo{margin-top:9px;font-size:11.5px;}
 
+  .free-notice-mask{
+    position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;
+    padding:18px;background:rgba(16,24,20,.55);backdrop-filter:blur(10px);
+    animation:app-maintenance-fade .2s ease both;
+  }
+  .free-notice-card{
+    position:relative;width:min(560px,100%);max-height:calc(100vh - 36px);overflow-y:auto;
+    border:1px solid rgba(112,161,90,.4);border-radius:18px;padding:24px 24px 20px;
+    background:linear-gradient(160deg,#fff,#f4faef 72%);
+    box-shadow:0 30px 80px rgba(18,40,20,.32);color:var(--text);
+  }
+  .free-notice-close{
+    position:absolute;top:10px;right:12px;width:30px;height:30px;border:0;border-radius:9px;
+    background:rgba(0,0,0,.045);color:var(--text-3);font-size:20px;line-height:1;cursor:pointer;
+  }
+  .free-notice-badge{
+    display:inline-flex;align-items:center;height:22px;padding:0 10px;border-radius:999px;
+    background:#70a15a;color:#fff;font-size:11px;font-weight:700;letter-spacing:.06em;
+  }
+  .free-notice-title{margin:12px 0 10px;font-size:19px;line-height:1.4;color:var(--text);}
+  .free-notice-text{margin:0 0 16px;font-size:13px;line-height:1.9;color:var(--text-2);}
+  .free-notice-text strong{color:#c65b5b;}
+  .free-notice-group{
+    border:1px dashed rgba(112,161,90,.5);border-radius:14px;padding:14px 16px;
+    background:rgba(237,247,231,.65);text-align:center;
+  }
+  .free-notice-group-label{font-size:12px;color:var(--text-3);}
+  .free-notice-group-number{
+    margin:6px 0 4px;font-family:Consolas,"Cascadia Mono",ui-monospace,monospace;
+    font-size:30px;font-weight:800;letter-spacing:.08em;color:#4d7d3a;line-height:1.15;
+  }
+  .free-notice-group-help{font-size:12px;line-height:1.7;color:var(--text-3);margin-bottom:10px;}
+  .free-notice-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:16px;}
+  .free-notice-confirm{
+    height:34px;padding:0 18px;border:0;border-radius:10px;cursor:pointer;
+    background:linear-gradient(135deg,#70a15a,#5c8a45);color:#fff;font:inherit;font-size:13px;font-weight:700;
+  }
+  .free-notice-confirm:hover{filter:brightness(.97);}
+  .free-notice-foot{margin-top:12px;font-size:11px;line-height:1.7;color:var(--text-4);}
+  html[data-theme="dark"] .free-notice-card{
+    background:linear-gradient(160deg,#1d2420,#18201b);
+    border-color:rgba(112,161,90,.34);
+  }
+  html[data-theme="dark"] .free-notice-group{background:rgba(112,161,90,.12);}
+  html[data-theme="dark"] .free-notice-close{background:rgba(255,255,255,.08);color:#c9d3c3;}
+
   .app-maintenance-overlay{
     position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;
     background:rgba(255,255,255,.88);backdrop-filter:blur(7px);
@@ -169,6 +227,11 @@ export const WELCOME_CSS = `
     .welcome-update-label{width:100%;flex-basis:100%;}
     .welcome-update-select{max-width:none;}
     .welcome-footer{flex-direction:column;align-items:flex-start;}
+    .free-notice-card{padding:20px 16px 16px;}
+    .free-notice-title{font-size:17px;}
+    .free-notice-group-number{font-size:25px;}
+    .free-notice-actions{flex-direction:column;align-items:stretch;}
+    .free-notice-confirm{width:100%;}
   }
   @media(max-width:480px){
     .welcome-hero{flex-direction:column;}

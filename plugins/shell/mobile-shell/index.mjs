@@ -13,7 +13,7 @@
  * 可用 ?mobile=1 / ?mobile=0 强制开关，方便桌面调试。
  */
 export const name = 'mobile-shell'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '手机界面'
 export const description = '视觉框架 · 手机访问自动切换到单栏界面、底部导航与全屏设置。'
 export const author = '念风内核'
@@ -244,8 +244,20 @@ export function apply(ctx) {
       syncTitle()
       syncTabs()
     }),
-    events.on('view:registered', () => syncTabs()),
-    events.on('view:unregistered', () => syncTabs()),
+    events.on('view:registered', ({ id } = {}) => {
+      // 启动时 router.active() 可能来自上次持久化的视图（例如 logs / welcome），
+      // 而该视图插件比 mobile-shell 更晚注册。此时 initialPaneFor() 还不知道它是
+      // fullWidth，会先按 list 处理导致内容被 body.mobile-pane-list 隐藏；等它注册
+      // 后必须按真实 fullWidth 重新计算一次，否则日志 / 欢迎页首次进入就是空白。
+      if (id && id === router.active()) setPane(initialPaneFor(id))
+      syncTitle()
+      syncTabs()
+    }),
+    events.on('view:unregistered', ({ id } = {}) => {
+      if (!id || id === router.active()) setPane(initialPaneFor(router.active()))
+      syncTitle()
+      syncTabs()
+    }),
     events.on('settings:opened', () => {
       settingsOpen = true
       document.body.classList.add('mobile-settings-open')

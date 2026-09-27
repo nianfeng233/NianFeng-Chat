@@ -11,7 +11,7 @@
  *   - 同步后端请求日志，便于判断是超时、排队还是压根没发出去
  */
 export const name = 'settings-item-logs'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '视图 · 运行日志'
 export const description = '独立运行日志视图：模型调用阶段、工具 / 渠道消息 / 权限确认与后端运行日志。'
 export const author = '念风内核'
@@ -35,7 +35,9 @@ import { LOGS_CSS } from './style.mjs'
 
 const LEVEL_LABEL = { error: '错误', warn: '警告', info: '信息', debug: '调试' }
 const LEVEL_ORDER = ['error', 'warn', 'info', 'debug']
-const DEFAULT_LEVELS = ['info']
+// 与后端终端默认级别保持一致：终端默认打印 error / warn / info，页面也默认
+// 显示这三种；debug 两边都只在用户显式打开后才展示。
+const DEFAULT_LEVELS = ['error', 'warn', 'info']
 const MAX_ENTRIES = 4000
 const MAX_RENDER = 1200
 const PAGE_LIMIT = 2000
@@ -102,6 +104,15 @@ export function apply(ctx) {
       const readLevels = () => {
         const saved = config?.get?.('logs.levels', undefined)
         const list = Array.isArray(saved) ? saved : typeof saved === 'string' ? saved.split(',') : null
+        // 旧版默认只勾选「信息」，导致终端里的警告 / 错误在日志页默认看不到。
+        // 只迁移一次旧默认值；用户之后手动改回「只看信息」会被保留。
+        const migrated = config?.get?.('logs.levelsTerminalAligned', false) === true
+        const isLegacyInfoOnly = Array.isArray(list) && list.length === 1 && String(list[0] || '').trim() === 'info'
+        if (config && !migrated) {
+          if (isLegacyInfoOnly) config.set('logs.levels', [...DEFAULT_LEVELS])
+          config.set('logs.levelsTerminalAligned', true)
+        }
+        if (isLegacyInfoOnly && !migrated) return new Set(DEFAULT_LEVELS)
         const normalized = (list || DEFAULT_LEVELS).map(level => String(level || '').trim()).filter(level => LEVEL_LABEL[level])
         return new Set(normalized.length ? normalized : list ? [] : DEFAULT_LEVELS)
       }
@@ -117,12 +128,12 @@ export function apply(ctx) {
         <div class="settings-title-row">
           <div>
             <div class="settings-title">运行日志</div>
-            <div class="settings-desc">模型、工具、权限确认与渠道消息时间线（实时 SSE + 轮询兜底）；页面刷新或重启后端后历史仍保留。</div>
+            <div class="settings-desc">与后端终端 <code>runtime.log</code> 同源的日志时间线（实时 SSE + 轮询兜底）；终端默认显示什么，这里就默认显示什么。</div>
           </div>
         </div>
         <section class="settings-section">
           <div class="logs-toolbar">
-            <div class="logs-levels" data-logs-levels role="group" aria-label="日志级别" title="按类型自由勾选；默认只看信息">
+            <div class="logs-levels" data-logs-levels role="group" aria-label="日志级别" title="按类型自由勾选；默认与终端一致：错误 / 警告 / 信息">
               ${levelOptions}
             </div>
             <select data-logs-cat title="来源分类">
@@ -148,8 +159,9 @@ export function apply(ctx) {
             <div class="logs-empty">正在读取日志…</div>
           </div>
           <div class="logs-note">
-            WebUI 直接读取后端终端日志（<code>logs/runtime.log</code>）：模型请求开始 / 完成 / 错误、工具调用与耗时、敏感操作确认、
-            渠道消息收发都会实时出现；页面刷新不会清空，重启后端也会回读最近历史。
+            WebUI 直接读取后端终端日志（<code>logs/runtime.log</code>）：终端默认显示 <b>错误 / 警告 / 信息</b>，本页默认也显示这三类；
+            需要调试级日志时再在上方勾选「调试」。模型请求、工具调用、敏感操作确认与渠道消息收发都会实时出现；
+            页面刷新不会清空，重启后端也会回读最近历史。
             <span data-logs-backend-file></span>
             <span data-logs-sync-hint></span>
           </div>
@@ -191,6 +203,7 @@ export function apply(ctx) {
       let runtimeInstance = ''
       let latestRuntimeId = 0
       let backendTotal = 0
+      let backendConsoleLevel = 'info'
       let streamOnline = false
       let active = true
       // 本端落库产生的 message:added 与后端 sessions/changed 回放的是同一条消息；
@@ -357,7 +370,8 @@ export function apply(ctx) {
           const levelText = LEVEL_ORDER.filter(level => selectedLevels.has(level))
             .map(level => LEVEL_LABEL[level])
             .join('/')
-          statsEl.textContent = `${entries.length} 条 · 显示 ${visible.length} 条 · ${levelText || '未选级别'} · ${streamText}${
+          const terminalText = `终端默认 ${LEVEL_LABEL[backendConsoleLevel] || backendConsoleLevel || '信息'}`
+          statsEl.textContent = `${entries.length} 条 · 显示 ${visible.length} 条 · 页面 ${levelText || '未选级别'} · ${terminalText} · ${streamText}${
             paused ? ' · 已暂停' : ''
           }`
         }
@@ -408,13 +422,9 @@ export function apply(ctx) {
         const text = String(line.text || line.line || '').trim()
         if (!text) return false
         const name = String(line.name || 'backend')
-        let level = normalizeLevel(line.level)
-        if (isHttpAccessLog(text)) {
-          const status = Number((text.match(/→\s*(\d{3})/) || [])[1]) || 0
-          // 成功请求访问日志不展示；失败请求保留为告警 / 错误，便于排查接口异常。
-          if (status < 400) return false
-          level = status >= 500 ? 'error' : 'warn'
-        }
+        // 直接使用后端 runtime.log 里的原始级别 / 内容：终端默认打印什么，页面
+        // 默认筛选（error / warn / info）就展示什么，不再单独吞掉 HTTP 访问行。
+        const level = normalizeLevel(line.level)
         return add({
           at: Number(line.at) || Date.now(),
           level,
@@ -514,6 +524,7 @@ export function apply(ctx) {
             const instance = String(data?.instance || '')
             const instanceChanged = !!(instance && runtimeInstance && instance !== runtimeInstance)
             if (instance) runtimeInstance = instance
+            if (data?.consoleLevel) backendConsoleLevel = normalizeLevel(data.consoleLevel)
             latest = Number(data?.latestId) || 0
             backendTotal = Number(data?.total) || 0
             // 后端进程换了，或日志被清空后 id 回退：清掉增量游标，从头完整拉取。

@@ -9,7 +9,7 @@
  * 数据全部来自 channel-registry（D6），渠道类型来自渠道插件注册表。
  */
 export const name = 'channel-list'
-export const version = '1.0.0'
+export const version = '1.0.1'
 export const displayName = '渠道列表'
 export const description = '视觉内容 · 渠道分组列表、拖拽排序与添加渠道。'
 export const author = '念风内核'
@@ -184,6 +184,9 @@ export function apply(ctx) {
 
     const onPointerDown = e => {
       if (e.button !== 0) return
+      // 触摸 / 触控笔的纵向移动必须留给页面原生滚动；否则手机端在渠道条目上
+      // 往下拖会进入“拖拽排序”并 preventDefault，表现为渠道列表无法上下翻。
+      if (e.pointerType && e.pointerType !== 'mouse') return
       const item = e.target.closest('.channel-item')
       if (!item) return
       const startX = e.clientX
@@ -233,6 +236,12 @@ export function apply(ctx) {
       currentDropTarget = null
     }
 
+    const onPointerCancel = () => {
+      if (!drag) return
+      cleanupDrag()
+      drag = null
+    }
+
     let currentDropTarget = null
     const updateDropTarget = (x, y) => {
       const el = document.elementFromPoint(x, y)
@@ -266,6 +275,7 @@ export function apply(ctx) {
     groupsEl.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('pointermove', onPointerMove)
     window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
 
     /* ---------------- 顶部操作 ---------------- */
     const onTabClick = e => {
@@ -374,6 +384,7 @@ export function apply(ctx) {
       groupsEl.removeEventListener('pointerdown', onPointerDown)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
       tabsEl.removeEventListener('click', onTabClick)
       searchInput.removeEventListener('input', onSearch)
       addBtn.removeEventListener('click', onAdd)

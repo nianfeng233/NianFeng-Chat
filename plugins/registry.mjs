@@ -64,9 +64,9 @@ export const plugins = [
   },
   {
     "id": "qqbot",
-    "version": "1.5.1",
+    "version": "1.6.0",
     "displayName": "QQ官方机器人",
-    "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则、多机器人联动、SILK 语音与被动回复。",
+    "description": "渠道插件 · QQ 官方机器人扫码/凭据接入、本地沙箱免白名单、私聊与群聊绑定、群规则（文本 / 原生艾特）、多机器人联动、SILK 语音与被动回复。",
     "author": "念风插件",
     "core": false,
     "enabled": true,
@@ -1971,7 +1971,7 @@ export const plugins = [
   },
   {
     "id": "mobile-shell",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "手机界面",
     "description": "视觉框架 · 手机访问自动切换到单栏界面、底部导航与全屏设置。",
     "author": "念风内核",
@@ -2164,7 +2164,7 @@ export const plugins = [
   },
   {
     "id": "channel-detail-host",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "displayName": "渠道详情",
     "description": "视觉内容 · 渠道详情与基础操作入口。",
     "author": "念风内核",
@@ -2197,7 +2197,7 @@ export const plugins = [
   },
   {
     "id": "channel-list",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "渠道列表",
     "description": "视觉内容 · 渠道分组列表、拖拽排序与添加渠道。",
     "author": "念风内核",
@@ -2239,7 +2239,7 @@ export const plugins = [
   },
   {
     "id": "channel-view",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "displayName": "渠道视图",
     "description": "视觉内容 · 渠道视图入口。",
     "author": "念风内核",
@@ -2909,7 +2909,7 @@ export const plugins = [
   },
   {
     "id": "settings-item-logs",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "displayName": "视图 · 运行日志",
     "description": "独立运行日志视图：模型调用阶段、工具 / 渠道消息 / 权限确认与后端运行日志。",
     "author": "念风内核",
@@ -3305,9 +3305,9 @@ export const plugins = [
   },
   {
     "id": "welcome-view",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "displayName": "视图 · 欢迎",
-    "description": "独立视图：项目介绍、本体版本更新 / 重启、官方仓库 / QQ 群与免费开源声明。",
+    "description": "独立视图：项目介绍、进入页面时的版本更新通知 / 欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。",
     "author": "念风内核",
     "core": true,
     "enabled": true,

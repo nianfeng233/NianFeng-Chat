@@ -91,6 +91,7 @@ export const CHANNEL_LIST_CSS = `
     cursor:pointer;font-size:13px;color:var(--text-2);
     transition:background .14s ease, color .14s ease;
     min-width:0;
+    touch-action:pan-y;
   }
   .channel-item:hover{background:var(--bg-hover);color:var(--text);}
   .channel-item.active{background:rgba(255,255,255,.85);color:var(--accent);box-shadow:0 1px 2px rgba(30,60,20,.06);}

@@ -1649,8 +1649,8 @@ async function main() {
   )
   const levelInput = lvl => document.querySelector(`[data-logs-level="${lvl}"]`)
   check(
-    '日志页默认只勾选“信息”，其它类型不勾选',
-    levelInput('info')?.checked === true && ['error', 'warn', 'debug'].every(lvl => levelInput(lvl)?.checked === false),
+    '日志页默认与终端一致：勾选错误 / 警告 / 信息，不勾选调试',
+    ['error', 'warn', 'info'].every(lvl => levelInput(lvl)?.checked === true) && levelInput('debug')?.checked === false,
     JSON.stringify([...document.querySelectorAll('[data-logs-level]')].map(input => ({ level: input.dataset.logsLevel, checked: input.checked }))),
   )
   check(
@@ -1677,7 +1677,7 @@ async function main() {
   await sleep(40)
   check(
     '日志级别勾选组合会持久化',
-    JSON.stringify(ctx.inject('config').get('logs.levels')) === JSON.stringify(['info', 'debug']),
+    JSON.stringify(ctx.inject('config').get('logs.levels')) === JSON.stringify(['error', 'warn', 'info', 'debug']),
     JSON.stringify(ctx.inject('config').get('logs.levels')),
   )
   logsRouter.switch('chat')
@@ -1686,16 +1686,21 @@ async function main() {
   await sleep(60)
   check(
     '重新打开日志页仍保留勾选组合',
-    levelInput('info')?.checked === true && levelInput('debug')?.checked === true && levelInput('warn')?.checked === false,
+    ['error', 'warn', 'info', 'debug'].every(lvl => levelInput(lvl)?.checked === true),
     JSON.stringify([...document.querySelectorAll('[data-logs-level]')].map(input => ({ level: input.dataset.logsLevel, checked: input.checked }))),
   )
-  // 还原默认，避免后续断言受日志噪音影响。
+  // 还原为与终端一致的默认组合，避免后续断言受调试日志噪音影响。
   const debugLevelInputAfter = levelInput('debug')
   if (debugLevelInputAfter) {
     debugLevelInputAfter.checked = false
     debugLevelInputAfter.dispatchEvent({ type: 'change' })
   }
   await sleep(20)
+  check(
+    '取消调试后恢复为终端一致的错误 / 警告 / 信息组合',
+    JSON.stringify(ctx.inject('config').get('logs.levels')) === JSON.stringify(['error', 'warn', 'info']),
+    JSON.stringify(ctx.inject('config').get('logs.levels')),
+  )
   backend.ctx.logger.info('SMOKE_RUNTIME_LOG_LINE')
   await sleep(150)
   logsRouter.switch('chat')
@@ -1738,14 +1743,14 @@ async function main() {
     `${entriesBeforeRefresh} -> ${entriesAfterRefresh}`,
   )
 
-  // 访问日志噪音（HTTP POST /api/xxx → 200）不应出现在日志页。
+  // 终端默认能看到 info 级的访问日志，页面默认也应当能看到，保证两边同步。
   backend.ctx.logger.info('HTTP POST /api/smoke-noise → 200 · 1ms')
   await sleep(40)
   refreshLogsBtn?.click()
-  await sleep(220)
+  const noiseShown = await waitFor(() => String(document.querySelector('.logs-list')?.textContent || '').includes('/api/smoke-noise'), { timeout: 2000 })
   check(
-    '日志页不展示 HTTP 访问日志噪音',
-    !String(document.querySelector('.logs-list')?.textContent || '').includes('/api/smoke-noise'),
+    '日志页默认展示终端可见的 HTTP 访问日志（内容与终端同步）',
+    !!noiseShown,
     String(document.querySelector('.logs-list')?.textContent || '').slice(-200),
   )
   logsRouter.switch('chat')

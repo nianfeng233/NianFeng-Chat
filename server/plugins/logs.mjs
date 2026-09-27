@@ -540,6 +540,8 @@ export function apply(ctx) {
         file: store.file(),
         version: store.version,
         instance: store.instanceId(),
+        // 后端终端当前级别：日志页用它提示“终端默认显示什么”，便于对照。
+        consoleLevel: store.consoleLevel(),
         lines: store.query({ limit, before, after }),
         total: store.total(),
         latestId: store.latestId(),

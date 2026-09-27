@@ -11,7 +11,7 @@
  * 渠道类型由渠道插件注册；未安装的渠道不会出现在「添加渠道」菜单里。
  */
 export const name = 'channel-detail-host'
-export const version = '3.0.0'
+export const version = '3.0.1'
 export const displayName = '渠道详情'
 export const description = '视觉内容 · 渠道详情与基础操作入口。'
 export const author = '念风内核'
