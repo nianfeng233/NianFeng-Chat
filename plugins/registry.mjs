@@ -3305,9 +3305,9 @@ export const plugins = [
   },
   {
     "id": "welcome-view",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "displayName": "视图 · 欢迎",
-    "description": "独立视图：项目介绍、进入页面时的版本更新通知 / 欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。",
+    "description": "独立视图：项目介绍、进入页面时的版本更新弹窗（含更新说明 / 交流群 / 免费声明，每版只提示一次）、欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。",
     "author": "念风内核",
     "core": true,
     "enabled": true,

@@ -23,9 +23,9 @@ import { fetchPublicText } from '../net-guard.mjs'
 import { spawnUpdateHelper } from '../update-runner.mjs'
 
 export const name = 'app-update'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '本体更新'
-export const description = '业务服务 · 读取 GitHub Release、选择 Web / EXE 安装包并执行整体更新。'
+export const description = '业务服务 · 读取 GitHub Release（含更新说明）、选择 Web / EXE 安装包并执行整体更新。'
 export const author = '念风内核'
 export const icon = '⬆️'
 export const core = true
@@ -223,6 +223,9 @@ export function apply(ctx, config = {}) {
       version: tag.replace(/^v/i, ''),
       prerelease: raw?.prerelease === true,
       publishedAt: Date.parse(raw?.published_at || '') || 0,
+      // Release 正文用于 WebUI 更新弹窗内滚动查看；过长时截断，避免接口膨胀。
+      body: String(raw?.body || '').slice(0, 20000),
+      htmlUrl: String(raw?.html_url || ''),
       compatible: !!asset,
       asset: asset
         ? {

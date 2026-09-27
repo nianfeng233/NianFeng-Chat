@@ -177,6 +177,67 @@ export const WELCOME_CSS = `
   html[data-theme="dark"] .free-notice-group{background:rgba(112,161,90,.12);}
   html[data-theme="dark"] .free-notice-close{background:rgba(255,255,255,.08);color:#c9d3c3;}
 
+  /* 版本更新弹窗：顶部固定交流群 / 免费声明，中部可滚动查看 Release 内容。 */
+  .update-notice-mask{
+    position:fixed;inset:0;z-index:99997;display:flex;align-items:center;justify-content:center;
+    padding:18px;background:rgba(16,24,20,.55);backdrop-filter:blur(10px);
+    animation:app-maintenance-fade .2s ease both;
+  }
+  .update-notice-card{
+    position:relative;width:min(680px,100%);max-height:calc(100vh - 36px);
+    display:flex;flex-direction:column;overflow:hidden;
+    border:1px solid rgba(112,161,90,.4);border-radius:18px;
+    background:var(--panel-solid,#fff);
+    box-shadow:0 30px 80px rgba(18,40,20,.32);color:var(--text);
+  }
+  .update-notice-top{
+    flex:0 0 auto;z-index:2;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:10px 18px;background:linear-gradient(135deg,#edf7e7,#d9efcb);
+    border-bottom:1px solid rgba(112,161,90,.22);
+    font-size:11.5px;color:#4d7d3a;
+  }
+  .update-notice-free{font-weight:700;color:#4d7d3a;}
+  .update-notice-group b{
+    font-family:Consolas,"Cascadia Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:13px;color:#356b26;
+  }
+  .update-notice-free-tip{color:#66805b;}
+  .update-notice-head{flex:0 0 auto;padding:18px 20px 8px;}
+  .update-notice-title{margin:0;font-size:20px;line-height:1.35;color:var(--text);}
+  .update-notice-title span{color:#5c8a45;}
+  .update-notice-sub{margin-top:6px;font-size:12.5px;color:var(--text-3);}
+  .update-notice-body{
+    flex:1 1 auto;min-height:120px;max-height:46vh;overflow-y:auto;overflow-x:hidden;
+    margin:6px 20px 0;padding:12px 14px;border:1px solid var(--border);border-radius:12px;
+    background:rgba(0,0,0,.025);
+    font-size:12.5px;line-height:1.85;color:var(--text-2);
+    white-space:pre-wrap;word-break:break-word;
+    -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  }
+  .update-notice-foot{
+    flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+    padding:14px 20px 18px;
+  }
+  .update-notice-link{font-size:11.5px;color:var(--accent);text-decoration:none;word-break:break-all;}
+  .update-notice-link:hover{text-decoration:underline;}
+  .update-notice-actions{display:flex;align-items:center;gap:9px;margin-left:auto;}
+  .update-notice-btn{
+    height:34px;padding:0 18px;border-radius:10px;cursor:pointer;font:inherit;font-size:13px;font-weight:700;
+    border:1px solid var(--border-strong);background:rgba(255,255,255,.85);color:var(--text-2);
+    transition:filter .15s ease,transform .15s ease,background .15s ease;
+  }
+  .update-notice-btn.ghost:hover{background:rgba(0,0,0,.04);color:var(--text);}
+  .update-notice-btn.primary{
+    border-color:rgba(112,161,90,.42);background:linear-gradient(135deg,#edf7e7,#d9efcb);color:#5c8a45;
+  }
+  .update-notice-btn.primary:hover{filter:brightness(.97);transform:translateY(-1px);}
+  html[data-theme="dark"] .update-notice-card{background:linear-gradient(160deg,#1d2420,#18201b);border-color:rgba(112,161,90,.34);}
+  html[data-theme="dark"] .update-notice-top{background:linear-gradient(135deg,rgba(112,161,90,.22),rgba(112,161,90,.1));border-color:rgba(112,161,90,.25);}
+  html[data-theme="dark"] .update-notice-title span{color:#a8cf8f;}
+  html[data-theme="dark"] .update-notice-body{background:rgba(255,255,255,.035);border-color:rgba(255,255,255,.08);}
+  html[data-theme="dark"] .update-notice-btn.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.14);color:var(--text-2);}
+  html[data-theme="dark"] .update-notice-btn.primary{background:rgba(112,161,90,.2);border-color:rgba(112,161,90,.4);color:#b8d9a6;}
+
   .app-maintenance-overlay{
     position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;
     background:rgba(255,255,255,.88);backdrop-filter:blur(7px);
@@ -232,6 +293,15 @@ export const WELCOME_CSS = `
     .free-notice-group-number{font-size:25px;}
     .free-notice-actions{flex-direction:column;align-items:stretch;}
     .free-notice-confirm{width:100%;}
+    .update-notice-card{max-height:calc(100dvh - 20px);border-radius:14px;}
+    .update-notice-top{padding:9px 12px;gap:6px;}
+    .update-notice-head{padding:14px 14px 6px;}
+    .update-notice-title{font-size:17px;}
+    .update-notice-body{margin:4px 14px 0;max-height:48vh;padding:10px 11px;}
+    .update-notice-foot{padding:12px 14px 16px;flex-direction:column;align-items:stretch;}
+    .update-notice-link{order:2;margin-top:6px;}
+    .update-notice-actions{margin-left:0;width:100%;}
+    .update-notice-btn{flex:1;padding:0 10px;}
   }
   @media(max-width:480px){
     .welcome-hero{flex-direction:column;}

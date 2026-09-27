@@ -12,9 +12,9 @@
  * 因为共享偏好而互相覆盖。
  */
 export const name = 'welcome-view'
-export const version = '1.3.0'
+export const version = '1.4.0'
 export const displayName = '视图 · 欢迎'
-export const description = '独立视图：项目介绍、进入页面时的版本更新通知 / 欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。'
+export const description = '独立视图：项目介绍、进入页面时的版本更新弹窗（含更新说明 / 交流群 / 免费声明，每版只提示一次）、欢迎页新版本标志、每次启动项目的免费声明弹窗、官方仓库 / QQ 群与一键更新。'
 export const author = '念风内核'
 export const icon = '👋'
 export const core = true
@@ -46,6 +46,7 @@ import { WELCOME_CSS } from './style.mjs'
 const SEEN_NS = 'onboarding'
 const SEEN_KEY = 'welcomeSeen'
 const UPDATE_SOURCE_KEY = 'appUpdate.source'
+const UPDATE_DISMISSED_KEY = 'updateNoticeDismissedTag'
 const MAINTENANCE_KEY = 'nianfeng:maintenance'
 // 免费声明弹窗按“后端进程 build”记录：同一进程内 UI 刷新不再弹，
 // 项目重启后 build 变化，重新弹出（符合“重启项目而不是重启 UI”）。
@@ -229,6 +230,7 @@ export function apply(ctx) {
 
   /** 最近一次检测到的可更新版本（模块 / 页面级缓存，欢迎页挂载时复用）。 */
   let updateNotice = null
+  let pendingSelectTag = ''
   let updateNotificationSent = false
   let freeNoticeShown = false
   let startupNoticesStarted = false
@@ -355,7 +357,33 @@ export function apply(ctx) {
     })
   }
 
-  const openUpdatePanel = () => {
+  /** 当前版本是否已经提示并关闭过；只按“版本 tag”记忆一次。 */
+  const readDismissedUpdateTag = () => {
+    try {
+      return String(storage.get(SEEN_NS, UPDATE_DISMISSED_KEY, '') || '').trim()
+    } catch (_) {
+      return ''
+    }
+  }
+
+  const rememberDismissedUpdate = tag => {
+    const value = String(tag || '').trim()
+    if (!value) return
+    try {
+      storage.set(SEEN_NS, UPDATE_DISMISSED_KEY, value)
+    } catch (_) {
+      /* 存储不可用时仅当前页面生效 */
+    }
+  }
+
+  const updateNoticeBodyText = notice => {
+    const raw = String(notice?.release?.body || '').trim()
+    if (raw) return raw.slice(0, 20000)
+    return `本次发布版本：${notice?.tag || ''}\n\n可在欢迎页「版本与更新」中选择目标版本并查看完整说明。`
+  }
+
+  const openUpdatePanel = (notice = updateNotice) => {
+    pendingSelectTag = String(notice?.tag || '').trim()
     try {
       if (router.active() !== 'welcome') router.switch('welcome')
     } catch (_) {
@@ -364,30 +392,102 @@ export function apply(ctx) {
     if (typeof document === 'undefined') return
     setTimeout(() => {
       document.querySelector('.welcome-update-section')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-    }, 120)
+      const tag = String(notice?.tag || '').trim()
+      if (!tag) return
+      const select = document.querySelector('[data-update-release]')
+      if (!select) return
+      const hasOption = [...(select.options || [])].some(option => option.value === tag)
+      if (!hasOption) return
+      try {
+        select.value = tag
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      } catch (_) {
+        /* 老浏览器 / 测试 DOM 缺少 Event 时忽略，欢迎页刷新后会自行选中 */
+      }
+    }, 160)
   }
 
-  const showUpdateNotification = notice => {
-    if (!notice || updateNotificationSent) return
-    updateNotificationSent = true
-    const body = `检测到新版本 ${notice.tag}${notice.current ? `（当前 ${notice.current}）` : ''}，可在欢迎页选择更新。`
-    const notification = ctx.registry.get('notification')
-    if (notification?.notify) {
-      try {
-        notification.notify({
-          kind: 'system',
-          title: '发现念风 Chat 新版本',
-          body,
-          sound: false,
-          system: true,
-          onClick: openUpdatePanel,
-        })
-        return
-      } catch (err) {
-        ctx.logger.debug(`发送更新通知失败：${err?.message || err}`)
+  /**
+   * 新版本弹窗：每个 Release tag 只提示一次。
+   * 用户点「暂不更新」或「前往更新」后都会记住该 tag；下次刷新 / 重开 WebUI
+   * 不再弹同一个版本；但如果发布了更新的版本，仍会再次弹出。
+   */
+  const showUpdatePopup = notice => {
+    if (!notice?.tag || updateNotificationSent) return false
+    if (typeof document === 'undefined') {
+      updateNotificationSent = true
+      const text = `已发布 ${notice.tag}${notice.current ? `（当前 ${notice.current}）` : ''}，是否前往更新？`
+      const notification = ctx.registry.get('notification')
+      if (notification?.notify) {
+        try {
+          notification.notify({
+            kind: 'system',
+            title: '发现念风 Chat 新版本',
+            body: text,
+            sound: false,
+            system: true,
+            onClick: () => openUpdatePanel(notice),
+          })
+          return true
+        } catch (_) {
+          /* 通知服务不可用时忽略 */
+        }
       }
+      ctx.registry.get('toast')?.info?.(text)
+      return true
     }
-    ctx.registry.get('toast')?.info?.(body)
+    if (document.querySelector('[data-update-notice]')) return false
+    if (readDismissedUpdateTag() === String(notice.tag).trim()) return false
+
+    updateNotificationSent = true
+    const bodyText = updateNoticeBodyText(notice)
+    const releaseUrl = String(
+      notice.release?.htmlUrl || `${PROJECT_REPO}/releases/tag/${encodeURIComponent(notice.tag)}`,
+    )
+    const overlay = document.createElement('div')
+    overlay.className = 'update-notice-mask'
+    overlay.dataset.updateNotice = '1'
+    overlay.innerHTML = `
+      <div class="update-notice-card" role="dialog" aria-modal="true" aria-labelledby="update-notice-title">
+        <div class="update-notice-top">
+          <span class="update-notice-free">本项目完全免费 · 开源发布</span>
+          <span class="update-notice-group">官方交流群 <b>${escapeHtml(PROJECT_QQ_GROUP)}</b></span>
+          <span class="update-notice-free-tip">若为付费购买，请立即申请退款并举报。</span>
+        </div>
+        <div class="update-notice-head">
+          <h2 class="update-notice-title" id="update-notice-title">已发布 <span>${escapeHtml(notice.tag)}</span></h2>
+          <div class="update-notice-sub">当前 v${escapeHtml(notice.current || '')} → ${escapeHtml(notice.tag)}</div>
+        </div>
+        <div class="update-notice-body" tabindex="0">${escapeHtml(bodyText)}</div>
+        <div class="update-notice-foot">
+          <a class="update-notice-link" href="${escapeHtml(releaseUrl)}" target="_blank" rel="noopener noreferrer">查看完整 Release 说明</a>
+          <div class="update-notice-actions">
+            <button class="update-notice-btn ghost" type="button" data-update-notice-close>暂不更新</button>
+            <button class="update-notice-btn primary" type="button" data-update-notice-go>前往更新</button>
+          </div>
+        </div>
+      </div>`
+    document.body.appendChild(overlay)
+
+    let closed = false
+    const close = ({ go = false } = {}) => {
+      if (closed) return
+      closed = true
+      rememberDismissedUpdate(notice.tag)
+      document.removeEventListener('keydown', onKey)
+      overlay.remove()
+      if (go) openUpdatePanel(notice)
+    }
+    const onKey = event => {
+      if (event.key === 'Escape') close()
+    }
+    overlay.querySelector('[data-update-notice-close]')?.addEventListener('click', () => close())
+    overlay.querySelector('[data-update-notice-go]')?.addEventListener('click', () => close({ go: true }))
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) close()
+    })
+    document.addEventListener('keydown', onKey)
+    return true
   }
 
   /** 进入 WebUI 时检查 Release：有兼容的新版本就提示并写欢迎页标志。 */
@@ -396,7 +496,9 @@ export function apply(ctx) {
       const source = readUpdateSource()
       const [info, data] = await Promise.all([
         api.appUpdateInfo().catch(() => null),
-        api.appReleases(source, false),
+        // 进入 / 刷新 WebUI 时强制刷新一次 Release 列表，避免后端 5 分钟缓存
+        // 让“刚发布的新版本”延迟出现；失败时后端仍会回退到缓存。
+        api.appReleases(source, true),
       ])
       const current = String(info?.version || ctx.registry.get('app')?.version || '')
         .trim()
@@ -404,6 +506,7 @@ export function apply(ctx) {
       const releases = Array.isArray(data?.releases) ? data.releases : []
       const currentPreview = /-/.test(current)
       let matched = null
+      let matchedPublishedAt = -1
       for (const release of releases) {
         if (!release?.tag || release.compatible === false) continue
         // 稳定版用户默认不提示预览版，避免把预览线当成正式更新；
@@ -411,8 +514,13 @@ export function apply(ctx) {
         if (!currentPreview && release.prerelease === true) continue
         const version = String(release.version || release.tag).replace(/^v/i, '')
         if (updateDirection(version, current) !== 'update') continue
-        matched = { ...release, version }
-        break
+        // 同一基础版本的稳定版 / 预览版互判为可更新，不能只按 semver 顺序取第一个，
+        // 否则预览线用户可能先命中时间更早的正式版。这里取发布时间最新的可更新 Release。
+        const publishedAt = Number(release.publishedAt) || 0
+        if (!matched || publishedAt >= matchedPublishedAt) {
+          matched = { ...release, version }
+          matchedPublishedAt = publishedAt
+        }
       }
       if (!matched) {
         updateNotice = null
@@ -428,7 +536,7 @@ export function apply(ctx) {
         kindLabel: data?.kindLabel || info?.kindLabel || '',
       }
       syncUpdateBadges()
-      showUpdateNotification(updateNotice)
+      showUpdatePopup(updateNotice)
       return updateNotice
     } catch (err) {
       ctx.logger.debug(`检查版本更新失败：${err?.message || err}`)
@@ -688,7 +796,13 @@ export function apply(ctx) {
             return
           }
           const versionOfCurrent = currentVersion()
-          if (!updateState.selectedTag || !releases.some(item => item.tag === updateState.selectedTag)) {
+          const pendingRelease =
+            pendingSelectTag && releases.find(item => item.tag === pendingSelectTag && item.compatible)
+          if (pendingRelease) {
+            // 从更新弹窗点「前往更新」时，明确把目标版本切到本次提示的 Release。
+            updateState.selectedTag = pendingRelease.tag
+            pendingSelectTag = ''
+          } else if (!updateState.selectedTag || !releases.some(item => item.tag === updateState.selectedTag)) {
             const preferred =
               (updateNotice?.tag && releases.find(item => item.tag === updateNotice.tag && item.compatible)) ||
               releases.find(item => item.version === versionOfCurrent && item.compatible) ||
@@ -916,6 +1030,7 @@ export function apply(ctx) {
           }
           if (event.target.matches('[data-update-release]')) {
             updateState.selectedTag = event.target.value
+            pendingSelectTag = ''
             syncUpdateButtons()
           }
         }
