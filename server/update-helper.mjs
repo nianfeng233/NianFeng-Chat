@@ -295,6 +295,70 @@ async function ensurePidGone(plan, pid, { timeoutMs = 90000, label = '旧实例'
   return true
 }
 
+/**
+ * 旧实例退出后，处理承载它的启动窗口。
+ *
+ * 旧版本的更新只看 nodePid 是否退出，没有考虑启动 .cmd 所在的 cmd.exe：
+ *   - 双击启动的窗口通常会在 node 退出后自己结束；
+ *   - 从已有 cmd / 终端里执行启动脚本时，脚本结束后会回到提示符，窗口一直留着；
+ *   - 如果更新助手此时正在替换 `启动念风.cmd`，还可能让旧 cmd 读到被替换一半的
+ *     批处理，出现「Not enough memory resources are available to process this command.」
+ *     之类的报错并卡在提示符。
+ *
+ * 发布包里的启动脚本会设置 NIANFENG_LAUNCHER=1，表示这个父进程就是念风专用
+ * 启动窗口。这里先给旧脚本一点自然退出的时间；仍存活且带标记时再结束它，
+ * 确保后续替换启动脚本 / 拉起新窗口时不会留下旧终端。
+ * 源码 / 手动启动（没有标记）不会被误关。
+ */
+async function settleLauncherShell(plan) {
+  const shellPid = Number(plan?.parentPid) || 0
+  const nodePid = Number(plan?.nodePid) || 0
+  if (!shellPid || shellPid === process.pid || shellPid === nodePid) return false
+  if (!isProcessAlive(shellPid)) {
+    await logLine(plan, '旧启动窗口已随旧实例自动关闭')
+    return true
+  }
+
+  if (plan?.closeParentShell === true) {
+    // 专用启动窗口：旧 node 退出后很快执行完批处理并关闭；留一个短窗口即可，
+    // 避免旧 cmd 继续读被替换的 .cmd 文件。
+    const deadline = Date.now() + 1200
+    while (Date.now() < deadline && isProcessAlive(shellPid)) await sleep(120)
+    if (!isProcessAlive(shellPid)) {
+      await logLine(plan, '旧启动窗口已随旧实例自动关闭')
+      return true
+    }
+    await writeUpdateStatus(plan, {
+      phase: 'stop',
+      phaseText: '正在关闭旧启动窗口',
+      message: '旧实例已退出，正在关闭旧启动窗口后继续更新…',
+      received: plan?._status?.received || 0,
+      total: plan?._status?.total || 0,
+      percent: plan?._status?.percent || 0,
+    })
+    try {
+      await killProcess(plan, shellPid, '启动窗口')
+      await logLine(plan, '旧启动窗口已关闭')
+      return true
+    } catch (err) {
+      // 关不掉不应阻断更新；后面替换启动脚本时会尽量重试，用户也可手动关闭。
+      await logLine(plan, `旧启动窗口未能自动关闭（不影响更新继续）：${err?.message || err}`)
+      return false
+    }
+  }
+
+  // 未标记为专用启动窗口（源码 / 手动运行）：给双击启动的 cmd 自然退出的时间，
+  // 但绝不主动结束可能正在被用户使用的终端。
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline && isProcessAlive(shellPid)) await sleep(200)
+  if (!isProcessAlive(shellPid)) {
+    await logLine(plan, '旧启动窗口已随旧实例自动关闭')
+    return true
+  }
+  await logLine(plan, '旧终端仍在运行，但未标记为念风启动脚本；跳过自动关闭，避免误关用户正在使用的终端')
+  return false
+}
+
 
 async function downloadFile(plan, urls, dest, expectedSize = 0) {
   const list = (Array.isArray(urls) ? urls : [urls]).map(value => toText(value).trim()).filter(Boolean)
@@ -497,9 +561,15 @@ async function launchVisible(plan, fallbackCwd) {
       '@echo off',
       'chcp 65001 >nul',
       'setlocal',
+      'set "NIANFENG_LAUNCHER=1"',
       `cd /d ${quoteForCmd(target.cwd)}`,
       `${quoteForCmd(target.node)} ${target.args.map(quoteForCmd).join(' ')}`,
-      'if errorlevel 1 pause',
+      'set "NIANFENG_EXIT=%ERRORLEVEL%"',
+      'if not "%NIANFENG_EXIT%"=="0" (',
+      '  echo.',
+      '  echo 念风已退出（退出码 %NIANFENG_EXIT%），窗口将在 10 秒后自动关闭…',
+      '  timeout /t 10 /nobreak >nul',
+      ')',
       '',
     ]
     await writeFile(script, lines.join('\r\n'), 'utf8')
@@ -629,6 +699,9 @@ async function applyWebUpdate(plan) {
   })
   await extractZip(plan, zipFile, extractDir)
   const sourceDir = await normalizeExtractRoot(extractDir)
+  // 替换启动脚本前先处理旧启动窗口：避免旧 cmd.exe 正在读取
+  // `启动念风.cmd` 时文件被替换，出现内存报错 / 卡在提示符。
+  await settleLauncherShell(plan)
   await writeUpdateStatus(plan, {
     phase: 'replace',
     phaseText: '正在替换程序文件',
@@ -792,3 +865,6 @@ if (isDirectRun) {
     process.exit(1)
   })
 }
+
+// 供更新流程回归测试使用；作为助手脚本直接运行时不会走到这里。
+export { settleLauncherShell, isProcessAlive }

@@ -271,6 +271,12 @@ export function apply(ctx, config = {}) {
   const buildUpdatePlan = ({ kind, source, release }) => {
     const homeDir = String(process.env.NIANFENG_HOME_DIR || '').trim()
     const desktopExe = String(process.env.NIANFENG_DESKTOP_EXE || '').trim()
+    // 发布包里的启动 .cmd 会设置 NIANFENG_LAUNCHER=1；更新助手据此确认
+    // 父进程是「念风专用启动窗口」，才允许在旧实例退出后自动关闭它，避免
+    // 旧 cmd 窗口一直挂在 D:\...\deploy> 提示符上。
+    const launcherManaged = /^(1|true|yes|on)$/i.test(String(process.env.NIANFENG_LAUNCHER || '').trim())
+    // 允许用户显式保留旧终端：set NIANFENG_KEEP_OLD_TERMINAL=1 后再启动。
+    const keepOldTerminal = /^(1|true|yes|on)$/i.test(String(process.env.NIANFENG_KEEP_OLD_TERMINAL || '').trim())
     const shared = {
       action: 'update',
       kind,
@@ -279,6 +285,10 @@ export function apply(ctx, config = {}) {
       targetVersion: release.version,
       currentVersion: version,
       nodePid: process.pid,
+      // 旧实例的父进程（通常是启动 .cmd 所在的 cmd.exe）。更新助手在旧 Node
+      // 退出后先等它自然关闭；仍未关闭且确认由启动脚本托管时再主动结束。
+      parentPid: Number(process.ppid) || 0,
+      closeParentShell: launcherManaged && !keepOldTerminal,
       assetName: release.asset.name,
       expectedSize: release.asset.size,
       downloadUrls: assetCandidates(release.asset.url, source),
