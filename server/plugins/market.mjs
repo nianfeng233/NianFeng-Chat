@@ -1,7 +1,7 @@
 /*
- * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风Chat（NianFengChat）
- * 仓库：https://github.com/nianfeng233/NianFengChat
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
  */
 /**
  * 后端 · plugin-market
@@ -55,15 +55,15 @@ const ZIP_MAX_BYTES = 32 * 1024 * 1024
 const REPO_CONCURRENCY = 4
 
 const JSON_HEADERS = {
-  'User-Agent': 'NianFengChat-Market/1.0',
+  'User-Agent': 'NianFeng-Chat-Market/1.0',
   Accept: 'application/json, text/plain, */*',
 }
 const GITHUB_HEADERS = {
-  'User-Agent': 'NianFengChat-Market/1.0',
+  'User-Agent': 'NianFeng-Chat-Market/1.0',
   Accept: 'application/vnd.github+json',
 }
 const ARCHIVE_HEADERS = {
-  'User-Agent': 'NianFengChat-Market/1.0',
+  'User-Agent': 'NianFeng-Chat-Market/1.0',
   Accept: 'application/zip, application/octet-stream, */*',
 }
 
@@ -123,7 +123,7 @@ export function apply(ctx) {
     const base = officialIndexUrl()
     const list = GITHUB_MIRROR_PROXIES.map(proxy => `${proxy}${base}`)
     if (base === OFFICIAL_MARKET_INDEX_URL) {
-      list.push(`https://cdn.jsdelivr.net/gh/nianfeng233/NianFengChat-Plugins@main/index.json`)
+      list.push(`https://cdn.jsdelivr.net/gh/nianfeng233/NianFeng-Chat-Plugins@main/index.json`)
     }
     list.push(base)
     return [...new Set(list)]

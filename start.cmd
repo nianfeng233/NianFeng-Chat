@@ -1,15 +1,15 @@
 @echo off
-rem 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
-rem 项目全称：念风Chat（NianFengChat）
-rem 仓库：https://github.com/nianfeng233/NianFengChat
+rem 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+rem 项目全称：念风 Chat（NianFeng-Chat）
+rem 仓库：https://github.com/nianfeng233/NianFeng-Chat
 chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
-title 念风Chat
+title 念风chat
 
 echo.
 echo   ============================================
-echo    念风Chat  （后端 + WebUI 一键启动）
+echo    念风chat  （后端 + WebUI 一键启动）
 echo   ============================================
 echo.
 

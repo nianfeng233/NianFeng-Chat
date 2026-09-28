@@ -1,7 +1,7 @@
 /*
- * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风Chat（NianFengChat）
- * 仓库：https://github.com/nianfeng233/NianFengChat
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
  */
 /**
  * 后端 · app-update
@@ -40,7 +40,7 @@ const MIRROR_PROXIES = ['https://ghproxy.net/', 'https://gh-proxy.com/', 'https:
 const RELEASES_TTL = 5 * 60 * 1000
 const RELEASES_MAX_BYTES = 4 * 1024 * 1024
 const GITHUB_HEADERS = {
-  'User-Agent': 'NianFengChat-Updater/1.0',
+  'User-Agent': 'NianFeng-Chat-Updater/1.0',
   Accept: 'application/vnd.github+json',
 }
 
@@ -92,7 +92,7 @@ export function apply(ctx, config = {}) {
     } catch (_) {
       /* 使用下面的兜底仓库 */
     }
-    return { owner: 'nianfeng233', name: 'NianFengChat' }
+    return { owner: 'nianfeng233', name: 'NianFeng-Chat' }
   })()
   const releasesApi = `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/releases?per_page=100`
 

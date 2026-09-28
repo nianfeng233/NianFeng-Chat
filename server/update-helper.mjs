@@ -1,7 +1,7 @@
 /*
- * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风Chat（NianFengChat）
- * 仓库：https://github.com/nianfeng233/NianFengChat
+ * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风 Chat（NianFeng-Chat）
+ * 仓库：https://github.com/nianfeng233/NianFeng-Chat
  */
 /**
  * 本体更新 / 重启助手（独立进程）。
@@ -89,7 +89,7 @@ function buildProgressScript() {
   return [
     'param([string]$StatusPath)',
     "$ErrorActionPreference = 'SilentlyContinue'",
-    "try { $Host.UI.RawUI.WindowTitle = '念风Chat 更新' } catch {}",
+    "try { $Host.UI.RawUI.WindowTitle = '念风 Chat 更新' } catch {}",
     '$started = Get-Date',
     'while ((((Get-Date) - $started).TotalHours -lt 2)) {',
     '  $raw = Get-Content -LiteralPath $StatusPath -Raw',
@@ -98,7 +98,7 @@ function buildProgressScript() {
     '    if ($s) {',
     '      Clear-Host',
     "      Write-Host ''",
-    "      Write-Host '  念风Chat 正在更新' -ForegroundColor Green",
+    "      Write-Host '  念风 Chat 正在更新' -ForegroundColor Green",
     "      Write-Host ''",
     '      $phase = [string]$s.phaseText',
     '      if (-not $phase) { $phase = [string]$s.phase }',
@@ -305,7 +305,7 @@ async function downloadFile(plan, urls, dest, expectedSize = 0) {
       const response = await fetch(url, {
         redirect: 'follow',
         headers: {
-          'User-Agent': 'NianFengChat-Updater/1.0',
+          'User-Agent': 'NianFeng-Chat-Updater/1.0',
           Accept: 'application/octet-stream, application/zip, */*',
         },
         signal: AbortSignal.timeout(15 * 60 * 1000),
