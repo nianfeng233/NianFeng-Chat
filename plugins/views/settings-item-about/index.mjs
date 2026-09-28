@@ -1,7 +1,7 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风 Chat（NianFeng-Chat）
- * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风Chat（NianFengChat）
+ * 仓库：https://github.com/nianfeng233/NianFengChat
  */
 /**
  * V23 · settings-item-about
@@ -48,8 +48,8 @@ export function apply(ctx) {
               <div class="about-head">
                 <div class="about-mark">念</div>
                 <div>
-                  <div class="setting-name" style="font-size:15px">念风chat</div>
-                  <div class="about-version">NianFeng-Chat · Version ${escapeHtml(appVersion)} · 插件化架构</div>
+                  <div class="setting-name" style="font-size:15px">念风Chat</div>
+                  <div class="about-version">NianFengChat · Version ${escapeHtml(appVersion)} · 插件化架构</div>
                     <div class="about-version">后端终端为业务本体；WebUI 加载视觉与操作插件，业务执行由后端常驻代聊处理。</div>
                     <div class="about-version">本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）</div>
                 </div>

@@ -1,7 +1,7 @@
 <!--
 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
 项目全称：念风Chat（NianFengChat）
-仓库：https://github.com/nianfeng233/NianFeng-Chat
+仓库：https://github.com/nianfeng233/NianFengChat
 -->
 # NianFengChat
 
@@ -21,7 +21,7 @@ a Windows desktop application.
 
 - Current version: v2.2.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
-- Repository: <https://github.com/nianfeng233/NianFeng-Chat>
+- Repository: <https://github.com/nianfeng233/NianFengChat>
 - Official QQ group: 1109357470
 
 ## Core capabilities

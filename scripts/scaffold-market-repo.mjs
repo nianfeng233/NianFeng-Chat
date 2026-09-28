@@ -1,14 +1,14 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风 Chat（NianFeng-Chat）
- * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风Chat（NianFengChat）
+ * 仓库：https://github.com/nianfeng233/NianFengChat
  */
 /**
  * 生成「官方插件仓库」脚手架。
  *
  * 用法：node scripts/scaffold-market-repo.mjs [--out <目录>] [--git]
  *
- * 默认把 extensions/ 下现有的外部插件复制到 <项目>/.local/NianFeng-Chat-Plugins，
+ * 默认把 extensions/ 下现有的外部插件复制到 <项目>/.local/NianFengChat-Plugins，
  * 按插件市场标准格式生成：
  *   - market.json         仓库内的插件清单（含 id / version / path / SHA-256）
  *   - index.json          市场索引（指向本仓库，作为官方源默认地址）
@@ -16,7 +16,7 @@
  *   - scripts/build-market.mjs  后续维护者重新生成清单
  *
  * 生成后把该目录推送到 GitHub（默认假定为
- * https://github.com/nianfeng233/NianFeng-Chat-Plugins）即可。
+ * https://github.com/nianfeng233/NianFengChat-Plugins）即可。
  */
 import { cp, mkdir, readdir, rm, writeFile, copyFile, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -29,9 +29,9 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const args = process.argv.slice(2)
 const outIndex = args.findIndex(item => item === '--out')
 const outArg = outIndex >= 0 ? args[outIndex + 1] : args.find(item => !item.startsWith('--'))
-const OUT = resolve(outArg || join(ROOT, '.local', 'NianFeng-Chat-Plugins'))
+const OUT = resolve(outArg || join(ROOT, '.local', 'NianFengChat-Plugins'))
 const initGit = args.includes('--git')
-const REPO_URL = 'https://github.com/nianfeng233/NianFeng-Chat-Plugins'
+const REPO_URL = 'https://github.com/nianfeng233/NianFengChat-Plugins'
 const BRANCH = 'main'
 const PLUGIN_SOURCE_DIR = join(ROOT, 'extensions')
 
@@ -152,7 +152,7 @@ main().catch(err => {
 
 const README = `# 念风官方插件仓库
 
-本仓库是念风 Chat 的官方插件市场源，格式同时兼容第三方仓库使用。
+本仓库是念风Chat 的官方插件市场源，格式同时兼容第三方仓库使用。
 
 ## 文件说明
 
@@ -178,7 +178,7 @@ node scripts/build-market.mjs
 ## 发布
 
 \`\`\`bash
-git remote add origin https://github.com/nianfeng233/NianFeng-Chat-Plugins.git
+git remote add origin https://github.com/nianfeng233/NianFengChat-Plugins.git
 git add -A
 git commit -m "更新插件市场清单"
 git push -u origin main

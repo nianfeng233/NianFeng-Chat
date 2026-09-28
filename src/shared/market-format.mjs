@@ -1,7 +1,7 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风 Chat（NianFeng-Chat）
- * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风Chat（NianFengChat）
+ * 仓库：https://github.com/nianfeng233/NianFengChat
  */
 /**
  * 插件市场公共格式（库，不是插件）。
@@ -14,10 +14,10 @@
  *   - 每条插件记录至少包含 id / version / path / hash，安装前后用 hash 校验内容。
  */
 
-export const OFFICIAL_MARKET_REPO = 'https://github.com/nianfeng233/NianFeng-Chat-Plugins'
+export const OFFICIAL_MARKET_REPO = 'https://github.com/nianfeng233/NianFengChat-Plugins'
 export const OFFICIAL_MARKET_BRANCH = 'main'
 export const OFFICIAL_MARKET_INDEX_URL =
-  'https://raw.githubusercontent.com/nianfeng233/NianFeng-Chat-Plugins/main/index.json'
+  'https://raw.githubusercontent.com/nianfeng233/NianFengChat-Plugins/main/index.json'
 export const MARKET_INDEX_FILENAME = 'index.json'
 export const MARKET_MANIFEST_FILENAMES = ['nianfeng-market.json', 'market.json', 'plugins.json']
 export const MARKET_DEFAULT_BRANCH = 'main'

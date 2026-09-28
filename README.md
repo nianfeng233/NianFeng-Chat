@@ -1,7 +1,7 @@
 <!--
 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
 项目全称：念风Chat（NianFengChat）
-仓库：https://github.com/nianfeng233/NianFeng-Chat
+仓库：https://github.com/nianfeng233/NianFengChat
 -->
 # 念风Chat（NianFengChat）
 
@@ -15,7 +15,7 @@
 
 - 当前版本：v2.2.0
 - 许可证：Apache License 2.0（见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)）
-- 仓库：<https://github.com/nianfeng233/NianFeng-Chat>
+- 仓库：<https://github.com/nianfeng233/NianFengChat>
 - 官方 QQ 群：1109357470
 
 ## 核心能力

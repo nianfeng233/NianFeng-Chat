@@ -1,6 +1,6 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目：念风 Chat（NianFeng-Chat）
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目：念风Chat（NianFengChat）
  *
  * 微信 Clawbot 后端桥（参考 Tencent/openclaw-weixin 的 HTTP JSON API）。
  *
@@ -34,7 +34,7 @@ const DEFAULT_BASE_URL =
 const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
 const ENC_PREFIX = 'enc:v1:'
 const STATE_FILE = 'clawbot.json'
-const BASE_INFO = { channel_version: '1.0.0', bot_agent: 'NianFeng-Chat/1.0.0 WeChatClawbot/1.0.0' }
+const BASE_INFO = { channel_version: '1.0.0', bot_agent: 'NianFengChat/1.0.0 WeChatClawbot/1.0.0' }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const trimSlash = value => String(value || '').replace(/\/+$/, '')

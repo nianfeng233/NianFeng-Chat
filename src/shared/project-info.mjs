@@ -1,7 +1,7 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风 Chat（NianFeng-Chat）
- * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风Chat（NianFengChat）
+ * 仓库：https://github.com/nianfeng233/NianFengChat
  */
 /**
  * 项目公共信息（库，不是插件）。
@@ -10,9 +10,9 @@
  * 许可证的位置都从这里取值，避免在多处各写一份。浏览器端与 Node 端均可导入。
  */
 
-export const PROJECT_NAME = '念风 Chat'
-export const PROJECT_FULL_NAME = '念风 Chat（NianFeng-Chat）'
-export const PROJECT_REPO = 'https://github.com/nianfeng233/NianFeng-Chat'
+export const PROJECT_NAME = '念风Chat'
+export const PROJECT_FULL_NAME = '念风Chat（NianFengChat）'
+export const PROJECT_REPO = 'https://github.com/nianfeng233/NianFengChat'
 export const PROJECT_QQ_GROUP = '1109357470'
 export const PROJECT_LICENSE = 'Apache License 2.0'
 export const PROJECT_TAGLINE = '本地优先、插件化的 AI 聊天客户端'

@@ -1,11 +1,11 @@
 /*
- * 念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
- * 项目全称：念风 Chat（NianFeng-Chat）
- * 仓库：https://github.com/nianfeng233/NianFeng-Chat
+ * 念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+ * 项目全称：念风Chat（NianFengChat）
+ * 仓库：https://github.com/nianfeng233/NianFengChat
  *
  * 一次性迁移脚本：把历史命名（念风 / NianFeng / nianfeng / NIANFENG_）统一改为
  * 念风 / NianFeng / nianfeng / NIANFENG_，并给项目内所有文本文件补上
- * “念风chat”文件头标记。JSON 文件不支持注释，只做命名替换。
+ * “念风Chat”文件头标记。JSON 文件不支持注释，只做命名替换。
  */
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { extname, join, relative } from 'node:path'
@@ -22,17 +22,17 @@ const SKIP_EXTS = new Set([
   '.pdf', '.db', '.sqlite', '.sqlite3', '.pyc', '.wasm', '.mp3', '.mp4', '.webm',
 ])
 const SKIP_FILES = new Set(['LICENSE'])
-const HEADER_MARK = '念风chat'
-const REPO = 'https://github.com/nianfeng233/NianFeng-Chat'
+const HEADER_MARK = '念风Chat'
+const REPO = 'https://github.com/nianfeng233/NianFengChat'
 
 function rebrand(text) {
   let out = String(text)
   out = out.replace(/https:\/\/github\.com\/nianfeng233\/nianfeng-chat/g, REPO)
-  out = out.replace(/github\.com\/nianfeng233\/nianfeng-chat/g, 'github.com/nianfeng233/NianFeng-Chat')
+  out = out.replace(/github\.com\/nianfeng233\/nianfeng-chat/g, 'github.com/nianfeng233/NianFengChat')
   out = out.replace(/念风\s*·\s*AI\s*Chat/g, '念风Chat')
   out = out.replace(/念风\s+AI\s+Chat/g, '念风Chat')
-  out = out.replace(/NianFeng\s*·\s*AI\s*Chat/g, 'NianFeng-Chat')
-  out = out.replace(/NianFeng\s+AI\s+Chat/g, 'NianFeng-Chat')
+  out = out.replace(/NianFeng\s*·\s*AI\s*Chat/g, 'NianFengChat')
+  out = out.replace(/NianFeng\s+AI\s+Chat/g, 'NianFengChat')
   out = out.replace(/念风/g, '念风')
   out = out.replace(/NIANFENG_/g, 'NIANFENG_')
   out = out.replace(/NianFeng/g, 'NianFeng')
@@ -44,8 +44,8 @@ function rebrand(text) {
 
 function headerBlock(ext, fileName) {
   const lines = [
-    '念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）',
-    '项目全称：念风 Chat（NianFeng-Chat）',
+    '念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）',
+    '项目全称：念风Chat（NianFengChat）',
     `仓库：${REPO}`,
   ]
   if (ext === '.html' || ext === '.htm' || ext === '.md' || ext === '.markdown') return `<!--\n${lines.join('\n')}\n-->`

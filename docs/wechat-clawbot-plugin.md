@@ -1,7 +1,7 @@
 <!--
-念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
-项目全称：念风 Chat（NianFeng-Chat）
-仓库：https://github.com/nianfeng233/NianFeng-Chat
+念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风Chat（NianFengChat）
+仓库：https://github.com/nianfeng233/NianFengChat
 -->
 # 微信clawbot 渠道插件 · 更新说明
 
@@ -53,9 +53,9 @@
 
 ## 4. 项目重命名
 
-- 中文名：**念风Chat**；英文名：**NianFeng-Chat**；仓库：`https://github.com/nianfeng233/NianFeng-Chat`
+- 中文名：**念风Chat**；英文名：**NianFengChat**；仓库：`https://github.com/nianfeng233/NianFengChat`
 - 包名：`nianfeng-chat`；桌面端产物：`念风Chat.exe`
-- 旧品牌环境变量与旧安装目录指针已统一替换为念风相关名称；所有文本源文件补充了“念风chat”文件头标记
+- 旧品牌环境变量与旧安装目录指针已统一替换为念风相关名称；所有文本源文件补充了“念风Chat”文件头标记
 - 应用数据目录新增 `nianfeng` / `NianFengChat`，并保留旧目录一次性回退读取，避免升级丢数据
 
 ## 5. 头像统一修复
