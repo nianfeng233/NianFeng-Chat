@@ -1,13 +1,13 @@
 <!--
-念风Chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
-项目全称：念风Chat（NianFengChat）
-仓库：https://github.com/nianfeng233/NianFengChat
+念风chat · 本地优先、插件化的 AI 聊天客户端（cordis v4 内核 + Node 本地后端）
+项目全称：念风 Chat（NianFeng-Chat）
+仓库：https://github.com/nianfeng233/NianFeng-Chat
 -->
-# NianFengChat
+# NianFeng-Chat
 
 English | [简体中文](README.md)
 
-NianFengChat is a local-first, plugin-based AI chat client. Both the frontend and the local backend run on cordis,
+NianFeng-Chat is a local-first, plugin-based AI chat client. Both the frontend and the local backend run on cordis,
 and features are organized as plugins. The plugin directory and the data directory can both be
 placed outside the application directory. The same source tree builds both a Web deployment and
 a Windows desktop application.
@@ -21,12 +21,12 @@ a Windows desktop application.
 
 - Current version: v2.2.0
 - License: Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE))
-- Repository: <https://github.com/nianfeng233/NianFengChat>
+- Repository: <https://github.com/nianfeng233/NianFeng-Chat>
 - Official QQ group: 1109357470
 
 ## Core capabilities
 
-NianFengChat builds memory, context, tools, channels, and the entire UI as cordis plugins.
+NianFeng-Chat builds memory, context, tools, channels, and the entire UI as cordis plugins.
 The points below are implemented today in code, with paths and commands you can verify.
 
 ### 1. Near-unlimited memory: full persistence + on-demand recall
