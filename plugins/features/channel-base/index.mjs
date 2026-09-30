@@ -68,11 +68,17 @@ export function apply(ctx) {
     return next
   }
 
+  const MESSAGE_MEDIA_KEYS = ['images', 'videos', 'files', 'audios', 'attachments']
+  const hasMessageMedia = message => {
+    const meta = message?.meta || {}
+    return MESSAGE_MEDIA_KEYS.some(key => Array.isArray(meta[key]) && meta[key].length > 0)
+  }
+
   const deliverable = message => {
     if (!message || message.role !== 'assistant') return false
     if (message.streaming || message.error) return false
     if (message.meta?.direction === 'outbound') return false
-    if (!String(message.content || '').trim() && !(Array.isArray(message.meta?.images) && message.meta.images.length)) return false
+    if (!String(message.content || '').trim() && !hasMessageMedia(message)) return false
     return true
   }
 

@@ -225,6 +225,36 @@ export function apply(ctx) {
         return true
       }
 
+      /**
+       * 手机端 CSS 已把 .logs-list 改成自然高度（不再自己滚动），因此“自动到底 /
+       * 判断是否到底 / 恢复滚动位置”都要作用在设置页外层滚动容器上；桌面仍用
+       * .logs-list 自己的滚动条，保持原行为。
+       */
+      const mobileScrollLayout = () => {
+        try {
+          return document.documentElement?.dataset?.mobileLayout === '1'
+        } catch (_) {
+          return false
+        }
+      }
+      const scrollContainer = () => (mobileScrollLayout() ? listEl?.closest?.('.settings-content') || listEl : listEl)
+      const currentScrollTop = () => Number(scrollContainer()?.scrollTop) || 0
+      const scrollToLatest = () => {
+        const target = scrollContainer()
+        if (!target) return
+        target.scrollTop = target.scrollHeight
+      }
+      const atScrollBottom = () => {
+        const target = scrollContainer()
+        if (!target) return true
+        return target.scrollHeight - target.scrollTop - target.clientHeight < 28
+      }
+      const restoreScrollTop = value => {
+        const target = scrollContainer()
+        if (!target) return
+        target.scrollTop = Math.min(Math.max(0, Number(value) || 0), Math.max(0, target.scrollHeight - target.clientHeight))
+      }
+
       /** 日志按时间排序；同一毫秒内保持进入列表的先后顺序。 */
       const compareEntries = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || a.id - b.id
 
@@ -342,7 +372,7 @@ export function apply(ctx) {
 
       const render = () => {
         if (!active || !listEl) return
-        const keepScrollTop = listEl.scrollTop
+        const keepScrollTop = currentScrollTop()
         const cat = catSelect?.value || ''
         const keyword = String(searchInput?.value || '').trim().toLowerCase()
         // 先按时间排序再过滤 / 截断：历史回填、SSE 与轮询混在一起时顺序仍然稳定。
@@ -386,9 +416,9 @@ export function apply(ctx) {
         // 时保留原位置，并显示“有新日志”提示，避免刷新/实时更新看起来没反应。
         if (autoScroll) {
           unseen = 0
-          if (!paused) listEl.scrollTop = listEl.scrollHeight
+          if (!paused) scrollToLatest()
         } else {
-          listEl.scrollTop = Math.min(keepScrollTop, Math.max(0, listEl.scrollHeight - listEl.clientHeight))
+          restoreScrollTop(keepScrollTop)
         }
         updateJumpBtn()
       }
@@ -868,7 +898,7 @@ export function apply(ctx) {
         updateJumpBtn()
         const result = await resyncFromBackend()
         render()
-        listEl.scrollTop = listEl.scrollHeight
+        scrollToLatest()
         if (result?.ok === false) toast?.error?.(`日志刷新失败：${result.error || '后端日志接口不可用'}`)
         else toast?.success?.(`日志已刷新 · 当前 ${entries.length} 条`)
       }
@@ -881,20 +911,22 @@ export function apply(ctx) {
         autoBtn?.classList.add('on')
         updateJumpBtn()
         render()
-        listEl.scrollTop = listEl.scrollHeight
+        scrollToLatest()
       }
       jumpBtn?.addEventListener('click', onJump)
       container.addEventListener('click', onClick)
 
+      const scrollerEl = scrollContainer()
       const onListScroll = () => {
         if (paused) return
-        const atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 28
+        const atBottom = atScrollBottom()
         autoScroll = atBottom
         if (autoScroll) unseen = 0
         autoBtn?.classList.toggle('on', autoScroll)
         updateJumpBtn()
       }
       listEl?.addEventListener('scroll', onListScroll)
+      if (scrollerEl && scrollerEl !== listEl) scrollerEl.addEventListener('scroll', onListScroll, { passive: true })
 
       // 级别勾选：可任意组合（例如只勾错误 + 调试），默认只有 info；改动持久化，
       // 下次打开 / 刷新页面（以及配置同步到其它端）后仍然保持。
@@ -971,6 +1003,7 @@ export function apply(ctx) {
         container.removeEventListener('click', onClick)
         for (const input of levelInputs) input.removeEventListener('change', onLevelChange)
         listEl?.removeEventListener('scroll', onListScroll)
+        if (scrollerEl && scrollerEl !== listEl) scrollerEl.removeEventListener('scroll', onListScroll)
         catSelect?.removeEventListener('change', render)
         searchInput?.removeEventListener('input', render)
       }

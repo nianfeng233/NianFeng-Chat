@@ -145,46 +145,83 @@ export function apply(ctx) {
   /** 保留权限层给出的真实原因（无权限 / 需要确认 / 用户拒绝），不要一律吞成“目标渠道不可用”。 */
   const denied = decision => ({ ok: false, code: decision.code, error: decision.error || '目标渠道不可用' })
 
+  const MEDIA_KINDS = new Set(['image', 'video', 'file', 'audio'])
+  const normalizeMediaKind = value => {
+    const kind = String(value || '').toLowerCase()
+    if (kind === 'record' || kind === 'voice') return 'audio'
+    return MEDIA_KINDS.has(kind) ? kind : ''
+  }
+  const mediaKindOf = raw => {
+    if (!raw || typeof raw !== 'object') return ''
+    return normalizeMediaKind(raw.type || raw.kind || raw.content_type || raw.contentType)
+  }
+
   /**
-   * chat_send 的 images 统一处理：
-   *   - model 给 data URL：优先存 image-service，消息里只留 imageId；
-   *   - http(s) 外链：保留 URL，由渠道桥下载/转存；
-   *   - 已经是 imageId 对象：透传。
+   * chat_send 附件统一处理：
+   *   - data URL 图片优先存 image-service，消息里只留 imageId；
+   *   - http(s) 外链 / 本地文件引用原样透传，由渠道桥下载 / 上传；
+   *   - video / file / audio 保留 url / dataUrl / file / base64，不强制转存。
    */
-  async function normalizeOutboundImages(input) {
+  async function normalizeOutboundMedia(input, fallbackKind = 'image') {
     const imageService = ctx.registry.get('image-service')
-    const list = (Array.isArray(input) ? input : []).slice(0, 4)
+    const list = (Array.isArray(input) ? input : input === undefined || input === null ? [] : [input]).slice(0, 4)
     const out = []
     for (const raw of list) {
-      const image =
-        typeof raw === 'string'
-          ? /^data:image\//i.test(raw)
-            ? { dataUrl: raw }
-            : { url: raw }
-          : raw || {}
-      if (image.id) {
-        out.push({ id: String(image.id), mime: image.mime || '', name: String(image.name || '').slice(0, 80) })
-        continue
+      const kind = mediaKindOf(raw) || fallbackKind
+      const media = typeof raw === 'string' ? { url: raw } : raw && typeof raw === 'object' ? raw : null
+      if (!media) continue
+      const rawDataUrl = media.dataUrl || media.data_url || ''
+      const rawSource = rawDataUrl || media.url || media.file || media.path || media.base64 || ''
+      if (!rawSource && !media.id) continue
+      const dataUrl = /^data:/i.test(String(rawDataUrl))
+        ? String(rawDataUrl)
+        : kind === 'image' && /^data:image\//i.test(String(rawSource))
+          ? String(rawSource)
+          : ''
+      const entry = {
+        type: kind,
+        id: String(media.id || media.imageId || media.image_id || '').trim(),
+        url: String(media.url || '').trim(),
+        dataUrl,
+        file: String(media.file || media.path || '').trim(),
+        base64: String(media.base64 || '').trim(),
+        mime: String(media.mime || media.contentType || media.content_type || '').trim(),
+        name: String(media.name || media.filename || media.fileName || media.file_name || '').slice(0, 120),
+        width: Number(media.width) || 0,
+        height: Number(media.height) || 0,
+        size: Number(media.size) || 0,
       }
-      const source = image.dataUrl || image.url || ''
-      if (!source) continue
-      if (/^data:image\//i.test(source) && imageService?.saveDataUrl) {
+      if (kind === 'image' && imageService?.saveDataUrl && (entry.dataUrl || /^data:image\//i.test(String(rawSource)))) {
         try {
-          out.push({ ...(await imageService.saveDataUrl(source, image)) })
+          const saved = await imageService.saveDataUrl(entry.dataUrl || String(rawSource), { ...media, mime: entry.mime })
+          out.push({ ...saved, type: 'image' })
           continue
         } catch (_) {
           /* 后端不可用时降级为 dataUrl 存在消息里 */
         }
       }
-      out.push({
-        id: '',
-        url: image.url || '',
-        dataUrl: image.dataUrl || '',
-        mime: image.mime || '',
-        name: String(image.name || '').slice(0, 80),
-      })
+      if (!entry.id && !entry.url && !entry.dataUrl && !entry.file && !entry.base64) continue
+      out.push(entry)
     }
     return out
+  }
+
+  const normalizeOutboundImages = input => normalizeOutboundMedia(input, 'image')
+
+  /** 从 chat_send 的单条消息参数里收集 images / videos / files / attachments。 */
+  async function normalizeChatAttachments(item = {}) {
+    const buckets = []
+    for (const [source, fallbackKind] of [
+      [item.images, 'image'],
+      [item.videos, 'video'],
+      [item.files, 'file'],
+      [item.audios, 'audio'],
+      [item.attachments, ''],
+    ]) {
+      if (source === undefined || source === null) continue
+      buckets.push(...(await normalizeOutboundMedia(source, fallbackKind)))
+    }
+    return buckets
   }
 
   /** 把工具结果消息裁到 token 预算内：至少保留第一条，超限时截断并标记。 */
@@ -624,6 +661,25 @@ export function apply(ctx) {
         if (text) expandedList.push(text)
       }
     }
+    // chat_send 的 images / videos / files / audios / attachments 是顶层参数时，
+    // 默认挂在最后一条消息上；如果 messages 为空（例如只发一个视频），自动补一条
+    // 空正文消息，交给附件归一化流程，而不是直接报“messages 不能为空”。
+    const topLevelMedia = {
+      images: args.images,
+      videos: args.videos,
+      files: args.files,
+      audios: args.audios,
+      attachments: args.attachments,
+    }
+    const hasTopLevelMedia = Object.values(topLevelMedia).some(value =>
+      Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null,
+    )
+    if (hasTopLevelMedia) {
+      if (!expandedList.length) expandedList.push({})
+      const lastIndex = expandedList.length - 1
+      const last = expandedList[lastIndex]
+      expandedList[lastIndex] = typeof last === 'string' ? { content: last, ...topLevelMedia } : { ...(last || {}), ...topLevelMedia }
+    }
     const sent = []
     const duplicates = []
     let reasoningAttached = false
@@ -637,24 +693,35 @@ export function apply(ctx) {
         if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         const item = typeof raw === 'string' ? { content: raw } : raw || {}
         const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-        const normalizedImages = await normalizeOutboundImages(item.images)
-        if (!content && !normalizedImages.length) continue
+        const attachments = await normalizeChatAttachments(item)
+        const images = attachments.filter(entry => entry.type === 'image')
+        const videos = attachments.filter(entry => entry.type === 'video')
+        const files = attachments.filter(entry => entry.type === 'file')
+        const audios = attachments.filter(entry => entry.type === 'audio')
+        if (!content && !attachments.length) continue
         const existing = content ? context.sentContents?.get(content) : null
-        if (existing && !normalizedImages.length) {
+        if (existing && !attachments.length) {
           duplicates.push({ content, message_id: existing })
           continue
+        }
+        const attachmentLabel = media => {
+          const name = media?.name || media?.id || media?.url || media?.file || ''
+          if (media?.type === 'video') return `[视频${name ? `：${name}` : ''}]`
+          if (media?.type === 'audio') return `[语音${name ? `：${name}` : ''}]`
+          if (media?.type === 'file') return `[文件${name ? `：${name}` : ''}]`
+          return '[图片]'
         }
         // 首条消息不延迟；从第二条开始，按字数计算 0.5s ~ 5s 的动态延迟
         if (simulate && delivery.count > 0) {
           emitTyping(true)
-          await sleep(typingDelayMs(content || '[图片]'), context.entry)
+          await sleep(typingDelayMs(content || attachmentLabel(attachments[0])), context.entry)
           emitTyping(false)
           if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
         }
         const message = store.append(conversationId, {
           role: 'assistant',
           content,
-          content_type: item.content_type || (normalizedImages.length && !content ? 'image' : 'text'),
+          content_type: item.content_type || (!content && attachments.length ? attachments[0].type : 'text'),
           sender_id: `role_${targetConv.id}`,
           sender_name: targetConv.name,
           is_bot: true,
@@ -665,7 +732,10 @@ export function apply(ctx) {
             round: context.round,
             channel: channelId,
             ...(context.reasoningContent && !reasoningAttached ? { reasoningContent: context.reasoningContent } : {}),
-            ...(normalizedImages.length ? { images: normalizedImages } : {}),
+            ...(images.length ? { images } : {}),
+            ...(videos.length ? { videos } : {}),
+            ...(files.length ? { files } : {}),
+            ...(audios.length ? { audios } : {}),
           },
         })
         if (!message) continue
@@ -1123,7 +1193,7 @@ export function apply(ctx) {
       'chat_send',
       {
         description:
-          '发送一条或多条短聊天消息；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，单条消息正文不要包含换行符（\\n），想发两句就传两个数组项，否则同一气泡里会出现奇怪的折行；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发大段长文 / 资料 / 文献时改用 send_document。',
+          '发送一条或多条短聊天消息，并可夹带图片 / 视频 / 语音 / 文件附件；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，单条消息正文不要包含换行符（\\n），想发两句就传两个数组项，否则同一气泡里会出现奇怪的折行；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发送本地已下载或模型已知直链的媒体时，用 attachments（type=image/video/file/audio）或 videos / files 参数；NapCat 支持 图片/视频/语音/文件，QQ 官方机器人支持 图片/视频/语音/文件。用户让把某个视频 / 文件发到某渠道时，不要只发标题或链接，也不要说自己不会，直接把可下载的 https URL / 本地文件路径作为附件发出去。大段长文 / 资料仍用 send_document。',
         parameters: {
           type: 'object',
           properties: {
@@ -1138,9 +1208,35 @@ export function apply(ctx) {
               items: { type: 'string' },
               description: '可选图片列表：可以是 https 图片 URL 或 data:image/...;base64,... 数据。一般只在确实需要发图时使用，单次最多 4 张。',
             },
+            videos: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选视频列表：https 视频直链或本地文件路径 / data URL，单次最多 4 个；仅目标渠道支持视频时使用。',
+            },
+            files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选文件列表：https 直链或本地文件路径，单次最多 4 个；NapCat / QQ 官方机器人等支持文件直发的渠道可传。',
+            },
+            attachments: {
+              type: 'array',
+              description:
+                '多格式附件（与 images / videos / files 二选一即可）：每项形如 {"type":"video","url":"https://.../a.mp4","name":"a.mp4"}，type=image/video/file/audio；也可用 file 传本地路径、data_url 传 data:；单次最多 4 个。',
+              items: {
+                type: 'object',
+                properties: {
+                  type: { type: 'string', enum: ['image', 'video', 'file', 'audio'] },
+                  url: { type: 'string', description: 'https 直链。' },
+                  data_url: { type: 'string', description: 'data:...;base64,... 数据。' },
+                  file: { type: 'string', description: '本地文件路径；仅后端本机渠道可直接读取。' },
+                  name: { type: 'string', description: '文件名 / 展示名。' },
+                  mime: { type: 'string', description: 'MIME 类型，可省略。' },
+                },
+                required: ['type'],
+              },
+            },
             end: { type: 'boolean', description: 'true=发送后结束本轮；false=发送后继续下一步。' },
           },
-          required: ['messages'],
         },
       },
       chatSend,

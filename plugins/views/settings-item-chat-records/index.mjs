@@ -45,8 +45,9 @@ const CSS = `
     flex:0 0 250px;min-width:210px;max-height:660px;overflow:auto;
     padding:10px;border-radius:14px;background:var(--glass-bg);border:1px solid var(--border);
   }
-  .record-list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .record-list-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px}
   .record-list-head strong{font-size:13px}
+  .record-list-sub{display:block;margin-top:2px;font-size:10.5px;color:var(--text-4)}
   .record-group{margin-bottom:10px}
   .record-group-title{padding:4px 6px;font-size:11.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .record-search-wrap{margin-bottom:8px}
@@ -60,13 +61,17 @@ const CSS = `
   .record-role-name{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .record-role-count{flex:0 0 auto;font-size:10.5px;color:var(--text-4)}
   .record-role-body{padding:0 6px 6px 22px}
-  .record-channel{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:7px 9px;margin-bottom:3px;border:none;border-radius:9px;background:transparent;color:var(--text);font-size:12px;cursor:pointer;text-align:left}
+  .record-channel{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px;width:100%;padding:7px 9px;margin-bottom:3px;border:none;border-radius:9px;background:transparent;color:var(--text);font-size:12px;cursor:pointer;text-align:left}
   .record-channel span{display:flex;flex-direction:column;gap:1px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .record-channel b{font-size:11.5px;color:var(--text-2);font-weight:600}
   .record-channel em{font-style:normal;font-size:10.5px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .record-channel small{flex:0 0 auto;color:var(--text-4);font-size:10.5px}
+  .record-channel small{flex:0 0 auto;color:var(--text-4);font-size:10.5px;line-height:1.35;text-align:right;white-space:nowrap}
+  .record-channel small i{display:block;font-style:normal;color:var(--text-4);opacity:.85}
+  .record-channel-clear{flex:0 0 auto;width:26px;height:26px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
+  .record-channel-clear:hover{background:rgba(198,91,91,.12);color:#c65b5b}
   .record-channel:hover{background:rgba(255,255,255,.55)}
   .record-channel.active{background:var(--accent-soft);color:var(--accent)}
+  .record-channel.active small{color:var(--accent)}
   .record-empty{padding:16px 8px;color:var(--text-4);font-size:12px;text-align:center}
   .record-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
   .record-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -124,6 +129,16 @@ const CSS = `
   .record-editor-error{display:none;padding:7px 10px;border-radius:8px;background:rgba(198,91,91,.1);border:1px solid rgba(198,91,91,.3);color:#c65b5b;font-size:12px}
   .record-editor-error.show{display:block}
   .record-editor-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
+  /* 手机端改用设置页外层作为唯一滚动容器：聊天记录列表 / 卡片不再各自嵌套滚动，
+     避免手指落在列表里时外层滚不动、落在列表外时又滑不到底。 */
+  html[data-mobile-layout="1"] .record-page{flex-direction:column;min-height:0;gap:10px}
+  html[data-mobile-layout="1"] .record-list{flex:0 0 auto;width:100%;max-height:none;overflow:visible}
+  html[data-mobile-layout="1"] .record-main{flex:0 0 auto;width:100%}
+  html[data-mobile-layout="1"] .record-cards{flex:0 0 auto;min-height:0;max-height:none;overflow:visible;padding-right:0}
+  html[data-mobile-layout="1"] .record-source{min-height:220px;height:auto}
+  html[data-mobile-layout="1"] .record-query{width:100%}
+  html[data-mobile-layout="1"] .record-role-body{padding-left:10px}
+  html[data-mobile-layout="1"] .record-channel{padding:9px 10px}
 `
 
 export function apply(ctx) {
@@ -160,9 +175,12 @@ export function apply(ctx) {
         `
         <div class="record-page">
           <aside class="record-list">
-            <div class="record-list-head"><strong>角色 / 渠道</strong><button class="record-btn" data-record-refresh-list>刷新</button></div>
+            <div class="record-list-head">
+              <div><strong>角色</strong><span class="record-list-sub">按角色分组 · 展开查看渠道</span></div>
+              <button class="record-btn" data-record-refresh-list>刷新</button>
+            </div>
               <div class="record-search-wrap">
-                <input class="record-search" data-record-search placeholder="搜索角色名或渠道 ID" autocomplete="off" spellcheck="false" />
+                <input class="record-search" data-record-search placeholder="搜索角色名 / 渠道名 / 渠道 ID" autocomplete="off" spellcheck="false" />
               </div>
             <div data-record-list></div>
           </aside>
@@ -501,9 +519,109 @@ export function apply(ctx) {
         }
       }
 
+      const CHANNEL_KIND_LABEL = {
+        napcat: 'NapCat QQ',
+        qqbot: 'QQ 官方机器人',
+        bilibili: '哔哩哔哩',
+        'wechat-clawbot': '微信 clawbot',
+        nova: 'Nova 网页',
+      }
       const channelKindLabel = channelId => {
         const kind = String(channelId || '').split(':')[0]
-        return { nova: 'Nova 网页', 'wechat-clawbot': '微信clawbot' }[kind] || kind || '渠道'
+        return CHANNEL_KIND_LABEL[kind] || kind || '渠道'
+      }
+      const formatRecordTime = value => {
+        const at = Date.parse(value || '')
+        if (!Number.isFinite(at)) return ''
+        const date = new Date(at)
+        const pad = number => String(number).padStart(2, '0')
+        return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+      }
+      /** 分组标题固定取角色会话 / 角色元数据里的名字，不能用某个渠道会话的名字顶替。 */
+      const roleNameOf = (roleId, allItems = []) => {
+        const roleConv = sessions.get(String(roleId || ''))
+        const direct = String(roleConv?.name || roleConv?.meta?.roleName || '').trim()
+        if (direct) return direct
+        const fallback = String(sessions.get(allItems[0]?.conversationId)?.name || '').trim()
+        if (fallback) return fallback.split(' · ')[0] || fallback
+        return String(roleId || '未知角色')
+      }
+      /** 渠道显示名 + 渠道信息：优先渠道自己的目标名 / 对端名，而不是拿角色名或最新会话名充数。 */
+      const channelDisplay = record => {
+        const conv = sessions.get(record.conversationId)
+        const meta = conv?.meta || {}
+        const kind = channelKindLabel(record.channelId)
+        const groupLabel = record.group === 'group' ? '群聊' : record.group === 'privacy' ? '隐私' : '私聊'
+        const infoBits = [kind, groupLabel]
+        const pushId = (label, value) => {
+          const text = String(value || '').trim()
+          if (!text) return
+          const bit = `${label} ${text}`
+          if (!infoBits.includes(bit)) infoBits.push(bit)
+        }
+        pushId('UID', meta.bilibiliPeerUid)
+        pushId(meta.napcatTargetType === 'group' ? '群' : 'QQ', meta.napcatTargetId)
+        pushId('群 openid', meta.qqGroupOpenid)
+        const firstBinding = Array.isArray(meta.bindings) ? meta.bindings[0] : null
+        pushId(firstBinding?.sessionType === 'group' ? '群 openid' : 'openid', firstBinding?.peerId)
+        let name = ''
+        if (meta.bilibiliPeerName) name = String(meta.bilibiliPeerName)
+        else if (meta.napcatTargetName) name = String(meta.napcatTargetName)
+        else if (meta.targetName) name = String(meta.targetName)
+        else if (firstBinding?.alias) name = String(firstBinding.alias)
+        else if (meta.peerName) name = String(meta.peerName)
+        if (!name && conv?.name) {
+          const parts = String(conv.name).split(' · ')
+          name = (parts.length > 1 ? parts.slice(1).join(' · ') : parts[0]) || kind
+        }
+        return { name: name || kind, info: infoBits.join(' · ') }
+      }
+      const channelMatches = (record, keyword) => {
+        if (!keyword) return true
+        const display = channelDisplay(record)
+        return (
+          display.name.toLowerCase().includes(keyword) ||
+          display.info.toLowerCase().includes(keyword) ||
+          String(record.channelId).toLowerCase().includes(keyword)
+        )
+      }
+      const clearChannelMessages = async channelId => {
+        const record = store.channelRecord(channelId)
+        if (!record) return
+        const display = channelDisplay(record)
+        const count = countOfRecord(record)
+        if (modal) {
+          const confirmed = await modal.confirm(
+            '清空这份聊天记录？',
+            `将清空「${display.name}」的全部消息（${count} 条）。渠道连接和长期记忆不会受影响，清空后无法恢复。`,
+          )
+          if (!confirmed?.ok) return
+        }
+        try {
+          if (typeof store.clearMessages === 'function') store.clearMessages(channelId)
+          else {
+            const conv = sessions.get(record.conversationId)
+            if (conv && typeof sessions.clearMessages === 'function') sessions.clearMessages(conv.id)
+          }
+          if (activeChannel === channelId) {
+            activeChannel = null
+            draft = []
+            pathEl.textContent = '未选择渠道'
+            queryKeyword = ''
+            if (queryEl) queryEl.value = ''
+            updateJsonSource()
+            renderCards()
+          }
+          setError('')
+          listInitialized = false
+          renderList()
+          toast.success?.(`已清空「${display.name}」的聊天记录`)
+          setTimeout(() => {
+            if (!dirty) ensureBestChannel()
+          }, 30)
+        } catch (err) {
+          setError(`清空聊天记录失败：${err?.message || err}`)
+        }
       }
 
       const renderList = () => {
@@ -522,10 +640,10 @@ export function apply(ctx) {
         const keyword = listKeyword.trim().toLowerCase()
         const visible = []
         for (const [roleId, allItems] of groups) {
-          const roleName = sessions.get(allItems[0]?.conversationId)?.name || roleId
+          const roleName = roleNameOf(roleId, allItems)
           const roleHit = keyword && String(roleName).toLowerCase().includes(keyword)
           const matched = keyword
-            ? (roleHit ? allItems : allItems.filter(record => String(record.channelId).toLowerCase().includes(keyword)))
+            ? (roleHit ? allItems : allItems.filter(record => channelMatches(record, keyword)))
             : allItems
           if (!matched.length) continue
           visible.push({ roleId, roleName, items: matched, allItems })
@@ -550,21 +668,25 @@ export function apply(ctx) {
         listEl.innerHTML = visible
           .map(({ roleId, roleName, items, allItems }) => {
             const expanded = keyword ? true : expandedRoles.has(roleId)
+            const totalMessages = allItems.reduce((sum, record) => sum + countOfRecord(record), 0)
             const channels = items
               .map(record => {
                 const count = countOfRecord(record)
-                const label = channelKindLabel(record.channelId)
-                return `<button class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}">
-                  <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(label)}</b><em>${escapeHtml(record.channelId)}</em></span>
-                  <small>${count} 条</small>
-                </button>`
+                const display = channelDisplay(record)
+                const time = formatRecordTime(record.lastAt)
+                const cleanName = String(display.name || record.channelId)
+                return `<div class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}" role="button" tabindex="0" title="${escapeHtml(`${cleanName}（${record.channelId}）`)}">
+                  <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(cleanName)}</b><em>${escapeHtml(display.info)}</em></span>
+                  <small>${count} 条${time ? `<i>${escapeHtml(time)}</i>` : ''}</small>
+                  <button class="record-channel-clear" data-record-clear="${escapeHtml(record.channelId)}" type="button" title="清空该渠道的全部聊天记录" aria-label="清空 ${escapeHtml(cleanName)} 的聊天记录">🗑</button>
+                </div>`
               })
               .join('')
             return `<div class="record-role ${expanded ? 'expanded' : ''}">
               <button class="record-role-head" data-role-toggle="${escapeHtml(roleId)}">
                 <span class="chev">${expanded ? '▾' : '▸'}</span>
                 <span class="record-role-name" title="${escapeHtml(roleName)}">${escapeHtml(roleName)}</span>
-                <span class="record-role-count">${allItems.length} 个渠道</span>
+                <span class="record-role-count">${allItems.length} 个渠道 · ${totalMessages} 条</span>
               </button>
               <div class="record-role-body" ${expanded ? '' : 'hidden'}>${channels}</div>
             </div>`
@@ -579,8 +701,24 @@ export function apply(ctx) {
             renderList()
           })
         }
-        for (const button of listEl.querySelectorAll('[data-channel]')) {
-          button.addEventListener('click', () => switchChannel(button.dataset.channel))
+        for (const row of listEl.querySelectorAll('[data-channel]')) {
+          row.addEventListener('click', event => {
+            if (event.target.closest('[data-record-clear]')) return
+            switchChannel(row.dataset.channel)
+          })
+          row.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            if (event.target.closest('[data-record-clear]')) return
+            event.preventDefault()
+            switchChannel(row.dataset.channel)
+          })
+        }
+        for (const clear of listEl.querySelectorAll('[data-record-clear]')) {
+          clear.addEventListener('click', event => {
+            event.preventDefault()
+            event.stopPropagation()
+            clearChannelMessages(clear.dataset.recordClear)
+          })
         }
       }
 

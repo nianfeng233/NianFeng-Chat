@@ -550,6 +550,33 @@ export function apply(ctx) {
     },
 
     /**
+     * 清空某个渠道的全部聊天记录（设置 → 聊天记录列表的垃圾桶按钮）。
+     * 只清空消息与本渠道的协议轨迹，不删除渠道容器，也不动长期记忆。
+     */
+    clearMessages(channelId) {
+      const record = channelRecord(channelId)
+      if (!record) throw new Error(`渠道不存在：${channelId}`)
+      const conv = sessions.get(record.conversationId)
+      if (!conv) throw new Error('渠道对应的会话不存在')
+      if (typeof sessions.clearMessages === 'function') sessions.clearMessages(conv.id)
+      else sessions.replaceMessages(conv.id, [])
+      const current = data.channels[channelId] || record
+      data.channels[channelId] = { ...current, seq: 0, lastAt: null, agentTurns: [] }
+      persist()
+      events.emit('chat:messages-replaced', { conversationId: conv.id, channelId, count: 0, cleared: true })
+      return { ok: true, count: 0 }
+    },
+
+    /** 仅删除 chat-store 里的渠道索引（用于插件把旧 thread 会话迁移到稳定的 UID channelId）。 */
+    removeChannel(channelId) {
+      const key = String(channelId || '')
+      if (!key || !data.channels[key]) return false
+      delete data.channels[key]
+      persist()
+      return true
+    },
+
+    /**
      * 用一段 JSON 覆盖某个渠道的聊天记录（设置 → 聊天记录 JSON 编辑器使用）。
      * 只补齐结构字段，不允许写入 tool_call 协议消息；返回写入条数。
      */

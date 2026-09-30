@@ -31,8 +31,11 @@ export const provides = [{ name: 'context-builder', type: 'singleton' }]
 
 /** 固定追加在 system prompt 最底部的「聊天模式说明」，只列当前真实注册的工具。 */
 const CHAT_MODE_TOOL_HINTS = {
-  chat_send: '发送聊天消息（所有面向用户的普通回复都必须通过它发送；messages 数组，结束本轮 end=true）',
+  chat_send: '发送聊天消息（所有面向用户的普通回复都必须通过它发送；messages 数组，结束本轮 end=true；可带 attachments 图片 / 视频 / 文件 / 音频）',
   send_document: '发送长文本 / 资料 / 文件（大段说明、代码、文章必须用它；原文进资料库，渠道侧按「聊天记录转发」发送：第一条是标题、往下是正文；不要在 chat_send 里重复正文）',
+  media_search: '搜索 B站 / 抖音视频候选（点歌、找视频时先用它）',
+  media_play: '一步点歌：搜索 + 自动挑选 + 发到当前渠道（QQ 语音优先）',
+  media_send: '把 B站 / 抖音链接下载后发送到当前渠道或指定渠道（视频 / 语音 / 图文 / 文件；QQ 官方机器人支持视频与文件）',
   read_document: '读取资料原文',
   read_messages: '读取历史聊天记录 / 图片；semantic 参数会走长期记忆库的向量语义检索',
   search_memory: '按语义搜索角色的长期记忆概括（每条约 10 轮），默认 1 条；同渠道附带原文，跨渠道默认只给概括；怀疑自己应该记得某事时可主动调用一次，再 chat_send',
@@ -73,6 +76,7 @@ const TOOL_RULES = [
   'search_memory / read_messages(semantic) 命中的概括如果来自其它渠道，原文属于隐私内容：工具默认只返回概括；模型不应猜测原文，应先向用户说明需要授权，用户确认后再显式请求展开。',
   '从旧 App / QQ 导入的历史记录默认不会自动进入最近上下文；当用户问起导入的旧记录、让你“查聊天记录 / 搜某个关键词 / 看某句话前后的内容”时，必须调用 read_messages 检索，不要凭空回答，也不要说自己看不到历史。',
   '需要发送长资料时调用 send_document：原文进入资料库，并按「聊天记录转发」发到渠道（第一条是标题，往下是正文；多篇资料用 documents 一次发，各自一条转发）；需要重读原文时调用 read_document。转发正文已经发过，不要再用 chat_send 重复一遍。',
+  '用户让你把图片 / 视频 / 音频 / 文件发到某个渠道时，不要回答“我发不了”“不会发”或只发一个链接：先确认目标渠道；能下载的 B站 / 抖音内容优先用 media_send / media_play，已有直链或本地文件则用 chat_send 的 channel + attachments（type=image/video/file/audio）。NapCat 渠道支持图片 / 视频 / 语音 / 文件 / 合并转发（目标填 QQ 号 / 群号），QQ 官方机器人支持图片 / 视频 / 语音 / 文件（目标用 openid，不是 QQ 号）。发送前看目标渠道说明；渠道确实不支持时才降级为链接并说明原因。',
   'chat_send 的 messages 数组每一项是一条独立消息：多条短消息请拆开成多项（例如“你好”“有什么事？”），禁止在单条消息正文里使用换行符（\\n）分句或分段；想发两句就传两个数组项。日常短聊天一般不需要句尾句号，更像 QQ / 微信真人输入；结束本轮回复时设置 end=true。不要把“我马上发送”“稍等”之类的说明当作回复，直接调用工具。',
   '大段说明、代码、文章或内容里本来就有大段换行的，改用 send_document（QQ 会折叠成聊天记录转发）；chat_send 只负责日常短聊天，过长的正文也交给 send_document。',
   '不要在调用工具前输出解释、计划、心理活动或任何面向用户的文本，也不要输出思考过程；工具参数要一次给全，避免多轮补参数。用户等待的是工具真正发出的聊天消息，而不是你的 assistant 正文。',
@@ -218,6 +222,20 @@ export function apply(ctx) {
    * 时间 / 渠道 / 角色等逐条消息都会变化的元数据不放在这里，否则 DeepSeek
    * 等按前缀命中的上下文缓存会在每一轮都失效。
    */
+  /** 渠道媒体能力文案：与渠道插件实际 outbound 实现保持一致，模型据此决定发送方式。 */
+  const CHANNEL_MEDIA_CAPABILITY = {
+    napcat: '文本 / 图片 / 视频 / 语音 / 文件 / 合并转发（目标用 QQ 号 / 群号）',
+    qqbot: '文本 / 图片 / 视频 / 语音 / 文件（目标用 openid，不是 QQ 号）',
+    bilibili: '文本 / B站私信 / 评论回复',
+    'wechat-clawbot': '文本 / 图片',
+    nova: '文本 / 图片 / 资料卡片',
+  }
+  const channelCapabilityText = channel => {
+    const source = String(channel?.source || '').toLowerCase()
+    return CHANNEL_MEDIA_CAPABILITY[source] || '文本（媒体能力未知，发送失败会返回错误原因）'
+  }
+  const channelGroupText = channel => (channel?.group === 'group' ? '群聊' : channel?.group === 'privacy' ? '隐私' : '私聊')
+
   const systemContent = ({ persona, channelId, canCrossRead = false, canCrossSend = false, personaName = '', isGroup = false, ownerIdentity = null }) => {
     const lines = []
     const rules = [...TOOL_RULES]
@@ -230,12 +248,23 @@ export function apply(ctx) {
           tools.map(tool => `- ${tool.name}：${tool.description}`).join('\n'),
       )
     }
+    if (channelId) {
+      const allChannels = store.channels?.() || []
+      const current = allChannels.find(item => item.channelId === channelId) || store.channelRecord?.(channelId) || null
+      if (current) {
+        lines.push(
+          `你当前所在的渠道是 ${current.name || channelId}（${channelId}；${channelGroupText(current)}；可发送：${channelCapabilityText(current)}）。用户说“发到我的 QQ / 这个渠道 / 这里”时默认优先发到当前渠道，不要绕到其它机器人发链接。`,
+        )
+      }
+    }
     if (canCrossRead || canCrossSend) {
       const channels = (store.channels?.() || []).filter(item => item.channelId !== channelId).slice(0, 50)
       if (channels.length) {
         lines.push(
-          '其它渠道（调用工具时 channel 参数可用下面的名称或 channel ID）：\n' +
-            channels.map(item => `- ${item.name}（${item.channelId}）`).join('\n'),
+          '其它渠道（调用工具时 channel 参数可用下面的名称或 channel ID；括号内为渠道类型与可发送格式）：\n' +
+            channels
+              .map(item => `- ${item.name}（${item.channelId}；${channelGroupText(item)}；可发送：${channelCapabilityText(item)}）`)
+              .join('\n'),
         )
       }
     }

@@ -9,7 +9,7 @@
  *   - 发送消息：POST /v2/users/{openid}/messages（私聊）
  *                POST /v2/groups/{group_openid}/messages（群聊）
  *   - 富媒体上传：POST /v2/users/{openid}/files 或 /v2/groups/{group_openid}/files
- *                file_type=1 图片、3 SILK 语音；发送用 msg_type=7 + media.file_info
+ *                file_type=1 图片、2 视频、3 SILK 语音、4 文件；发送用 msg_type=7 + media.file_info
  *   - Webhook：POST <本机>/api/qqbot/webhook，op=13 回调校验（Ed25519），op=12 ACK
  *
  * 会话判定（官方事件类型，不是猜的）：
@@ -30,7 +30,8 @@
  * 该文件只被 Node 后端加载（server/index.mjs 自动扫描 plugins/channels/**\/bridge.mjs）。
  */
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readImageBuffer, saveImageBuffer } from '../../domain/image-service/store.mjs'
 import { fetchWithNetworkRetry, networkErrorText } from '../request-utils.mjs'
 import {
@@ -121,7 +122,9 @@ const MAX_INBOX = 200
 const MAX_SEEN = 500
 const MAX_DISCOVER = 60
 const MAX_IMAGES_PER_MESSAGE = 4
-const MAX_MEDIA_BYTES = 4 * 1024 * 1024
+const MAX_VIDEOS_PER_MESSAGE = 4
+const MAX_FILES_PER_MESSAGE = 4
+const MAX_MEDIA_BYTES = 30 * 1024 * 1024
 
 const ENC_PREFIX = 'enc:v1:'
 const STATE_FILE = 'qqbot.json'
@@ -2226,32 +2229,97 @@ function detectGroupMention(account, input) {
     return [11244, 11245, 11253, 40034].includes(Number(code)) || /msg_id|消息.*(过期|无效)|passive|expired/i.test(message)
   }
 
-  /** image: { dataUrl | url | base64, mime?, name? } -> { base64, mime } */
-  async function resolveImageBytes(image) {
-    if (!image) return null
-    if (typeof image === 'object' && image.id) {
-      const found = await readImageBuffer(settings.dataDir, image.id)
-      if (found) return { base64: found.buffer.toString('base64'), mime: found.record.mime || image.mime || 'image/jpeg' }
+  const allowedLocalMediaPath = value => {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    let path = raw
+    if (/^file:\/\//i.test(path)) {
+      try {
+        path = fileURLToPath(path)
+      } catch (_) {
+        return ''
+      }
     }
-    const source = typeof image === 'string' ? image : image.dataUrl || image.url || image.base64 || ''
+    if (!isAbsolute(path)) return ''
+    const base = resolve(settings.dataDir || process.cwd())
+    const absolute = resolve(path)
+    const rel = relative(base, absolute)
+    if (rel.startsWith('..') || isAbsolute(rel)) return ''
+    return absolute
+  }
+
+  /** image / video / file: { dataUrl | url | base64 | file | id } -> { base64, mime, bytes }。 */
+  async function resolveMediaBytes(media, { defaultMime = 'application/octet-stream' } = {}) {
+    if (!media) return null
+    if (typeof media === 'object' && (media.id || media.imageId)) {
+      const found = await readImageBuffer(settings.dataDir, String(media.id || media.imageId))
+      if (found) return { base64: found.buffer.toString('base64'), mime: found.record.mime || media.mime || defaultMime, bytes: found.buffer }
+    }
+    const source = typeof media === 'string'
+      ? media
+      : media.dataUrl || media.url || media.base64 || media.file || media.path || ''
     if (!source) return null
     if (/^data:/i.test(source)) {
-      const match = source.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
+      const match = String(source).match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
       if (!match) return null
-      const mime = image.mime || match[1] || 'image/jpeg'
+      const mime = media.mime || match[1] || defaultMime
       const base64 = match[2] ? match[3].replace(/\s+/g, '') : Buffer.from(decodeURIComponent(match[3]), 'utf8').toString('base64')
       if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
-      return { base64, mime }
+      return { base64, mime, bytes: Buffer.from(base64, 'base64') }
     }
     if (/^https?:/i.test(source)) {
       const buffer = await downloadBinary(source)
       if (!buffer) return null
-      return { base64: buffer.toString('base64'), mime: image.mime || 'image/jpeg' }
+      return { base64: buffer.toString('base64'), mime: media.mime || defaultMime, bytes: buffer }
+    }
+    if (/^file:\/\//i.test(source) || isAbsolute(String(source))) {
+      const local = allowedLocalMediaPath(source)
+      if (!local) return null
+      try {
+        const buffer = await readFile(local)
+        if (buffer.length > MAX_MEDIA_BYTES) return null
+        return { base64: buffer.toString('base64'), mime: media.mime || defaultMime, bytes: buffer }
+      } catch (_) {
+        return null
+      }
     }
     const base64 = String(source).replace(/\s+/g, '')
     if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
-    return { base64, mime: image.mime || 'image/jpeg' }
+    return { base64, mime: media.mime || defaultMime, bytes: Buffer.from(base64, 'base64') }
   }
+
+  const resolveImageBytes = image => resolveMediaBytes(image, { defaultMime: 'image/jpeg' })
+
+  /**
+   * QQ 官方富媒体上传：file_type 1=图片、2=视频、3=SILK 语音、4=文件。
+   * 上传成功后返回 media.file_info，发送时配 msg_type=7。
+   */
+  async function uploadQqMedia(account, target, media, { fileType = 1, kind = 'media', defaultMime = 'application/octet-stream' } = {}) {
+    const resolved = await resolveMediaBytes(media, { defaultMime })
+    const label = String(kind || 'media')
+    const codePrefix = label.toUpperCase()
+    if (!resolved) return { ok: false, code: `${codePrefix}_INVALID`, error: `${label} 为空、超过大小限制或下载 / 读取失败` }
+    let path = ''
+    const body = { file_data: resolved.base64, file_type: Number(fileType) || 1, srv_send_msg: false }
+    if (target.sessionType === 'group') {
+      path = `/v2/groups/${encodeURIComponent(target.peerId)}/files`
+      body.group_openid = target.peerId
+    } else if (target.sessionType === 'c2c') {
+      path = `/v2/users/${encodeURIComponent(target.peerId)}/files`
+      body.openid = target.peerId
+    } else {
+      return { ok: false, code: 'UNSUPPORTED', error: `会话类型 ${target.sessionType} 暂不支持${label}` }
+    }
+    const result = await apiRequest(account, path, { method: 'POST', body })
+    if (result?._error) return { ok: false, code: `${codePrefix}_UPLOAD_FAILED`, error: result._error }
+    if (!result?.file_info) {
+      return { ok: false, code: `${codePrefix}_UPLOAD_FAILED`, error: result?.message || result?.errmsg || 'QQ 文件上传接口没有返回 file_info', raw: result }
+    }
+    return { ok: true, media: { file_uuid: result.file_uuid || '', file_info: result.file_info, ttl: Number(result.ttl) || 0 } }
+  }
+
+  const uploadQqImage = (account, target, image) =>
+    uploadQqMedia(account, target, image, { fileType: 1, kind: 'image', defaultMime: 'image/jpeg' })
 
   async function downloadBinary(url, { timeoutMs = 30000, maxBytes = MAX_MEDIA_BYTES } = {}) {
     const controller = new AbortController()
@@ -2269,28 +2337,6 @@ function detectGroupMention(account, input) {
     }
   }
 
-  async function uploadQqImage(account, target, image) {
-    const media = await resolveImageBytes(image)
-    if (!media) return { ok: false, code: 'IMAGE_INVALID', error: '图片为空、超过大小限制或下载失败' }
-    let path = ''
-    const body = { file_data: media.base64, file_type: 1, srv_send_msg: false }
-    if (target.sessionType === 'group') {
-      path = `/v2/groups/${encodeURIComponent(target.peerId)}/files`
-      body.group_openid = target.peerId
-    } else if (target.sessionType === 'c2c') {
-      path = `/v2/users/${encodeURIComponent(target.peerId)}/files`
-      body.openid = target.peerId
-    } else {
-      return { ok: false, code: 'UNSUPPORTED', error: `会话类型 ${target.sessionType} 暂不支持图片` }
-    }
-    const result = await apiRequest(account, path, { method: 'POST', body })
-    if (result?._error) return { ok: false, code: 'IMAGE_UPLOAD_FAILED', error: result._error }
-    if (!result?.file_info) {
-      return { ok: false, code: 'IMAGE_UPLOAD_FAILED', error: result?.message || result?.errmsg || 'QQ 文件上传接口没有返回 file_info', raw: result }
-    }
-    return { ok: true, media: { file_uuid: result.file_uuid || '', file_info: result.file_info, ttl: Number(result.ttl) || 0 } }
-  }
-
   function looksLikeSilkBuffer(buffer) {
     if (!buffer || buffer.length < 8) return false
     const head = buffer.subarray(0, 16).toString('latin1')
@@ -2299,25 +2345,9 @@ function detectGroupMention(account, input) {
 
   /** voice: dataUrl / base64 / url / file；QQ 官方语音要求 SILK 格式。 */
   async function resolveVoiceBytes(voice) {
-    if (!voice) return null
-    const source = typeof voice === 'string' ? voice : voice.dataUrl || voice.url || voice.base64 || voice.file || ''
-    if (!source) return null
-    if (/^data:/i.test(source)) {
-      const match = String(source).match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
-      if (!match) return null
-      const mime = voice.mime || match[1] || 'audio/silk'
-      const base64 = match[2] ? match[3].replace(/\s+/g, '') : Buffer.from(decodeURIComponent(match[3]), 'utf8').toString('base64')
-      if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
-      return { base64, mime, bytes: Buffer.from(base64, 'base64') }
-    }
-    if (/^https?:/i.test(source)) {
-      const buffer = await downloadBinary(source, { maxBytes: MAX_MEDIA_BYTES })
-      if (!buffer) return null
-      return { base64: buffer.toString('base64'), mime: voice.mime || 'audio/silk', bytes: buffer }
-    }
-    const base64 = String(source).replace(/\s+/g, '')
-    if (Buffer.byteLength(base64, 'base64') > MAX_MEDIA_BYTES) return null
-    return { base64, mime: voice.mime || 'audio/silk', bytes: Buffer.from(base64, 'base64') }
+    const media = await resolveMediaBytes(voice, { defaultMime: 'audio/silk' })
+    if (!media) return null
+    return { base64: media.base64, mime: voice?.mime || media.mime || 'audio/silk', bytes: media.bytes }
   }
 
   async function uploadQqVoice(account, target, voice) {
@@ -2426,8 +2456,10 @@ function detectGroupMention(account, input) {
     if (!target) return { ok: false, code: 'NO_BINDING', error: '该渠道还没有绑定 QQ 会话，请先在渠道详情里绑定一个私聊/群聊' }
     const text = String(body.text || '').trim().slice(0, MAX_MESSAGE_CHARS)
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES_PER_MESSAGE) : []
+    const videos = Array.isArray(body.videos) ? body.videos.slice(0, MAX_VIDEOS_PER_MESSAGE) : []
+    const files = Array.isArray(body.files) ? body.files.slice(0, MAX_FILES_PER_MESSAGE) : []
     const voice = body.voice && typeof body.voice === 'object' ? body.voice : body.audio && typeof body.audio === 'object' ? body.audio : null
-    if (!text && !images.length && !voice) return { ok: false, code: 'EMPTY', error: '回复内容为空' }
+    if (!text && !images.length && !videos.length && !files.length && !voice) return { ok: false, code: 'EMPTY', error: '回复内容为空' }
     if (!messagePathFor(target)) return { ok: false, code: 'UNSUPPORTED', error: `未知会话类型 ${target.sessionType}` }
 
     // 被动 vs 主动：默认总是带 msg_id 走被动；QQ 接口返回过期/无效时由前端决定是否改发主动。
@@ -2472,6 +2504,39 @@ function detectGroupMention(account, input) {
         return { ok: false, code, error: result?._error || result?.message || 'QQ 图片发送失败', raw: result, sent: results }
       }
       results.push({ kind: 'image', id: String(result?.id || ''), mode: passive ? 'passive' : 'active', msgSeq: payload.msg_seq || 0 })
+    }
+    const uploadAndSend = async (item, { fileType, kind, defaultMime, label }) => {
+      const uploaded = await uploadQqMedia(account, target, item, { fileType, kind, defaultMime })
+      if (!uploaded.ok) return { ok: false, ...uploaded, sent: results }
+      const mediaPassive = passive ? nextPassiveSeq(account, target, passive) : null
+      if (passive && !mediaPassive.ok) return { ok: false, ...mediaPassive, sent: results }
+      const payload = { content: '', msg_type: 7, media: uploaded.media }
+      if (passive) {
+        payload.msg_id = passive
+        payload.msg_seq = mediaPassive.seq
+      }
+      const result = await apiRequest(account, path, { method: 'POST', body: payload })
+      const failed = result?._error || (result?.code && Number(result.code) !== 0 && !result.id)
+      if (failed) {
+        const code = result?._error ? 'API_ERROR' : isPassiveExpired(result) ? 'PASSIVE_EXPIRED' : String(result.code)
+        return { ok: false, code, error: result?._error || result?.message || `QQ ${label}发送失败`, raw: result, sent: results }
+      }
+      results.push({
+        kind,
+        // QQ 不同接口版本回传 id 的字段不同，全部兜底，避免误判成功为失败。
+        id: String(result?.id || result?.message_id || result?.messageId || result?.data?.id || ''),
+        mode: passive ? 'passive' : 'active',
+        msgSeq: payload.msg_seq || 0,
+      })
+      return { ok: true }
+    }
+    for (const video of videos) {
+      const sent = await uploadAndSend(video, { fileType: 2, kind: 'video', defaultMime: 'video/mp4', label: '视频' })
+      if (!sent.ok) return sent
+    }
+    for (const file of files) {
+      const sent = await uploadAndSend(file, { fileType: 4, kind: 'file', defaultMime: 'application/octet-stream', label: '文件' })
+      if (!sent.ok) return sent
     }
     if (voice) {
       const uploaded = await uploadQqVoice(account, target, voice)
@@ -3199,6 +3264,8 @@ function detectGroupMention(account, input) {
     version,
     ready: () => ready,
     supportsVoice: () => true,
+    supportsVideo: () => true,
+    supportsFile: () => true,
     voiceFormat: () => 'silk',
     channelInfo: channelId => {
       const raw = String(channelId || '').replace(/^qqbot:/, '')

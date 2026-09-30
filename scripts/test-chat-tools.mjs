@@ -451,6 +451,38 @@ async function main() {
     JSON.stringify(lineMessages.map(message => message.content)),
   )
 
+  console.log('\n⑥c chat_send 多格式附件（视频 / 文件）')
+  const mediaConv = sessions.create({ name: '附件测试', meta: { roleId: 'role-test' } })
+  const mediaChannel = store.channelForConversation(mediaConv.id)
+  const mediaSend = await tools.execute(
+    'chat_send',
+    {
+      messages: [''],
+      attachments: [
+        { type: 'video', url: 'https://example.com/demo.mp4', name: 'demo.mp4', mime: 'video/mp4' },
+        { type: 'file', url: 'https://example.com/report.pdf', name: 'report.pdf', mime: 'application/pdf' },
+      ],
+      end: false,
+    },
+    {
+      conversationId: mediaConv.id,
+      channelId: mediaChannel.channelId,
+      roleId: 'role-test',
+      userId: 'web-user',
+      sentContents: new Map(),
+    },
+  )
+  const mediaMessage = sessions.messages(mediaConv.id).filter(message => message.role === 'assistant').at(-1)
+  check(
+    'chat_send 的 attachments 支持视频 / 文件并写入消息 meta',
+    mediaSend?.ok === true &&
+      mediaMessage?.meta?.videos?.length === 1 &&
+      mediaMessage.meta.videos[0]?.url === 'https://example.com/demo.mp4' &&
+      mediaMessage?.meta?.files?.length === 1 &&
+      mediaMessage.meta.files[0]?.name === 'report.pdf',
+    JSON.stringify({ mediaSend, message: mediaMessage }),
+  )
+
   console.log('\n⑦ 工作记忆 + 渠道记忆合并')
   const conv2 = sessions.create({ name: '另一个 Nova 渠道', meta: { roleId: 'role-test' } })
   const channel2 = store.channelForConversation(conv2.id)

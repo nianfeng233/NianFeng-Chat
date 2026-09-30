@@ -681,6 +681,35 @@ async function main() {
       JSON.stringify(imageAction?.params || {}),
     )
 
+    // 4c-media) chat_send attachments / media-post：视频、文件、语音不能只走 CQ 白名单
+    const mediaBefore = actions.length
+    const mediaSend = await request('/napcat/send', {
+      method: 'POST',
+      body: {
+        channelId,
+        text: '媒体测试',
+        videos: ['https://example.com/a.mp4'],
+        files: [{ url: 'https://example.com/report.pdf', name: 'report.pdf' }],
+        audios: ['base64://U0lMSw=='],
+      },
+    })
+    check('结构化 video / file / audio 发送返回成功', mediaSend.data?.ok === true, JSON.stringify(mediaSend.data))
+    const mediaAction = await waitFor(() => actions.slice(mediaBefore).find(item => item.action === 'send_group_msg') || null)
+    const mediaSegments = mediaAction?.params?.message || []
+    check(
+      '结构化视频 / 文件 / 语音转换为 OneBot media segment',
+      mediaSegments.some(segment => segment.type === 'video' && segment.data?.file === 'https://example.com/a.mp4') &&
+        mediaSegments.some(segment => segment.type === 'file' && segment.data?.file === 'https://example.com/report.pdf' && segment.data?.name === 'report.pdf') &&
+        mediaSegments.some(segment => segment.type === 'record' && segment.data?.file === 'base64://U0lMSw=='),
+      JSON.stringify(mediaSegments),
+    )
+    check(
+      '结构化媒体与文本同条发送且文本在前',
+      mediaSegments.some(segment => segment.type === 'text' && segment.data?.text === '媒体测试') &&
+        mediaSegments.findIndex(segment => segment.type === 'text') < mediaSegments.findIndex(segment => segment.type === 'video'),
+      JSON.stringify(mediaSegments),
+    )
+
     const privateCqBefore = actions.length
     const privateCqSend = await request('/napcat/send', {
       method: 'POST',

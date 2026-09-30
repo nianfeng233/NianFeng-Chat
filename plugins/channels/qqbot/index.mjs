@@ -900,6 +900,29 @@ export function apply(ctx) {
         lastResult = result
       }
     }
+    const videos = Array.isArray(message.meta?.videos) ? message.meta.videos.slice(0, 4) : []
+    if (videos.length) {
+      const result = await sendWithFallback({ ...payloadBase, text: '', videos })
+      if (result?.ok === false) errors.push(result.error || '视频发送失败')
+      else {
+        sent = true
+        lastResult = result
+      }
+    }
+    // QQ 官方暂不接收任意音频路由为 voice（voice 必须是 SILK），音频统一按文件发送，
+    // 保证 NapCat / 其它渠道来的 mp3/m4a 至少能作为文件送达。
+    const files = [
+      ...(Array.isArray(message.meta?.files) ? message.meta.files : []),
+      ...(Array.isArray(message.meta?.audios) ? message.meta.audios : []),
+    ].slice(0, 4)
+    if (files.length) {
+      const result = await sendWithFallback({ ...payloadBase, text: '', files })
+      if (result?.ok === false) errors.push(result.error || '文件发送失败')
+      else {
+        sent = true
+        lastResult = result
+      }
+    }
     if (!sent && errors.length) return { ok: false, error: errors.join('；') }
     messages?.update?.(conversationId, message.id, {
       source: 'qqbot',
@@ -916,6 +939,8 @@ export function apply(ctx) {
         mentionName,
         mentionNative,
         ...(images.length && sent ? { imagesSent: true } : {}),
+        ...(videos.length && sent ? { videosSent: true } : {}),
+        ...(files.length && sent ? { filesSent: true } : {}),
         ...(errors.length ? { outboundError: errors.join('；') } : { outboundError: '' }),
       },
     })

@@ -835,6 +835,40 @@ async function main() {
       JSON.stringify({ imageSend, imageMessageCall }),
     )
 
+    console.log('\n④f QQ 官方视频 / 文件富媒体发送')
+    const mediaUploadBefore = calls.filter(item => item.method === 'UPLOAD').length
+    const mediaSendBefore = sentMessages.length
+    const mediaSend = await (await api(base, '/api/qqbot/send', {
+      method: 'POST',
+      body: {
+        channelId: 'ch-manual',
+        text: '看视频和文件',
+        videos: [`data:video/mp4;base64,${Buffer.from('fake-video').toString('base64')}`],
+        files: [`data:application/pdf;base64,${Buffer.from('fake-file').toString('base64')}`],
+        sessionType: 'c2c',
+        peerId: 'openid-user-1',
+        msgId: 'msg-media-1',
+        active: false,
+      },
+    })).json()
+    const mediaUploadCalls = calls.filter(item => item.method === 'UPLOAD').slice(mediaUploadBefore)
+    const mediaMessages = sentMessages.slice(mediaSendBefore).filter(item => item.target === 'c2c' && item.body?.msg_type === 7)
+    check(
+      'QQ 官方视频按 file_type=2 上传',
+      mediaSend.ok === true && mediaUploadCalls.some(item => Number(item.body?.file_type) === 2 && !!item.body?.file_data),
+      JSON.stringify({ mediaSend, mediaUploadCalls }),
+    )
+    check(
+      'QQ 官方文件按 file_type=4 上传',
+      mediaUploadCalls.some(item => Number(item.body?.file_type) === 4 && !!item.body?.file_data),
+      JSON.stringify({ mediaSend, mediaUploadCalls }),
+    )
+    check(
+      'QQ 官方视频 / 文件各发一条 msg_type=7 富媒体消息',
+      mediaMessages.length === 2 && mediaMessages.every(item => item.body?.media?.file_info),
+      JSON.stringify({ mediaSend, mediaMessages }),
+    )
+
     console.log('\n⑥ Webhook op=13 Ed25519 校验')
     const verify = await (await api(base, '/api/qqbot/webhook', {
       method: 'POST',

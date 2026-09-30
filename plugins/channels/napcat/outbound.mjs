@@ -106,19 +106,23 @@ export function createOutboundPlanner(options = {}) {
 
   const limits = () => ({ threshold: threshold(), nodeChars: nodeChars(), maxNodes: maxNodes() })
 
-  /** 组装一次外发：{ text, images, forward? }（forward 存在时表示走合并转发）。 */
+  /** 组装一次外发：{ text, images, videos, files, audios, forward? }（forward 存在时走合并转发）。 */
   const buildOutboundContent = message => {
     if (!message) return { text: '', images: [] }
-    const images = Array.isArray(message.meta?.images) ? message.meta.images.slice(0, 4) : []
+    const meta = message.meta || {}
+    const images = Array.isArray(meta.images) ? meta.images.slice(0, 4) : []
+    const videos = Array.isArray(meta.videos) ? meta.videos.slice(0, 4) : []
+    const files = Array.isArray(meta.files) ? meta.files.slice(0, 4) : []
+    const audios = Array.isArray(meta.audios) ? meta.audios.slice(0, 4) : []
     if (message.kind === 'document' || message.content_type === 'document') {
       const forward = documentForwardNodes(message, { nodeChars: nodeChars(), maxNodes: maxNodes(), resolveDocument })
-      return { text: '', images: [], forward }
+      return { text: '', images: [], videos, files, audios, forward }
     }
     const text = String(message.content || '').trim()
     if (text && text.length > threshold() && !CQ_MARKUP.test(text)) {
-      return { text: '', images, forward: forwardNodesFromText(text, { nodeChars: nodeChars(), maxNodes: maxNodes() }) }
+      return { text: '', images, videos, files, audios, forward: forwardNodesFromText(text, { nodeChars: nodeChars(), maxNodes: maxNodes() }) }
     }
-    return { text, images }
+    return { text, images, videos, files, audios }
   }
 
   return { limits, splitByChars, forwardNodesFromText, documentForwardNodes, buildOutboundContent }

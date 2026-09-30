@@ -736,14 +736,18 @@ export function apply(ctx) {
       }
       const page = api.allMessages ? await api.allMessages(id) : await api.sessionMessages(id, { all: true })
       const messages = Array.isArray(page?.messages) ? page.messages : []
-      conv.messages = messages
-      conv.messageCount = messages.length
-      conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, maxSeqOf(messages))
-      conv.localTruncated = false
-      conv.messagesComplete = true
+      // 全量拉取期间可能仍有本地刚写入 / 尚未回写成功的消息：不能直接用远端替换，
+      // 否则 read_messages 按 message_id 精确取消息时会出现“刚发完就找不到”。
+      const pending = pendingMessagesOf(conv)
+      const merged = mergeMessageLists(messages, pending)
+      conv.messages = merged
+      conv.messageCount = Math.max(Number(page?.messageCount) || 0, merged.length)
+      conv.lastSeq = Math.max(Number(conv.lastSeq) || 0, maxSeqOf(merged))
+      conv.localTruncated = merged.length < conv.messageCount
+      conv.messagesComplete = !conv.localTruncated
       persistLocal()
       ctx.emit('conversation:update', conv)
-      return { conversation: conv, messages, messageCount: messages.length, total: messages.length, hasMoreBefore: false, hasMoreAfter: false }
+      return { conversation: conv, messages: merged, messageCount: conv.messageCount, total: conv.messageCount, hasMoreBefore: false, hasMoreAfter: false }
     },
 
     /**

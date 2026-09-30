@@ -787,8 +787,12 @@ export function apply(ctx) {
     const rules = groupRulesOf(channel)
     const content = buildOutboundContent(message)
     const forwarding = Array.isArray(content.forward) && content.forward.length > 0
-    // 转发路径下图片会被挂到最后一个节点上（见 bridge 的 sendForwardMessage）。
-    const images = content.images
+    // 转发路径下图片会被挂到最后一个节点上（见 bridge 的 sendForwardMessage）；
+    // 视频 / 文件 / 语音仍作为独立消息段发送，避免被转发节点吞掉。
+    const images = Array.isArray(content.images) ? content.images : []
+    const videos = Array.isArray(content.videos) ? content.videos : []
+    const files = Array.isArray(content.files) ? content.files : []
+    const audios = Array.isArray(content.audios) ? content.audios : []
 
     const body = {
       channelId: channel.id,
@@ -797,6 +801,9 @@ export function apply(ctx) {
       targetId,
       text: content.text,
       images,
+      videos,
+      files,
+      audios,
       // 合并转发无法与引用 / 艾特混发：转发记录本身就是一条消息。
       quoteMsgId: !forwarding && targetType === 'group' && rules.quote && inbound?.messageId ? String(inbound.messageId) : '',
       mentionUserId: !forwarding && targetType === 'group' && rules.mention && inbound?.senderId ? String(inbound.senderId) : '',
@@ -819,6 +826,9 @@ export function apply(ctx) {
         quoteMessageId: body.quoteMsgId || '',
         mentionUserId: body.mentionUserId || '',
         imagesSent: images.length > 0,
+        videosSent: videos.length > 0,
+        filesSent: files.length > 0,
+        audiosSent: audios.length > 0,
         forwarded: forwarding || undefined,
         forwardNodes: forwarding ? content.forward.length : undefined,
         outboundError: '',

@@ -41,6 +41,9 @@ const MAX_SEEN = 1200
 const MAX_INBOX = 400
 const MAX_DISCOVER = 160
 const MAX_IMAGES = 4
+const MAX_VIDEOS = 4
+const MAX_FILES = 4
+const MAX_RECORDS = 4
 const MAX_MEDIA_BYTES = 4 * 1024 * 1024
 const ACTION_TIMEOUT = 20000
 const TEXT_CHUNK = 3600
@@ -2174,6 +2177,53 @@ export function apply(ctx) {
     return { base64, mime: image.mime || 'image/jpeg' }
   }
 
+  function outboundMediaFile(item) {
+    if (!item) return ''
+    const source = typeof item === 'string'
+      ? item.trim()
+      : String(item.file || item.url || item.dataUrl || item.path || item.base64 || '').trim()
+    if (!source) return ''
+    if (/^data:/i.test(source)) {
+      const match = source.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
+      if (!match) return ''
+      const base64 = match[2] ? match[3].replace(/\s+/g, '') : Buffer.from(decodeURIComponent(match[3]), 'utf8').toString('base64')
+      if (!base64) return ''
+      return `base64://${base64}`
+    }
+    if (/^(https?:\/\/|base64:\/\/|file:\/\/)/i.test(source)) return source
+    // OneBot 的 file 字段也接受本机绝对路径；media-post / chat_send 可能把刚下载的
+    // 视频或文件直接放在本机，这里透传，让 NapCat 自己读取并上传。
+    if (/^[A-Za-z]:[\\/]/.test(source) || source.startsWith('/')) return source
+    const compact = source.replace(/\s+/g, '')
+    if (compact.length > 64 && /^[A-Za-z0-9+/=]+$/.test(compact)) return `base64://${compact}`
+    return ''
+  }
+
+  function outboundMediaName(item, fallback = '') {
+    if (!item || typeof item === 'string') return fallback
+    return String(item.name || item.filename || item.fileName || '').trim().slice(0, 120) || fallback
+  }
+
+  /** chat_send / media-post 的结构化视频、文件、语音 -> OneBot 消息段。 */
+  function buildMediaSegments({ videos = [], files = [], audios = [] } = {}) {
+    const segments = []
+    for (const video of videos) {
+      const file = outboundMediaFile(video)
+      if (file) segments.push({ type: 'video', data: { file } })
+    }
+    for (const item of files) {
+      const file = outboundMediaFile(item)
+      if (!file) continue
+      const name = outboundMediaName(item)
+      segments.push({ type: 'file', data: { file, ...(name ? { name } : {}) } })
+    }
+    for (const audio of audios) {
+      const file = outboundMediaFile(audio)
+      if (file) segments.push({ type: 'record', data: { file } })
+    }
+    return segments
+  }
+
   function splitText(text, max = TEXT_CHUNK) {
     const value = String(text || '').trim()
     if (!value) return []
@@ -2247,25 +2297,51 @@ export function apply(ctx) {
 
     const text = String(body.text || '')
     const images = Array.isArray(body.images) ? body.images.slice(0, MAX_IMAGES) : []
+    const videos = Array.isArray(body.videos) ? body.videos.slice(0, MAX_VIDEOS) : []
+    const files = Array.isArray(body.files) ? body.files.slice(0, MAX_FILES) : []
+    const audios = Array.isArray(body.audios) ? body.audios.slice(0, MAX_RECORDS) : []
+    const mediaSegments = buildMediaSegments({ videos, files, audios })
     const quoteMsgId = String(body.quoteMsgId || '').trim()
     const mentionUserId = toNumericId(body.mentionUserId)
-    // 合并转发（聊天记录）优先：带 forward.nodes 时不再走普通文本 / CQ 分块路径。
+    // 合并转发（聊天记录）优先：带 forward.nodes 时不再走普通文本 / CQ 分块路径；
+    // 视频 / 文件 / 语音不能塞进转发节点，会作为紧随其后的一条普通消息发送。
     const forwardNodes = normalizeForwardNodes(body.forward)
     if (forwardNodes.length) {
-      return sendForwardMessage(rt, {
+      const forwardResult = await sendForwardMessage(rt, {
         targetType,
         targetId,
         nodes: forwardNodes,
         images,
         nickname: String(body.forward?.name || body.forward?.nickname || '').trim().slice(0, 40),
       })
+      if (!forwardResult?.ok || !mediaSegments.length) return forwardResult
+      const action = targetType === 'group' ? 'send_group_msg' : 'send_private_msg'
+      const params = targetType === 'group' ? { group_id: Number(targetId), message: mediaSegments } : { user_id: Number(targetId), message: mediaSegments }
+      const followup = await sendAction(rt, action, params)
+      if (actionFail(followup)) {
+        return {
+          ...forwardResult,
+          ok: false,
+          partial: true,
+          error: followup?.error || followup?.message || 'NapCat 媒体消息发送失败',
+          mediaError: followup?.error || followup?.message || '媒体消息发送失败',
+        }
+      }
+      const extraMessageId = followup.data?.message_id ?? followup.data?.messageId ?? null
+      return {
+        ...forwardResult,
+        messageIds: [...(Array.isArray(forwardResult.messageIds) ? forwardResult.messageIds : []), extraMessageId],
+        count: (Number(forwardResult.count) || 1) + 1,
+        mediaSent: true,
+        mediaMessageId: extraMessageId,
+      }
     }
     // 含 CQ 码 / [at:qq] 时按消息段发送；纯文本保持原来的分块逻辑不变。
     const richSegments = parseOutboundSegments(text)
-    if (richSegments === null && !splitText(text).length && !images.length) {
+    if (richSegments === null && !splitText(text).length && !images.length && !mediaSegments.length) {
       return { ok: false, code: 'EMPTY', error: '消息内容为空' }
     }
-    if (richSegments !== null && !richSegments.length && !images.length) {
+    if (richSegments !== null && !richSegments.length && !images.length && !mediaSegments.length) {
       return { ok: false, code: 'EMPTY', error: '消息内容为空，或 CQ 类型不被允许' }
     }
 
@@ -2296,6 +2372,7 @@ export function apply(ctx) {
           const media = await resolveImageBase64(image)
           if (media) segments.push({ type: 'image', data: { file: `base64://${media.base64}` } })
         }
+        segments.push(...mediaSegments)
       }
       if (!segments.length) continue
       const action = targetType === 'group' ? 'send_group_msg' : 'send_private_msg'
