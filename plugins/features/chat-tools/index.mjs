@@ -1218,6 +1218,11 @@ export function apply(ctx) {
               items: { type: 'string' },
               description: '可选文件列表：https 直链或本地文件路径，单次最多 4 个；NapCat / QQ 官方机器人等支持文件直发的渠道可传。',
             },
+            audios: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选语音 / 音频列表：https 直链、本地文件路径或 data URL；NapCat 会发语音段，QQ 官方机器人按文件类型发送。',
+            },
             attachments: {
               type: 'array',
               description:

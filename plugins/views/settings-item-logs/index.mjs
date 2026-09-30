@@ -155,7 +155,7 @@ export function apply(ctx) {
             <button class="outline-btn" data-logs-jump hidden title="有新日志；点击回到底部">有新日志 ↓</button>
             <span class="logs-stats" data-logs-stats></span>
           </div>
-          <div class="logs-list" data-logs-list>
+          <div class="logs-list allow-scroll-chain" data-logs-list>
             <div class="logs-empty">正在读取日志…</div>
           </div>
           <div class="logs-note">
@@ -226,33 +226,22 @@ export function apply(ctx) {
       }
 
       /**
-       * 手机端 CSS 已把 .logs-list 改成自然高度（不再自己滚动），因此“自动到底 /
-       * 判断是否到底 / 恢复滚动位置”都要作用在设置页外层滚动容器上；桌面仍用
-       * .logs-list 自己的滚动条，保持原行为。
+       * 自动到底 / 判断是否到底 / 恢复滚动位置都作用于 .logs-list 自己的滚动条
+       * （手机端也保留日志内层滚动，方便连续浏览）。列表到顶 / 到底后如何交给
+       * 外层滚动由 CSS overscroll-behavior-y:auto + mobile-shell 的兜底手势处理。
        */
-      const mobileScrollLayout = () => {
-        try {
-          return document.documentElement?.dataset?.mobileLayout === '1'
-        } catch (_) {
-          return false
-        }
-      }
-      const scrollContainer = () => (mobileScrollLayout() ? listEl?.closest?.('.settings-content') || listEl : listEl)
-      const currentScrollTop = () => Number(scrollContainer()?.scrollTop) || 0
+      const currentScrollTop = () => Number(listEl?.scrollTop) || 0
       const scrollToLatest = () => {
-        const target = scrollContainer()
-        if (!target) return
-        target.scrollTop = target.scrollHeight
+        if (!listEl) return
+        listEl.scrollTop = listEl.scrollHeight
       }
       const atScrollBottom = () => {
-        const target = scrollContainer()
-        if (!target) return true
-        return target.scrollHeight - target.scrollTop - target.clientHeight < 28
+        if (!listEl) return true
+        return listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 28
       }
       const restoreScrollTop = value => {
-        const target = scrollContainer()
-        if (!target) return
-        target.scrollTop = Math.min(Math.max(0, Number(value) || 0), Math.max(0, target.scrollHeight - target.clientHeight))
+        if (!listEl) return
+        listEl.scrollTop = Math.min(Math.max(0, Number(value) || 0), Math.max(0, listEl.scrollHeight - listEl.clientHeight))
       }
 
       /** 日志按时间排序；同一毫秒内保持进入列表的先后顺序。 */
@@ -916,7 +905,6 @@ export function apply(ctx) {
       jumpBtn?.addEventListener('click', onJump)
       container.addEventListener('click', onClick)
 
-      const scrollerEl = scrollContainer()
       const onListScroll = () => {
         if (paused) return
         const atBottom = atScrollBottom()
@@ -926,7 +914,6 @@ export function apply(ctx) {
         updateJumpBtn()
       }
       listEl?.addEventListener('scroll', onListScroll)
-      if (scrollerEl && scrollerEl !== listEl) scrollerEl.addEventListener('scroll', onListScroll, { passive: true })
 
       // 级别勾选：可任意组合（例如只勾错误 + 调试），默认只有 info；改动持久化，
       // 下次打开 / 刷新页面（以及配置同步到其它端）后仍然保持。
@@ -1003,7 +990,6 @@ export function apply(ctx) {
         container.removeEventListener('click', onClick)
         for (const input of levelInputs) input.removeEventListener('change', onLevelChange)
         listEl?.removeEventListener('scroll', onListScroll)
-        if (scrollerEl && scrollerEl !== listEl) scrollerEl.removeEventListener('scroll', onListScroll)
         catSelect?.removeEventListener('change', render)
         searchInput?.removeEventListener('input', render)
       }

@@ -226,6 +226,89 @@ export function apply(ctx) {
   }
   document.addEventListener('click', onCaptureClick, true)
 
+  /**
+   * 手机端滚动链兜底：
+   *   内层列表（.allow-scroll-chain）仍保留自己的滚动条；当它已经在顶部 / 底部，
+   *   继续向下 / 向上滚时，把这次手势余量交给最近的父级滚动容器（通常是
+   *   .settings-content）。浏览器原生 overscroll-behavior:auto 也会做类似的事，
+   *   这里针对部分 WebView / 触控环境补一个显式实现，保证内外层互不抢滚动。
+   */
+  const installScrollChaining = () => {
+    const CHAIN_SELECTOR = '.allow-scroll-chain'
+    const isVerticalScrollable = element => {
+      if (!element || element.scrollHeight <= element.clientHeight + 1) return false
+      if (typeof getComputedStyle !== 'function') return true
+      try {
+        const style = getComputedStyle(element)
+        const overflowY = String(style.overflowY || style.overflow || '')
+        return overflowY === 'auto' || overflowY === 'scroll'
+      } catch (_) {
+        return false
+      }
+    }
+    const canScroll = (element, delta) => {
+      if (!element || !Number.isFinite(delta) || delta === 0) return false
+      if (delta > 0) return element.scrollTop + element.clientHeight < element.scrollHeight - 1
+      return element.scrollTop > 1
+    }
+    const nearestScrollParent = element => {
+      let parent = element?.parentElement || null
+      while (parent) {
+        if (isVerticalScrollable(parent)) return parent
+        parent = parent.parentElement
+      }
+      return null
+    }
+    const chainScroll = (element, delta) => {
+      const parent = nearestScrollParent(element)
+      if (!parent || !canScroll(parent, delta)) return false
+      parent.scrollTop += delta
+      return true
+    }
+    const onWheel = event => {
+      if (event.defaultPrevented || !event.deltaY) return
+      const inner = event.target?.closest?.(CHAIN_SELECTOR)
+      if (!inner || !isVerticalScrollable(inner) || canScroll(inner, event.deltaY)) return
+      if (chainScroll(inner, event.deltaY)) event.preventDefault()
+    }
+    let touchState = null
+    const onTouchStart = event => {
+      const touch = event.touches?.[0]
+      if (!touch) {
+        touchState = null
+        return
+      }
+      const inner = event.target?.closest?.(CHAIN_SELECTOR)
+      touchState = inner ? { inner, lastY: touch.clientY } : null
+    }
+    const onTouchMove = event => {
+      if (!touchState) return
+      const touch = event.touches?.[0]
+      if (!touch) return
+      const delta = touchState.lastY - touch.clientY
+      touchState.lastY = touch.clientY
+      const inner = touchState.inner
+      if (!inner?.isConnected || !isVerticalScrollable(inner) || canScroll(inner, delta)) return
+      if (chainScroll(inner, delta) && event.cancelable) event.preventDefault()
+    }
+    const onTouchEnd = () => {
+      touchState = null
+    }
+    document.addEventListener('wheel', onWheel, { passive: false, capture: true })
+    document.addEventListener('touchstart', onTouchStart, { passive: true, capture: true })
+    document.addEventListener('touchmove', onTouchMove, { passive: false, capture: true })
+    document.addEventListener('touchend', onTouchEnd, { passive: true, capture: true })
+    document.addEventListener('touchcancel', onTouchEnd, { passive: true, capture: true })
+    return () => {
+      document.removeEventListener('wheel', onWheel, true)
+      document.removeEventListener('touchstart', onTouchStart, true)
+      document.removeEventListener('touchmove', onTouchMove, true)
+      document.removeEventListener('touchend', onTouchEnd, true)
+      document.removeEventListener('touchcancel', onTouchEnd, true)
+    }
+  }
+  const disposeScrollChaining = installScrollChaining()
+
   const offs = [
     events.on('conversation:switch', ({ id } = {}) => {
       if (router.active() !== 'chat') return
@@ -285,6 +368,7 @@ export function apply(ctx) {
 
   ctx.effect(() => () => {
     offs.forEach(off => off?.())
+    disposeScrollChaining?.()
     backBtn?.removeEventListener('click', onBack)
     tabsEl?.removeEventListener('click', onTabsClick)
     document.removeEventListener('click', onCaptureClick, true)

@@ -129,13 +129,16 @@ const CSS = `
   .record-editor-error{display:none;padding:7px 10px;border-radius:8px;background:rgba(198,91,91,.1);border:1px solid rgba(198,91,91,.3);color:#c65b5b;font-size:12px}
   .record-editor-error.show{display:block}
   .record-editor-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:2px}
-  /* 手机端改用设置页外层作为唯一滚动容器：聊天记录列表 / 卡片不再各自嵌套滚动，
-     避免手指落在列表里时外层滚不动、落在列表外时又滑不到底。 */
-  html[data-mobile-layout="1"] .record-page{flex-direction:column;min-height:0;gap:10px}
-  html[data-mobile-layout="1"] .record-list{flex:0 0 auto;width:100%;max-height:none;overflow:visible}
-  html[data-mobile-layout="1"] .record-main{flex:0 0 auto;width:100%}
-  html[data-mobile-layout="1"] .record-cards{flex:0 0 auto;min-height:0;max-height:none;overflow:visible;padding-right:0}
+  /* 手机端保留内外两层滚动：角色/渠道列表和消息卡片都可以独立连续浏览；
+     滚到顶 / 底后继续同方向滑动会通过 overscroll-behavior-y:auto 自动交给
+     外层 .settings-content，互不干扰。页面上下也留出足够空白作为外层滚动触发区。 */
+  html[data-mobile-layout="1"] .record-page{flex-direction:column;min-height:0;gap:12px;padding-bottom:18px}
+  html[data-mobile-layout="1"] .record-list{flex:0 0 auto;width:100%;max-height:30vh;min-height:120px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch}
+  html[data-mobile-layout="1"] .record-main{flex:0 0 auto;width:100%;gap:10px}
+  html[data-mobile-layout="1"] .record-cards{flex:0 0 auto;min-height:220px;max-height:52vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;padding-right:2px}
   html[data-mobile-layout="1"] .record-source{min-height:220px;height:auto}
+  html[data-mobile-layout="1"] .record-toolbar{padding:2px 0}
+  html[data-mobile-layout="1"] .record-page-info{margin:2px 0 6px}
   html[data-mobile-layout="1"] .record-query{width:100%}
   html[data-mobile-layout="1"] .record-role-body{padding-left:10px}
   html[data-mobile-layout="1"] .record-channel{padding:9px 10px}
@@ -174,7 +177,7 @@ export function apply(ctx) {
         '图形化查看 / 编辑每个角色、每个渠道的聊天记录；默认最新在前、每页 20 条，可点击「加载更多」查看更早记录，并支持按当前会话关键词搜索。所有修改先进入草稿，点「保存」才会应用。',
         `
         <div class="record-page">
-          <aside class="record-list">
+          <aside class="record-list allow-scroll-chain">
             <div class="record-list-head">
               <div><strong>角色</strong><span class="record-list-sub">按角色分组 · 展开查看渠道</span></div>
               <button class="record-btn" data-record-refresh-list>刷新</button>
@@ -200,7 +203,7 @@ export function apply(ctx) {
             </div>
             <div class="record-error" data-record-error></div>
             <div class="record-page-info" data-record-page-info></div>
-            <div class="record-cards" data-record-cards></div>
+            <div class="record-cards allow-scroll-chain" data-record-cards></div>
             <textarea class="record-source" data-record-source spellcheck="false" hidden placeholder="[]"></textarea>
           </section>
         </div>

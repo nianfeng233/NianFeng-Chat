@@ -165,13 +165,13 @@ export const MOBILE_SHELL_CSS = `
   html[data-mobile-layout="1"] .plugin-toolbar-right{margin-left:0;width:100%;justify-content:flex-start;flex-wrap:wrap;}
   html[data-mobile-layout="1"] .glass-alpha-control{width:100%;min-width:0;}
   html[data-mobile-layout="1"] .file-picker{width:100%;max-width:100%;}
-  html[data-mobile-layout="1"] .record-page{flex-direction:column;min-height:0;}
-  html[data-mobile-layout="1"] .record-list{flex:0 0 auto;width:100%;max-height:none;overflow:visible;}
+  html[data-mobile-layout="1"] .record-page{flex-direction:column;min-height:0;gap:10px;padding-bottom:14px;}
+  html[data-mobile-layout="1"] .record-list{flex:0 0 auto;width:100%;max-height:32vh;min-height:120px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
   html[data-mobile-layout="1"] .record-main{width:100%;}
-  html[data-mobile-layout="1"] .record-cards{min-height:0;max-height:none;overflow:visible;}
+  html[data-mobile-layout="1"] .record-cards{min-height:220px;max-height:56vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
   html[data-mobile-layout="1"] .record-source{min-height:240px;}
   html[data-mobile-layout="1"] .logs-toolbar{width:100%;}
-  html[data-mobile-layout="1"] .logs-list{height:auto;min-height:0;max-height:none;overflow:visible;}
+  html[data-mobile-layout="1"] .logs-list{height:min(56vh,540px);min-height:220px;max-height:56vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
   html[data-mobile-layout="1"] .h-resizer{display:none !important;}
   html[data-mobile-layout="1"] .composer{height:auto !important;min-height:52px;padding:7px 10px 9px;}
   html[data-mobile-layout="1"] .composer-tools{margin-bottom:4px;max-height:28px;}
@@ -208,12 +208,12 @@ export const MOBILE_SHELL_CSS = `
   html[data-mobile-layout="1"] .group-head,
   html[data-mobile-layout="1"] .msg-row{-webkit-touch-callout:none;}
 
-  /* 手机端滚动与渠道详情：所有长页面统一支持原生惯性纵向滚动；渠道详情在
-     自定义渲染（NapCat / QQ官方 / 微信）下也能完整往下翻，不再被 overflow
-     hidden 的父面板裁掉。
-     注意：日志 / 聊天记录页已改为交给 .settings-content 单一滚动容器，
-     不要再把这两个页面里的列表设成 contain，否则手指落在列表上时无法继续
-     把外层页面往上带，会表现为“上下滑动不畅”。 */
+  /* 手机端滚动与渠道详情：长页面支持惯性纵向滚动，渠道详情在自定义渲染
+     （NapCat / QQ官方 / 微信）下也能完整往下翻，不再被 overflow hidden 的
+     父面板裁掉。
+     内层列表保留自己的滚动条（方便在长列表里连续浏览）；它们使用
+     overscroll-behavior-y:auto，滚到顶 / 底后继续同方向滑动手势会自动交给
+     外层 .settings-content，避免内外层互相抢滚动。 */
   html[data-mobile-layout="1"] .scroll,
   html[data-mobile-layout="1"] .channel-detail-slot,
   html[data-mobile-layout="1"] .welcome-page,
@@ -225,7 +225,11 @@ export const MOBILE_SHELL_CSS = `
   }
   html[data-mobile-layout="1"] .logs-list,
   html[data-mobile-layout="1"] .record-list,
-  html[data-mobile-layout="1"] .record-cards{touch-action:pan-y;}
+  html[data-mobile-layout="1"] .record-cards{
+    touch-action:pan-y;
+    overscroll-behavior-y:auto;
+    -webkit-overflow-scrolling:touch;
+  }
   html[data-mobile-layout="1"] .channel-item,
   html[data-mobile-layout="1"] .group-head,
   html[data-mobile-layout="1"] .conv-item,

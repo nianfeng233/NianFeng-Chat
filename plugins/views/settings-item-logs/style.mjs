@@ -37,12 +37,14 @@ export const LOGS_CSS = `
   html[data-theme="dark"] .logs-list{background:#1e1e1e;border-color:#2b2b2b;}
   html[data-theme="dark"] .logs-toolbar select,html[data-theme="dark"] .logs-toolbar input:not([type="checkbox"]),html[data-theme="dark"] .logs-levels{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);}
   @media(max-width:820px){.logs-page{padding:20px 18px 36px;}}
-  /* 手机端日志页不再让 .logs-list 形成第二个纵向滚动条：设置页外层 .settings-content
-     是唯一滚动容器，工具栏、日志列表、底部说明可以连续平滑地上下滑。 */
-  html[data-mobile-layout="1"] .logs-page{overflow:visible;min-height:0;padding:14px 12px calc(24px + env(safe-area-inset-bottom, 0px));}
+  /* 手机端保留 .logs-list 的内层滚动，方便连续浏览日志；列表滚到顶 / 底后
+     继续同方向滑动会自动交给外层 .settings-content（overscroll-behavior-y:auto）。
+     工具栏、列表下方说明和底部留白都留出足够面积，方便单独触发外层滚动。 */
+  html[data-mobile-layout="1"] .logs-page{overflow:visible;min-height:0;padding:14px 12px calc(30px + env(safe-area-inset-bottom, 0px));}
   html[data-mobile-layout="1"] .logs-toolbar{position:sticky;top:-6px;z-index:8;gap:6px;padding:8px 0 9px;background:rgba(252,253,251,.96);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);}
   html[data-theme="dark"][data-mobile-layout="1"] .logs-toolbar{background:rgba(20,24,28,.96);}
-  html[data-mobile-layout="1"] .logs-list{height:auto;max-height:none;min-height:0;overflow:visible;}
+  html[data-mobile-layout="1"] .logs-list{height:min(52vh,520px);min-height:220px;max-height:52vh;margin:4px 0 12px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
+  html[data-mobile-layout="1"] .logs-note{margin:12px 0 18px;}
   html[data-mobile-layout="1"] .logs-row{grid-template-columns:74px 92px minmax(0,1fr);gap:6px;font-size:10.5px;padding:4px 8px;}
   html[data-mobile-layout="1"] .logs-toolbar .outline-btn,
   html[data-mobile-layout="1"] .logs-toolbar select,
