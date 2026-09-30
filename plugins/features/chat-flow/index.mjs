@@ -22,9 +22,9 @@
  * chat-flow 自己不认识 OpenAI / Ollama / 任何具体工具实现，只编排服务。
  */
 export const name = 'chat-flow'
-export const version = '2.2.0'
+export const version = '2.2.1'
 export const displayName = '聊天流程'
-export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路，支持角色级主模型 / 备用模型。'
+export const description = '业务功能 · 串联"发送 → 存 → 工具循环 → 回显"主链路，支持角色级主模型 / 备用模型与同轮降级粘滞。'
 export const author = '念风内核'
 export const icon = '🔀'
 export const core = true
@@ -209,6 +209,9 @@ export function apply(ctx) {
       draftId: null,
       abort: () => {},
       startedAt: Date.now(),
+      // 同一轮用户请求内所有模型调用共用的降级作用域：
+      // 任何一次发生降级后，工具循环的后续调用都会直接沿用降级模型。
+      failoverScope: {},
       cancelPromise,
       cancel(reason) {
         if (entry.cancelled) return
@@ -331,8 +334,11 @@ export function apply(ctx) {
       entry.suppressContent = false
       const suppressStream = entry.suppressStream === true
       let handle = null
+      // 同一轮内的所有模型调用共用 failoverScope（工具循环重试 / tool_choice 降级都算）：
+      // model-service 会记住本作用域里首次降级后的模型，后续直接用它，不再重复撞坏模型。
+      const streamOptions = { ...options, failoverScope: entry.failoverScope || (entry.failoverScope = {}) }
       try {
-        handle = models.stream(messagesToSend, options, {
+        handle = models.stream(messagesToSend, streamOptions, {
           onStart() {},
           onChunk(delta) {
             if (entry.cancelled || !delta) return

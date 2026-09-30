@@ -797,7 +797,7 @@ export function apply(ctx) {
               row('流式输出', '实时显示模型输出', switchBtn('chat.stream', true)) +
               row(
                 '失败自动切换模型',
-                '当前模型在输出任何内容前报错时，按备用模型列表顺序逐个尝试；已输出内容不重试，避免重复气泡',
+                '当前模型在输出任何内容前报错时，按备用模型列表顺序逐个尝试；一旦降级，同一轮内后续调用会沿用降级后的模型，不再反复撞已失败的模型；已输出内容不重试，避免重复气泡',
                 switchBtn('model.failoverEnabled', false),
               ) +
               failoverBlock +

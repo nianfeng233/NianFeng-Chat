@@ -9,9 +9,9 @@
  * chat-flow 只认这个服务，不认任何具体适配器。
  */
 export const name = 'model-service'
-export const version = '1.3.0'
+export const version = '1.4.0'
 export const displayName = '模型服务'
-export const description = '业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型，具体由适配器插件实现。'
+export const description = '业务服务 · 模型抽象接口与调度，支持全局 / 角色级备用模型与同轮降级粘滞，具体由适配器插件实现。'
 export const author = '念风内核'
 export const icon = '🤖'
 export const core = true
@@ -29,6 +29,25 @@ export function apply(ctx) {
   const config = ctx.inject('config')
   const events = ctx.inject('event-bus')
 
+  /**
+   * 调用链降级粘滞：
+   *   scope -> { fallbackKey, failed:Set<modelKey> }
+   * 聊天主链路每次用户请求创建一个 scope 对象；同一个 scope 内只要发生过
+   * 降级，后续 stream（工具循环的下一轮）就直接从降级后的模型开始，并跳过
+   * 这个 scope 里已经失败过的模型，避免每轮都重新撞一次不可用的主模型。
+   * WeakMap 让 scope 对象销毁后自动回收，不需要手动清理。
+   */
+  const failoverScopes = new WeakMap()
+  const failoverScopeState = scope => {
+    if (!scope || typeof scope !== 'object') return null
+    let state = failoverScopes.get(scope)
+    if (!state) {
+      state = { fallbackKey: '', failed: new Set() }
+      failoverScopes.set(scope, state)
+    }
+    return state
+  }
+
   const service = {
     name: 'model-service',
 
@@ -41,12 +60,14 @@ export function apply(ctx) {
     /**
      * 流式补全。
      * @param {Array<{role:string, content:string}>} messages
-     * @param {{ model?: string, temperature?: number, signal?: AbortSignal }} options
+     * @param {{ model?: string, temperature?: number, signal?: AbortSignal, failoverScope?: object }} options
+     *        failoverScope 为同一轮聊天共用的对象；传入后一旦降级，后续调用沿用降级模型。
      * @param {{ onStart?:Function, onChunk:Function, onDone:Function, onError:Function }} callbacks
      * @returns {{ abort: Function }}
      */
     stream(messages, options = {}, callbacks = {}) {
-      const requestedKey = options.model || registry.activeKey()
+      const scopeState = failoverScopeState(options.failoverScope)
+      const requestedKey = scopeState?.fallbackKey || options.model || registry.activeKey()
       const startedAt = Date.now()
       const elapsed = () => Date.now() - startedAt
       // 角色级备用模型：
@@ -98,7 +119,8 @@ export function apply(ctx) {
       if (failoverEnabled) {
         for (let pass = 0; pass < passes; pass++) {
           for (const key of configuredKeys) {
-            if (key !== requestedKey) fallbackQueue.push(key)
+            // 同一个 scope 内已经失败过的模型不再重复尝试，避免升级降级来回横跳。
+            if (key !== requestedKey && !scopeState?.failed.has(key)) fallbackQueue.push(key)
           }
         }
       }
@@ -122,6 +144,10 @@ export function apply(ctx) {
           const failedKey = currentKey
           attemptIndex += 1
           const nextKey = attemptOrder[attemptIndex]
+          if (scopeState) {
+            if (failedKey) scopeState.failed.add(failedKey)
+            scopeState.fallbackKey = nextKey
+          }
           events.emit('model:fallback', {
             from: failedKey,
             to: nextKey,
@@ -179,12 +205,15 @@ export function apply(ctx) {
         try {
           callbacks.onStart?.({ key, model: resolved.model, attempt: attemptIndex })
           events.emit('model:start', { key, model: resolved.model, at: startedAt, messages, attempt: attemptIndex })
+          const providerOptions = { ...resolved.providerImpl.defaults, ...options }
+          // failoverScope 只是宿主内部的控制字段，不能传给具体适配器。
+          delete providerOptions.failoverScope
           Promise.resolve(
             resolved.providerImpl.stream({
               messages,
               model: resolved.model,
               provider: resolved.provider,
-              options: { ...resolved.providerImpl.defaults, ...options },
+              options: providerOptions,
               signal: currentController.signal,
               onChunk: delta => {
                 if (aborted) return

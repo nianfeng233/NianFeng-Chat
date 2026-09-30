@@ -19,12 +19,14 @@
  *   messagesOf(channelId)           渠道内全部消息（按 seq 排序）
  *   rounds(channelId, limit)        渠道最近 N 轮
  *   workingMessages({roleId, limit}) 角色级工作记忆（仅普通私聊，按时间合并）
+ *   clearMessages(channelId)        只清空消息，保留渠道容器
+ *   deleteChannel(channelId)        连会话容器一起删除整份渠道记录
  *   search(query) / stats()
  */
 export const name = 'chat-store'
-export const version = '1.0.0'
+export const version = '1.1.0'
 export const displayName = '聊天记录库'
-export const description = '业务服务 · 渠道消息元数据、序号、工作记忆与 Nova 渠道识别。'
+export const description = '业务服务 · 渠道消息元数据、序号、工作记忆与 Nova 渠道识别，支持整份删除渠道记录。'
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
@@ -574,6 +576,32 @@ export function apply(ctx) {
       delete data.channels[key]
       persist()
       return true
+    },
+
+    /**
+     * 删除整个渠道（设置 → 聊天记录列表的垃圾桶按钮）。
+     * 连同底层会话容器一起删除，列表里不再保留空记录；外部渠道之后收到
+     * 新消息时会按需重新创建容器。返回删除前的渠道摘要。
+     */
+    deleteChannel(channelId) {
+      const key = String(channelId || '')
+      const record = channelRecord(key)
+      if (!record) throw new Error(`渠道不存在：${key}`)
+      const count = service.messageCount(key)
+      const conv = sessions.get(record.conversationId)
+      if (conv && typeof sessions.remove === 'function') sessions.remove(conv.id)
+      // sessions.remove 会发 conversation:delete，正常路径下监听器已经删掉索引；
+      // 会话容器缺失 / remove 失败时兜底清理，保证列表一定不会残留这一份。
+      if (data.channels[key]) {
+        delete data.channels[key]
+        persist()
+      }
+      events.emit('chat:channel-deleted', {
+        channelId: key,
+        conversationId: conv?.id || record.conversationId,
+        count,
+      })
+      return { ok: true, channelId: key, conversationId: conv?.id || record.conversationId, count }
     },
 
     /**

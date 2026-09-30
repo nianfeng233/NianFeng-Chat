@@ -10,12 +10,13 @@
  *   - JSON 源码：高级用户可以直接编辑整段 JSON，实时校验格式
  *   - 所有修改先进入草稿；点“保存”才写回 chat-store
  *   - 单条编辑有“确认修改 / 取消”；整体有“保存 / 取消修改”
+ *   - 左侧列表垃圾桶可将整份渠道记录连会话容器一起删除
  *   - 保存前做结构校验，非法 JSON / 非法字段不会被写入
  */
 export const name = 'settings-item-chat-records'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const displayName = '设置项 · 聊天记录'
-export const description = '设置页 · 图形化 / JSON 双模式查看与编辑聊天记录，草稿式保存。'
+export const description = '设置页 · 图形化 / JSON 双模式查看与编辑聊天记录，支持整份删除渠道记录，草稿式保存。'
 export const author = '念风内核'
 export const icon = '🗂️'
 export const core = true
@@ -67,8 +68,8 @@ const CSS = `
   .record-channel em{font-style:normal;font-size:10.5px;color:var(--text-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .record-channel small{flex:0 0 auto;color:var(--text-4);font-size:10.5px;line-height:1.35;text-align:right;white-space:nowrap}
   .record-channel small i{display:block;font-style:normal;color:var(--text-4);opacity:.85}
-  .record-channel-clear{flex:0 0 auto;width:26px;height:26px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
-  .record-channel-clear:hover{background:rgba(198,91,91,.12);color:#c65b5b}
+  .record-channel-delete{flex:0 0 auto;width:26px;height:26px;padding:0;border:none;border-radius:7px;background:transparent;color:var(--text-4);font-size:13px;line-height:1;cursor:pointer}
+  .record-channel-delete:hover{background:rgba(198,91,91,.12);color:#c65b5b}
   .record-channel:hover{background:rgba(255,255,255,.55)}
   .record-channel.active{background:var(--accent-soft);color:var(--accent)}
   .record-channel.active small{color:var(--accent)}
@@ -174,7 +175,7 @@ export function apply(ctx) {
     render(container) {
       container.innerHTML = page(
         '聊天记录',
-        '图形化查看 / 编辑每个角色、每个渠道的聊天记录；默认最新在前、每页 20 条，可点击「加载更多」查看更早记录，并支持按当前会话关键词搜索。所有修改先进入草稿，点「保存」才会应用。',
+        '图形化查看 / 编辑每个角色、每个渠道的聊天记录；默认最新在前、每页 20 条，可点击「加载更多」查看更早记录，并支持按当前会话关键词搜索。左侧列表垃圾桶会整份删除该渠道（含对应会话容器），其它修改先进入草稿，点「保存」才会应用。',
         `
         <div class="record-page">
           <aside class="record-list allow-scroll-chain">
@@ -588,42 +589,64 @@ export function apply(ctx) {
           String(record.channelId).toLowerCase().includes(keyword)
         )
       }
-      const clearChannelMessages = async channelId => {
+      const deleteChannelRecord = async channelId => {
         const record = store.channelRecord(channelId)
         if (!record) return
         const display = channelDisplay(record)
         const count = countOfRecord(record)
+        const conv = sessions.get(record.conversationId)
+        const wasActive = activeChannel === channelId
+        const wasDirty = wasActive && dirty
+        const remembered = lastActiveChannelId === channelId
         if (modal) {
           const confirmed = await modal.confirm(
-            '清空这份聊天记录？',
-            `将清空「${display.name}」的全部消息（${count} 条）。渠道连接和长期记忆不会受影响，清空后无法恢复。`,
+            '删除整个渠道记录？',
+            `将删除「${display.name}」这一整份记录（${count} 条消息）以及对应的会话容器，左侧列表不再保留。` +
+              '删除后无法恢复；长期记忆不会受影响，外部渠道之后收到新消息时会按需重新建立记录。' +
+              (wasActive ? '当前正在查看该渠道，删除后会切换到其它渠道。' : '') +
+              (wasDirty ? '当前渠道有未保存的修改，也会一并丢失。' : ''),
           )
           if (!confirmed?.ok) return
         }
         try {
-          if (typeof store.clearMessages === 'function') store.clearMessages(channelId)
-          else {
-            const conv = sessions.get(record.conversationId)
-            if (conv && typeof sessions.clearMessages === 'function') sessions.clearMessages(conv.id)
+          if (typeof store.deleteChannel === 'function') {
+            store.deleteChannel(channelId)
+          } else if (conv && typeof sessions.remove === 'function') {
+            sessions.remove(conv.id)
+          } else if (typeof store.removeChannel === 'function') {
+            store.removeChannel(channelId)
           }
+          // 会话容器不存在 / 旧版服务不发布 conversation:delete 时，兜底清空编辑区。
           if (activeChannel === channelId) {
             activeChannel = null
             draft = []
             pathEl.textContent = '未选择渠道'
             queryKeyword = ''
             if (queryEl) queryEl.value = ''
+            setDirty(false)
+            setError('')
             updateJsonSource()
             renderCards()
+            syncUndoSaveButton()
           }
+          if (remembered) {
+            lastActiveChannelId = ''
+            try {
+              localStorage.removeItem(LAST_CHANNEL_KEY)
+            } catch (_) {
+              /* localStorage 不可用时忽略 */
+            }
+          }
+          lastSavedSnapshots.delete(channelId)
           setError('')
           listInitialized = false
           renderList()
-          toast.success?.(`已清空「${display.name}」的聊天记录`)
+          toast.success?.(`已删除「${display.name}」的渠道记录`)
           setTimeout(() => {
             if (!dirty) ensureBestChannel()
           }, 30)
         } catch (err) {
-          setError(`清空聊天记录失败：${err?.message || err}`)
+          setError(`删除渠道记录失败：${err?.message || err}`)
         }
       }
 
@@ -681,7 +704,7 @@ export function apply(ctx) {
                 return `<div class="record-channel ${record.channelId === activeChannel ? 'active' : ''}" data-channel="${escapeHtml(record.channelId)}" role="button" tabindex="0" title="${escapeHtml(`${cleanName}（${record.channelId}）`)}">
                   <span title="${escapeHtml(record.channelId)}"><b>${escapeHtml(cleanName)}</b><em>${escapeHtml(display.info)}</em></span>
                   <small>${count} 条${time ? `<i>${escapeHtml(time)}</i>` : ''}</small>
-                  <button class="record-channel-clear" data-record-clear="${escapeHtml(record.channelId)}" type="button" title="清空该渠道的全部聊天记录" aria-label="清空 ${escapeHtml(cleanName)} 的聊天记录">🗑</button>
+                  <button class="record-channel-delete" data-record-delete-channel="${escapeHtml(record.channelId)}" type="button" title="删除该渠道的整份记录（含全部消息）" aria-label="删除 ${escapeHtml(cleanName)} 的渠道记录">🗑</button>
                 </div>`
               })
               .join('')
@@ -706,21 +729,21 @@ export function apply(ctx) {
         }
         for (const row of listEl.querySelectorAll('[data-channel]')) {
           row.addEventListener('click', event => {
-            if (event.target.closest('[data-record-clear]')) return
+            if (event.target.closest('[data-record-delete-channel]')) return
             switchChannel(row.dataset.channel)
           })
           row.addEventListener('keydown', event => {
             if (event.key !== 'Enter' && event.key !== ' ') return
-            if (event.target.closest('[data-record-clear]')) return
+            if (event.target.closest('[data-record-delete-channel]')) return
             event.preventDefault()
             switchChannel(row.dataset.channel)
           })
         }
-        for (const clear of listEl.querySelectorAll('[data-record-clear]')) {
-          clear.addEventListener('click', event => {
+        for (const remove of listEl.querySelectorAll('[data-record-delete-channel]')) {
+          remove.addEventListener('click', event => {
             event.preventDefault()
             event.stopPropagation()
-            clearChannelMessages(clear.dataset.recordClear)
+            deleteChannelRecord(remove.dataset.recordDeleteChannel)
           })
         }
       }
@@ -1049,8 +1072,16 @@ export function apply(ctx) {
           activeChannel = null
           draft = []
           pathEl.textContent = '未选择渠道'
+          queryKeyword = ''
+          if (queryEl) queryEl.value = ''
+          setDirty(false)
+          setError('')
           updateJsonSource()
           renderCards()
+          syncUndoSaveButton()
+          setTimeout(() => {
+            if (!dirty) ensureBestChannel()
+          }, 30)
         }
         renderList()
       })

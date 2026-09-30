@@ -9,7 +9,8 @@
  *   - 旧版单值 model.failoverKey 仍可兼容；
  *   - 列表循环轮数、缺失模型跳过；
  *   - 已经输出内容后失败不切换，避免重复气泡；
- *   - model:fallback 事件带足顺序信息供日志页展示。
+ *   - model:fallback 事件带足顺序信息供日志页展示；
+ *   - 同一 failoverScope 内降级粘滞，后续调用直接沿用降级模型并跳过已失败模型。
  *
  * 用法：npm run test:failover
  */
@@ -394,6 +395,61 @@ async function main() {
       '角色列表为空时不降级',
       JSON.stringify(harness.calls) === JSON.stringify(['p/primary']) && !result.done,
       JSON.stringify({ calls: harness.calls, result }),
+    )
+  }
+
+  console.log('\n⑭ 同一 failoverScope 内降级后粘滞并跳过已失败模型')
+  {
+    const scope = {}
+    let backupACalls = 0
+    let lastProviderOptions = null
+    const harness = createHarness({
+      streams: {
+        'p/primary': ({ onError }) => queueMicrotask(() => onError(new Error('primary down'))),
+        'p/backup-a': ({ onChunk, onDone, onError }) => {
+          backupACalls += 1
+          if (backupACalls === 1) {
+            onChunk('first-fallback-ok')
+            onDone({})
+            return
+          }
+          queueMicrotask(() => onError(new Error('backup-a down later')))
+        },
+        'p/backup-b': ({ options, onChunk, onDone }) => {
+          lastProviderOptions = options
+          onChunk('second-fallback-ok')
+          onDone({})
+        },
+      },
+      registryKeys: ['p/primary', 'p/backup-a', 'p/backup-b'],
+      configValues: {
+        // 故意把主模型也放进备用列表：验证同一作用域内已失败模型会被跳过。
+        'model.failoverEnabled': true,
+        'model.failoverKeys': ['p/primary', 'p/backup-a', 'p/backup-b'],
+        'model.failoverPasses': 1,
+      },
+    })
+    const first = await harness.run({ model: 'p/primary', failoverScope: scope })
+    const firstCalls = [...harness.calls]
+    const second = await harness.run({ model: 'p/primary', failoverScope: scope })
+    check(
+      '首调用从主模型降级到备用 A 后成功',
+      first.done &&
+        first.text === 'first-fallback-ok' &&
+        JSON.stringify(firstCalls) === JSON.stringify(['p/primary', 'p/backup-a']),
+      JSON.stringify({ calls: firstCalls, first }),
+    )
+    check(
+      '后续调用直接沿用备用 A，之后失败也只继续降级到备用 B，不再碰主模型',
+      second.done &&
+        second.text === 'second-fallback-ok' &&
+        JSON.stringify(harness.calls.slice(firstCalls.length)) === JSON.stringify(['p/backup-a', 'p/backup-b']),
+      JSON.stringify({ calls: harness.calls, second }),
+    )
+    check(
+      'failoverScope 不会作为参数泄漏给具体适配器',
+      lastProviderOptions && !Object.prototype.hasOwnProperty.call(lastProviderOptions, 'failoverScope'),
+      JSON.stringify(lastProviderOptions),
     )
   }
 
