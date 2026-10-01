@@ -94,6 +94,7 @@ export function apply(ctx) {
   const backBtn = document.querySelector('[data-mobile-back]')
   const titleEl = document.querySelector('[data-mobile-title]')
   const tabsEl = document.querySelector('[data-mobile-tabs]')
+  const topbarSettingsBtn = document.querySelector('.mobile-topbar [data-mobile-settings]')
 
   const activeChannel = () => {
     try {
@@ -179,6 +180,15 @@ export function apply(ctx) {
   }
 
   backBtn?.addEventListener('click', onBack)
+
+  // 顶栏设置按钮和底部“设置”标签都要能打开 / 关闭设置页；之前顶栏按钮
+  // 只有 data 标记没有监听，手机上点顶部齿轮会完全没反应。
+  const onSettingsClick = event => {
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    events.emit('settings:toggle', null)
+  }
+  topbarSettingsBtn?.addEventListener('click', onSettingsClick)
 
   const onTabsClick = event => {
     if (event.target.closest('[data-mobile-settings]')) {
@@ -370,6 +380,7 @@ export function apply(ctx) {
     offs.forEach(off => off?.())
     disposeScrollChaining?.()
     backBtn?.removeEventListener('click', onBack)
+    topbarSettingsBtn?.removeEventListener('click', onSettingsClick)
     tabsEl?.removeEventListener('click', onTabsClick)
     document.removeEventListener('click', onCaptureClick, true)
     document.querySelector('.mobile-topbar')?.remove()

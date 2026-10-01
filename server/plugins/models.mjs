@@ -161,12 +161,12 @@ function createOpenAICompatibleAdapter({ label, defaultBaseURL, deepseek = false
     },
 
     /** OpenAI 兼容的 /embeddings 接口（DeepSeek 官方可能不支持，错误会原样上报）。 */
-    async embed({ provider, model, input }, ctx) {
+    async embed({ provider, model, input, timeoutMs }, ctx) {
       const base = trimSlash(provider.baseURL || defaultBaseURL)
       const res = await request(ctx, `${base}/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
-        timeoutMs: providerTimeout(provider),
+        timeoutMs: embeddingTimeout(provider, timeoutMs),
         proxy: provider.proxy,
         body: JSON.stringify({ model, input }),
       })
@@ -513,14 +513,15 @@ const adapters = {
       return { detail: `本地模型 ${models.length} 个` }
     },
     /** 优先新版 /api/embed；旧版 Ollama 回退到 /api/embeddings。 */
-    async embed({ provider, model, input }, ctx) {
+    async embed({ provider, model, input, timeoutMs }, ctx) {
       const base = trimSlash(provider.baseURL || 'http://localhost:11434')
       const texts = input.map(text => String(text ?? ''))
+      const readTimeout = embeddingTimeout(provider, timeoutMs)
       try {
         const res = await request(ctx, `${base}/api/embed`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
-          timeoutMs: providerTimeout(provider),
+          timeoutMs: readTimeout,
           proxy: provider.proxy,
           body: JSON.stringify({ model, input: texts }),
         })
@@ -535,7 +536,7 @@ const adapters = {
         const res = await request(ctx, `${base}/api/embeddings`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders(provider) },
-          timeoutMs: providerTimeout(provider),
+          timeoutMs: readTimeout,
           proxy: provider.proxy,
           body: JSON.stringify({ model, prompt: text }),
         })
@@ -1234,7 +1235,7 @@ export function apply(ctx) {
       signal?.addEventListener?.('abort', () => controller.abort(new Error('已取消')), { once: true })
 
       const toolCount = Array.isArray(options?.tools) ? options.tools.length : 0
-      ctx.logger.info(`[models] 模型请求开始 · ${providerId} / ${useModel} · 超时 ${timeoutMs}ms · 工具 ${toolCount}`)
+      ctx.logger.info(`[模型请求] 模型请求开始 · ${providerId} / ${useModel} · 超时 ${timeoutMs}ms · 工具 ${toolCount}`)
       hub.broadcast('chat/start', {
         provider: providerId,
         model: useModel,
@@ -1288,7 +1289,7 @@ export function apply(ctx) {
             for (const delta of reasoningBuffer) onReasoning?.(delta)
             const elapsedMs = Date.now() - startedAt
             ctx.logger.info(
-              `[models] 模型响应完成 · ${providerId} / ${useModel} · ${elapsedMs}ms · 输出 ${attemptText.length} 字 · 工具 ${toolCalls.length}`,
+              `[模型响应] 模型响应完成 · ${providerId} / ${useModel} · ${elapsedMs}ms · 输出 ${attemptText.length} 字 · 工具 ${toolCalls.length}`,
             )
             hub.broadcast('chat/done', {
               provider: providerId,
@@ -1352,7 +1353,7 @@ export function apply(ctx) {
      * 文本向量化。从已配置提供商里调用对应模型的 embedding 接口，
      * 返回 { embeddings, dimension, provider, model }；维度由接口实际返回自动决定。
      */
-    async embed({ provider, model, input } = {}) {
+    async embed({ provider, model, input, timeoutMs } = {}) {
       const providerId = provider || settings.get().defaultProvider
       if (!providerId) throw createError(400, '请先在「设置 → 模型」选择向量模型提供商')
       const cfg = getProvider(providerId)
@@ -1363,7 +1364,7 @@ export function apply(ctx) {
       if (!useModel) throw createError(400, `请先为「${cfg.name}」选择向量模型`)
       const texts = (Array.isArray(input) ? input : [input]).map(value => String(value ?? '')).filter(value => value.trim())
       if (!texts.length) throw createError(400, 'embedding 输入不能为空')
-      const raw = await adapter.embed({ provider: cfg, model: useModel, input: texts }, ctx)
+      const raw = await adapter.embed({ provider: cfg, model: useModel, input: texts, timeoutMs }, ctx)
       const embeddings = (Array.isArray(raw) ? raw : [])
         .map(vector => (Array.isArray(vector) ? vector.map(value => Number(value)).filter(Number.isFinite) : []))
         .filter(vector => vector.length)
@@ -1478,6 +1479,12 @@ function anthropicHeaders(provider) {
 function providerTimeout(provider) {
   const ms = Number(provider?.timeoutMs)
   return Number.isFinite(ms) && ms > 0 ? ms : 30000
+}
+
+/** embedding 调用可显式传更短的查询超时（记忆检索降级用），否则用提供商 / 网络超时。 */
+function embeddingTimeout(provider, timeoutMs) {
+  const ms = Number(timeoutMs)
+  return Number.isFinite(ms) && ms > 0 ? ms : providerTimeout(provider)
 }
 
 /**

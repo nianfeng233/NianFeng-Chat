@@ -84,14 +84,16 @@ export function apply(ctx) {
   }
 
   const FORWARD_RANK = { error: 0, warn: 1, info: 2, debug: 3 }
-  const forwardThreshold = () => normalizeForwardLevel(config?.get?.('logs.clientForwardLevel', 'warn'))
+  // 日志页现在直接读后端 runtime.log；前端插件日志必须先完整回传后端，
+  // 电脑端 / 手机端 / CLI 才会看到同一份。默认对齐终端 info 及以上。
+  const forwardThreshold = () => normalizeForwardLevel(config?.get?.('logs.clientForwardLevel', 'info'))
 
-  const scheduleForward = () => {
+  const scheduleForward = (delay = 250) => {
     if (forwardTimer || !canForward()) return
     forwardTimer = setTimeout(() => {
       forwardTimer = null
       flushForwardQueue()
-    }, 250)
+    }, Math.max(0, Number(delay) || 0))
   }
 
   const flushForwardQueue = async () => {
@@ -120,13 +122,15 @@ export function apply(ctx) {
   const enqueueForward = message => {
     if (!canForward()) return
     const level = normalizeForwardLevel(message?.type ?? message?.level)
-    // 默认只把 warn / error 转发到后端终端；浏览器刷新时不再把几十条
-    // 加载过程的 info / debug 日志灌进后端。需要完整前端日志时把
-    // logs.clientForwardLevel 设为 info / debug。
-    if ((FORWARD_RANK[level] ?? FORWARD_RANK.info) > (FORWARD_RANK[forwardThreshold()] ?? FORWARD_RANK.warn)) return
+    // 默认与终端对齐，把 info / warn / error 都转发到后端；需要更安静的终端时
+    // 把 logs.clientForwardLevel 设为 warn，需要完整调试日志时设为 debug。
+    if ((FORWARD_RANK[level] ?? FORWARD_RANK.info) > (FORWARD_RANK[forwardThreshold()] ?? FORWARD_RANK.info)) return
     const args = Array.isArray(message?.args) ? message.args : []
     const text = args.map(formatArg).join(' ').trim()
     if (!text) return
+    // 关键时序日志（收到消息 / 请求开始 / 回复）立即发起回传，不等待 250ms 批量：
+    // 否则模型请求日志可能先进入后端终端，页面看到的时序就和真实事件相反。
+    const urgent = /^\[(?:收到消息|请求开始|回复)\]/.test(text) || String(message?.name || '') === 'channel-base'
     forwardQueue.push({
       at: Number(message?.ts ?? message?.timestamp ?? Date.now()) || Date.now(),
       level,
@@ -137,7 +141,8 @@ export function apply(ctx) {
       clientId: String(message?.nfId || ''),
     })
     if (forwardQueue.length > MAX_FORWARD_QUEUE) forwardQueue.splice(0, forwardQueue.length - MAX_FORWARD_QUEUE)
-    scheduleForward()
+    if (urgent && !forwarding) void flushForwardQueue()
+    else scheduleForward(urgent ? 0 : 250)
   }
 
   let exportSeq = 0

@@ -6,14 +6,14 @@
 /**
  * V? · settings-item-logs
  * 运行日志页（类似 AstrBot 的日志台）：
- *   - 实时收集 cordis logger 历史 / 订阅
- *   - 把模型阶段、工具调用、权限确认、渠道外发转成可读时间线
- *   - 同步后端请求日志，便于判断是超时、排队还是压根没发出去
+ *   - 只读后端 runtime.log：历史全量拉取 + 专用 SSE 实时流 + 轮询兜底
+ *   - 前端插件日志统一回传后端，因此电脑端 / 手机端 / CLI 读的是同一份
+ *   - 按后端 id 顺序展示，和终端刷出顺序一致，不再本地维护第二份日志
  */
 export const name = 'settings-item-logs'
-export const version = '1.1.0'
+export const version = '1.2.0'
 export const displayName = '视图 · 运行日志'
-export const description = '独立运行日志视图：模型调用阶段、工具 / 渠道消息 / 权限确认与后端运行日志。'
+export const description = '独立运行日志视图：直接读取后端 runtime.log，统一展示模型 / 工具 / 渠道 / 权限与运行日志。'
 export const author = '念风内核'
 export const icon = '📝'
 export const core = false
@@ -27,10 +27,9 @@ export const optionalDepends = {
   'logger': '^1.0.0',
   'toast-host': '>=1.0.0',
 }
-export const inject = ['view-router', 'logs?', 'api?', 'event-bus', 'config?', 'toast?']
+export const inject = ['view-router', 'api?', 'event-bus', 'config?', 'toast?']
 
 import { useStyle } from '../../../src/util/style.mjs'
-import { describeIncomingMessage } from '../../../src/util/message-log.mjs'
 import { LOGS_CSS } from './style.mjs'
 
 const LEVEL_LABEL = { error: '错误', warn: '警告', info: '信息', debug: '调试' }
@@ -47,9 +46,6 @@ const escapeHtml = value =>
   String(value ?? '')
     .replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m])
 
-/** HTTP 访问日志（如 `HTTP POST /api/xxx → 200 · 3ms`）对普通用户没有意义，日志页默认不展示。 */
-const isHttpAccessLog = text =>
-  /^HTTP\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s*→\s*\d{3}\s*·\s*\d+ms/i.test(String(text || '').trim())
 
 const pad = (value, len = 2) => String(value).padStart(len, '0')
 const formatTime = at => {
@@ -58,31 +54,26 @@ const formatTime = at => {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
 }
 
-const formatArg = value => {
-  if (value instanceof Error) return `${value.message}${value.stack ? `\n${value.stack}` : ''}`
-  if (typeof value === 'object' && value !== null) {
-    try {
-      return JSON.stringify(value)
-    } catch (_) {
-      return String(value)
-    }
-  }
-  return String(value)
-}
 
-const categoryOfSource = name => {
-  const text = String(name || '')
-  if (text.includes('chat-flow') || text.includes('model')) return '模型'
-  if (text.includes('chat-tools') || text.includes('tool')) return '工具'
-  if (text.includes('chat-permissions') || text.includes('permission')) return '权限'
-  if (text.includes('channel') || text.includes('napcat') || text.includes('qqbot') || text.includes('clawbot')) return '外发'
-  if (text.includes('backend') || text.includes('http')) return '后端'
+const categoryOfSource = (name, text = '') => {
+  const source = String(name || '')
+  const content = String(text || '')
+  // 前端插件日志统一带了 [收到消息] / [模型…] / [工具…] / [回复] 等标签；
+  // 优先按标签分到“渠道 / 模型 / 工具 / 权限”，没有任何标签时再按来源名兜底。
+  if (/^\s*\[收到消息\]/.test(content) || /^\s*\[(?:渠道|外发)/.test(content)) return '外发'
+  if (/^\s*\[(?:模型|回复|请求|本轮)/.test(content)) return '模型'
+  if (/^\s*\[工具/.test(content)) return '工具'
+  if (/^\s*\[(?:权限|确认)/.test(content)) return '权限'
+  if (source.includes('chat-flow') || source.includes('model')) return '模型'
+  if (source.includes('chat-tools') || source.includes('tool')) return '工具'
+  if (source.includes('chat-permissions') || source.includes('permission')) return '权限'
+  if (source.includes('channel') || source.includes('napcat') || source.includes('qqbot') || source.includes('clawbot')) return '外发'
+  if (source.includes('backend') || source.includes('http')) return '后端'
   return '系统'
 }
 
 export function apply(ctx) {
   const router = ctx.inject('view-router')
-  const logs = ctx.inject('logs?')
   const api = ctx.inject('api?')
   const events = ctx.inject('event-bus')
   const config = ctx.inject('config?')
@@ -206,46 +197,57 @@ export function apply(ctx) {
       let backendConsoleLevel = 'info'
       let streamOnline = false
       let active = true
-      // 本端落库产生的 message:added 与后端 sessions/changed 回放的是同一条消息；
-      // 用消息 id 去重，避免 WebUI 既处理渠道消息又收到 SSE 回放时出现两条“收到消息”。
-      const inboundLoggedKeys = new Set()
-      const inboundKeyOf = (conversationId, message) => {
-        if (!message) return ''
-        const id = message.message_id || message.id || message.seq || ''
-        const fallback = `${Number(message.createdAt) || 0}:${String(message.content || '').slice(0, 80)}`
-        return `${String(conversationId || '')}:${id ? String(id) : fallback}`
-      }
-      const markInboundLogged = (conversationId, message) => {
-        const key = inboundKeyOf(conversationId, message)
-        if (!key || inboundLoggedKeys.has(key)) return false
-        inboundLoggedKeys.add(key)
-        if (inboundLoggedKeys.size > 800) {
-          for (const value of [...inboundLoggedKeys].slice(0, 200)) inboundLoggedKeys.delete(value)
-        }
-        return true
-      }
 
       /**
-       * 自动到底 / 判断是否到底 / 恢复滚动位置都作用于 .logs-list 自己的滚动条
-       * （手机端也保留日志内层滚动，方便连续浏览）。列表到顶 / 到底后如何交给
-       * 外层滚动由 CSS overscroll-behavior-y:auto + mobile-shell 的兜底手势处理。
+       * 自动到底 / 判断是否到底 / 恢复滚动位置都作用于当前真正的滚动宿主：
+       * 桌面端优先 .logs-list 自身；手机端 .logs-list 随内容展开后，滚动宿主
+       * 变成 .logs-page（桌面同一套 flex + overflow，只有布局高度不同）。
        */
-      const currentScrollTop = () => Number(listEl?.scrollTop) || 0
+      const scrollHosts = () => {
+        const hosts = []
+        const seen = new Set()
+        const push = element => {
+          if (!element || seen.has(element)) return
+          seen.add(element)
+          hosts.push(element)
+        }
+        push(listEl)
+        let parent = listEl?.parentElement || null
+        while (parent) {
+          push(parent)
+          if (String(parent.className || '').split(/\s+/).includes('pane-view')) break
+          parent = parent.parentElement
+        }
+        return hosts
+      }
+      const activeScrollHost = () => {
+        for (const host of scrollHosts()) {
+          if (host.scrollHeight > host.clientHeight + 1) return host
+        }
+        return listEl || null
+      }
+      const currentScrollTop = () => Number(activeScrollHost()?.scrollTop) || 0
       const scrollToLatest = () => {
-        if (!listEl) return
-        listEl.scrollTop = listEl.scrollHeight
+        const host = activeScrollHost()
+        if (!host) return
+        host.scrollTop = host.scrollHeight
       }
       const atScrollBottom = () => {
-        if (!listEl) return true
-        return listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 28
+        const host = activeScrollHost()
+        if (!host) return true
+        return host.scrollHeight - host.scrollTop - host.clientHeight < 28
       }
       const restoreScrollTop = value => {
-        if (!listEl) return
-        listEl.scrollTop = Math.min(Math.max(0, Number(value) || 0), Math.max(0, listEl.scrollHeight - listEl.clientHeight))
+        const host = activeScrollHost()
+        if (!host) return
+        host.scrollTop = Math.min(Math.max(0, Number(value) || 0), Math.max(0, host.scrollHeight - host.clientHeight))
       }
 
-      /** 日志按时间排序；同一毫秒内保持进入列表的先后顺序。 */
-      const compareEntries = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || a.id - b.id
+      /** 日志顺序以来源为准：后端 runtime.log 的 id 顺序就是终端刷出顺序，
+       *  页面不再按各自的时间戳重排，避免“收到消息”被自己算到模型调用之后。 */
+      const compareEntries = (a, b) =>
+        (Number(a.order) || 0) - (Number(b.order) || 0) ||
+        a.id - b.id
 
       const scheduleRender = () => {
         if (!active || paused || renderTimer) return
@@ -267,19 +269,23 @@ export function apply(ctx) {
       }
 
       const fingerprintOf = entry => {
+        const clientId = String(entry?.clientId || '')
+        if (clientId) return `client|${clientId}`
+        // 后端 runtime.log 的 id 在同一次后端进程内唯一；没有 id 的旧接口兜底
+        // 才退回内容指纹，避免同一行被 SSE + 轮询重复插进页面。
+        const order = Number(entry?.order) || 0
+        if (order > 0) return `runtime|${order}`
         const at = Number(entry?.at) || Date.now()
         const text = String(entry?.text || '').slice(0, 600)
         const source = String(entry?.source || '')
-        const clientId = String(entry?.clientId || '')
-        // 时间按 50ms 分桶：前端本地记录与后端回传的同一行时间会略有差异，
-        // 但内容 / 来源一致时应当合并成一条；clientId 相同则一定同源。
-        return `${clientId}|${Math.round(at / 50)}|${source}|${text}`
+        return `${Math.round(at / 50)}|${source}|${text}`
       }
 
       const add = entry => {
         if (!active) return false
         const item = {
           id: ++seq,
+          order: 0,
           at: Date.now(),
           level: 'info',
           cat: '系统',
@@ -305,7 +311,7 @@ export function apply(ctx) {
         }
         entries.push(item)
         if (entries.length > MAX_ENTRIES) {
-          // 历史回填可能晚于本地日志到达，按时间排序后再截断，避免把最新日志裁掉。
+          // 按后端顺序截断；保留最新的一段，而不是把刚补进来的历史又裁掉。
           entries.sort(compareEntries)
           entries.splice(0, entries.length - MAX_ENTRIES)
         }
@@ -322,24 +328,6 @@ export function apply(ctx) {
         const text = String(value || '').trim().toLowerCase()
         if (text === 'warning') return 'warn'
         return LEVEL_LABEL[text] ? text : 'info'
-      }
-
-      const addRawLog = record => {
-        const args = Array.isArray(record?.args) ? record.args : []
-        const text = args.map(formatArg).join(' ').slice(0, 8000)
-        if (!text) return false
-        if (isHttpAccessLog(text)) return false
-        const source = String(record?.name || 'app')
-        const cat = categoryOfSource(source)
-        return add({
-          at: Number(record?.ts ?? record?.timestamp ?? record?.time ?? Date.now()) || Date.now(),
-          level: normalizeLevel(record?.type ?? record?.level),
-          cat,
-          source,
-          text,
-          clientId: String(record?.nfId || record?.clientId || ''),
-          timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(text),
-        })
       }
 
       const addBackendRequest = request => {
@@ -364,7 +352,7 @@ export function apply(ctx) {
         const keepScrollTop = currentScrollTop()
         const cat = catSelect?.value || ''
         const keyword = String(searchInput?.value || '').trim().toLowerCase()
-        // 先按时间排序再过滤 / 截断：历史回填、SSE 与轮询混在一起时顺序仍然稳定。
+        // 按后端 runtime.log 的 id 顺序排列；历史回填、SSE 与轮询混在一起时，仍与终端看到的先后顺序一致。
         const sortedEntries = [...entries].sort(compareEntries)
         const visible = sortedEntries
           .filter(item => selectedLevels.has(item.level))
@@ -399,7 +387,7 @@ export function apply(ctx) {
             ? streamOnline
               ? ' 实时流已连接；代理 / 断线时自动退化为 3 秒轮询，也可以点「刷新」立即重拉。'
               : ' 实时流未连接，正在用 3 秒轮询兜底；也可以点「刷新」立即重拉。'
-            : ' 当前后端没有运行时日志实时接口（可能是旧进程或旧后端）：请重启后端后再打开日志页；现在只能看到浏览器端日志与旧请求日志。'
+            : ' 当前后端没有运行时日志接口（可能是旧进程或旧后端）：现在只能看到旧 /api/logs 请求日志；请重启后端后再打开日志页。'
         }
         // 重新 innerHTML 会丢失原滚动位置：自动滚动时直接到底；用户手动翻上去
         // 时保留原位置，并显示“有新日志”提示，避免刷新/实时更新看起来没反应。
@@ -414,7 +402,7 @@ export function apply(ctx) {
 
       const pullBackend = async () => {
         // 新后端已经有 /api/logs/runtime 全量日志（HTTP 请求也会写进去），
-        // 旧 /api/logs 请求日志只在没有 runtime 接口时兜底，避免重复刷屏。
+        // 旧 /api/logs 请求日志只在没有 runtime 接口时兜底，避免两套数据混排。
         if (!active || !api || paused || runtimeAvailable) return
         try {
           const data = await api.logs(200)
@@ -445,10 +433,11 @@ export function apply(ctx) {
         // 默认筛选（error / warn / info）就展示什么，不再单独吞掉 HTTP 访问行。
         const level = normalizeLevel(line.level)
         return add({
+          order: id,
           at: Number(line.at) || Date.now(),
           level,
-          cat: categoryOfSource(name),
-          // 前端转发到后端的日志仍按原始 logger 名展示；clientId 用于和本地 history 精确去重。
+          cat: categoryOfSource(name, text),
+          // 前端转发到后端的日志仍按原始 logger 名展示；clientId 用于精确去重。
           source: line.origin === 'web' || !line.tag ? name : `${line.tag}·${name}`,
           text,
           clientId: String(line.clientId || ''),
@@ -520,9 +509,19 @@ export function apply(ctx) {
         }
       }
 
-      const fetchRuntimeOnce = async ({ force = false, allowRetry = true } = {}) => {
-        if (!active || !api) return { ok: false, error: '后端未连接' }
-        try {
+        /** 后端实例切换（重启 / 换数据目录）时，旧 id 会复用；整页重来一遍。 */
+        const resetLogEntries = () => {
+          entries = []
+          entryKeys.clear()
+          clientIdKeys.clear()
+          backendSeen.clear()
+          unseen = 0
+          updateJumpBtn()
+        }
+
+        const fetchRuntimeOnce = async ({ force = false, allowRetry = true } = {}) => {
+          if (!active || !api) return { ok: false, error: '后端未连接' }
+          try {
           if (force) {
             latestRuntimeId = 0
             runtimeSeen = new Set()
@@ -551,7 +550,10 @@ export function apply(ctx) {
               if (!allowRetry) return { ok: false, error: '后端日志实例已切换，请重试' }
               latestRuntimeId = 0
               runtimeSeen = new Set()
-              if (instanceChanged) scheduleRuntimeReconnect(0)
+              if (instanceChanged) {
+                  resetLogEntries()
+                  scheduleRuntimeReconnect(0)
+                }
               return fetchRuntimeOnce({ force: true, allowRetry: false })
             }
             const dataLines = Array.isArray(data?.lines) ? data.lines : []
@@ -599,8 +601,8 @@ export function apply(ctx) {
       const pullBackendRuntime = options => queueRuntimePull(options)
 
       /**
-       * 手动 / 自动重同步：保留当前列表里的本地日志，把后端全量历史合并进来。
-       * 不复位 entries / entryKeys，缺的历史会补上，已有的靠内容指纹去重；
+       * 手动 / 自动重同步：保留当前列表，把后端全量历史合并进来。
+       * 不复位 entries / entryKeys，缺的历史会补上，已有的靠后端 id / clientId 去重；
        * 这样即使后端某次响应被代理截断，刷新也不会把新日志“洗掉”回到旧状态。
        */
       const resyncFromBackend = async () => {
@@ -614,208 +616,12 @@ export function apply(ctx) {
         return result
       }
 
-      /** 渠道 ID / 会话记录 → 人类可读渠道名；日志页优先展示名称而不是内部 id。 */
-      const resolveChannelName = (conversationId, meta = {}) => {
-        const registry = ctx.registry.get('channel-registry')
-        const wanted = [meta.napcatChannelId, meta.qqbotChannelId, meta.clawbotChannelId, meta.channelId]
-          .map(value => String(value || ''))
-          .filter(Boolean)
-        if (registry?.tabs) {
-          try {
-            for (const tab of registry.tabs()) {
-              for (const channelId of wanted) {
-                const channel = registry.findChannel?.(tab, channelId)
-                if (channel?.name) return String(channel.name)
-              }
-            }
-          } catch (_) {
-            /* 渠道注册表不可用时退回会话名 */
-          }
-        }
-        const conversation = ctx.registry.get('session-service')?.get?.(conversationId)
-        return String(conversation?.name || meta.via || '渠道')
-      }
-
-      // 先导入日志服务里已有的历史，再订阅后续记录。
-      for (const record of logs?.history?.() || []) addRawLog(record)
-      const offRecord = logs?.onRecord?.(addRawLog)
-
+      // 日志页只读后端 runtime.log：前端不再单独维护一份本地日志；SSE、
+      // 轮询和历史回填都合并进同一个 addRuntimeLine 去重链，所有端看到同一份。
       const offs = [
-        events.on('chat:request-start', payload => {
-          const { conversationId, text, senderName, channelName } = payload || {}
-          const from = channelName ? ` · 来自「${channelName}」${senderName ? `的 ${senderName}` : ''}` : ''
-          const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 140)
-          add({
-            level: 'info',
-            cat: '模型',
-            source: 'chat-flow',
-            text: `开始处理请求${from}${preview ? `：${preview}` : ` · 会话 ${conversationId || '-'}`}`,
-          })
-        }),
-        events.on('message:added', ({ conversationId, message } = {}) => {
-          if (!message || message.role !== 'user') return
-          const meta = message.meta || {}
-          if (meta.direction !== 'inbound') return
-          if (!markInboundLogged(conversationId, message)) return
-          add({
-            level: 'info',
-            cat: '外发',
-            source: message.source || meta.via || 'channel',
-            text: describeIncomingMessage(message, {
-              channelName: resolveChannelName(conversationId, meta),
-              channelType: meta.via || message.source,
-              scope: meta.sessionType || meta.messageType,
-            }),
-          })
-        }),
-        events.on('chat:status', payload => {
-          const { status, round, tool, label, conversationId } = payload || {}
-          if (status === 'idle') {
-            add({ level: 'debug', cat: '模型', source: 'chat-flow', text: `空闲 · 会话 ${conversationId || '-'}` })
-            return
-          }
-          if (status === 'thinking') add({ level: 'info', cat: '模型', source: 'chat-flow', text: `模型思考中 · 第 ${round || '?'} 轮` })
-          else if (status === 'tool') add({ level: 'info', cat: '工具', source: 'chat-flow', text: `${label || `正在调用工具 ${tool || ''}`}` })
-          else if (status === 'typing') add({ level: 'debug', cat: '外发', source: 'chat-flow', text: `正在准备输入（${tool || '消息'}）` })
-        }),
-        events.on('chat:request-done', ({ conversationId, elapsed, thinkingMs } = {}) =>
-          add({
-            level: 'info',
-            cat: '模型',
-            source: 'chat-flow',
-            text: `本轮结束 · 总耗时 ${Number(elapsed) || 0}ms · 模型思考 ${Number(thinkingMs) || 0}ms · 会话 ${conversationId || '-'}`,
-          }),
-        ),
-        events.on('model:start', payload =>
-          add({
-            level: 'info',
-            cat: '模型',
-            source: 'model-service',
-            text: `模型请求开始 · ${payload?.model || payload?.key || '当前模型'}`,
-          }),
-        ),
-        events.on('model:done', payload =>
-          add({
-            level: 'info',
-            cat: '模型',
-            source: 'model-service',
-            text: `模型响应完成 · ${Number(payload?.elapsedMs) || 0}ms${payload?.finishReason ? ` · finish=${payload.finishReason}` : ''}`,
-          }),
-        ),
-        events.on('model:error', payload => {
-          const message = payload?.error?.message || payload?.error || '未知错误'
-          add({
-            level: 'error',
-            cat: '模型',
-            source: 'model-service',
-            text: `模型调用错误 · ${Number(payload?.elapsedMs) || 0}ms：${message}`,
-            timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(String(message)),
-          })
-        }),
-        events.on('model:fallback', payload => {
-          const message = payload?.error?.message || payload?.error || '未知错误'
-          add({
-            level: 'warn',
-            cat: '模型',
-            source: 'model-service',
-            text: `模型降级 · ${payload?.from || '当前模型'} → ${payload?.to || '备用模型'}（第 ${Number(payload?.attempt) || 1} 次）：${message}`,
-            timeout: /timeout|超时|ETIMEDOUT|timed out/i.test(String(message)),
-          })
-        }),
-        events.on('chat:confirm-request', payload =>
-          add({
-            level: 'warn',
-            cat: '权限',
-            source: 'chat-permissions',
-            text: `等待敏感操作确认 · ${payload?.action === 'read' ? '读取' : '发送'} → ${payload?.targetName || payload?.targetChannel || '-'}`,
-          }),
-        ),
-        events.on('chat:confirm-resolved', payload =>
-          add({
-            level: payload?.approved ? 'info' : 'warn',
-            cat: '权限',
-            source: 'chat-permissions',
-            text: payload?.approved ? '敏感操作已确认，继续执行工具' : '敏感操作被拒绝或确认超时',
-          }),
-        ),
-        events.on('channel:outbound', payload => {
-          const { status, channelType, channelName, channelId, ms, error, text } = payload || {}
-          const target = channelName || channelId || channelType || '渠道'
-          const preview = String(text || '').replace(/\s+/g, ' ').slice(0, 120)
-          if (status === 'pending') {
-            add({ level: 'debug', cat: '外发', source: channelType || 'channel', text: `准备外发 · ${target}${preview ? `：${preview}` : ''}` })
-          } else if (status === 'sent') {
-            add({
-              level: 'info',
-              cat: '外发',
-              source: channelType || 'channel',
-              text: `已发送到「${target}」${preview ? `：${preview}` : ''} · ${Number(ms) || 0}ms`,
-            })
-          } else if (status === 'failed') {
-            add({ level: 'error', cat: '外发', source: channelType || 'channel', text: `外发失败 · ${target}：${error || '未知错误'}` })
-          }
-        }),
-        events.on('chat-queue:start', ({ key, pending } = {}) =>
-          add({ level: 'debug', cat: '模型', source: 'chat-queue', text: `角色队列开始执行 · ${key || ''} · 排队 ${Number(pending) || 0}` }),
-        ),
-        events.on('chat-queue:finish', ({ key, pending } = {}) =>
-          add({ level: 'debug', cat: '模型', source: 'chat-queue', text: `角色队列任务完成 · ${key || ''} · 剩余 ${Number(pending) || 0}` }),
-        ),
-        events.on('backend:status', status =>
-          add({
-            level: status?.online ? 'info' : 'warn',
-            cat: '后端',
-            source: 'backend-client',
-            text: status?.online ? `后端已连接 · ${status.baseUrl || ''}` : `后端不可用：${status?.lastError || '未知原因'}`,
-          }),
-        ),
+        // 兼容旧后端：/api/events 的 log/line 也是运行时日志，接进同一份数据。
         events.on('backend:event', ({ event, data } = {}) => {
-          if (event === 'chat/start') {
-            add({
-              level: 'info',
-              cat: '模型',
-              source: 'backend',
-              text: `后端模型开始 · ${data?.provider || '-'} / ${data?.model || '-'} · 超时 ${Number(data?.timeoutMs) || 0}ms · 工具 ${Number(data?.toolCount) || 0}`,
-            })
-          } else if (event === 'chat/done') {
-            add({
-              level: 'info',
-              cat: '模型',
-              source: 'backend',
-              text: `后端模型完成 · ${Number(data?.ms) || 0}ms · 输出 ${Number(data?.length) || 0} 字 · 工具 ${Number(data?.toolCalls) || 0}`,
-            })
-          } else if (event === 'chat/error') {
-            add({
-              level: 'error',
-              cat: '模型',
-              source: 'backend',
-              text: `后端模型错误 · ${Number(data?.ms) || 0}ms${data?.timedOut ? '（超时）' : ''}：${data?.detail || '未知错误'}`,
-              timeout: data?.timedOut === true || /timeout|超时|ETIMEDOUT|timed out/i.test(String(data?.detail || '')),
-            })
-          } else if (event === 'log/line') {
-            addRuntimeLine(data)
-          } else if (event === 'sessions/changed') {
-            const message = data?.message
-            const meta = message?.meta || {}
-            if (data?.action === 'message' && message?.role === 'user' && meta.direction === 'inbound') {
-              if (markInboundLogged(String(data.id || ''), message)) {
-                add({
-                  level: 'info',
-                  cat: '外发',
-                  source: message.source || meta.via || 'channel',
-                  text: describeIncomingMessage(message, {
-                    channelName: resolveChannelName(String(data.id || ''), meta),
-                    channelType: meta.via || message.source,
-                    scope: meta.sessionType || meta.messageType,
-                  }),
-                })
-              }
-            } else {
-              add({ level: 'debug', cat: '后端', source: 'backend', text: '后端事件：sessions/changed' })
-            }
-          } else if (event === 'settings/updated') {
-            add({ level: 'debug', cat: '后端', source: 'backend', text: `后端事件：${event}` })
-          }
+          if (event === 'log/line') addRuntimeLine(data)
         }),
       ]
 
@@ -838,18 +644,14 @@ export function apply(ctx) {
             statsEl.textContent = `${entries.length} 条 · ${streamText} · 已暂停`
           }
         } else if (button.dataset.logsClear !== undefined) {
-          entries = []
-          entryKeys.clear()
-          clientIdKeys.clear()
-          backendSeen.clear()
+          resetLogEntries()
           runtimeSeen = new Set()
           latestRuntimeId = 0
-          logs?.clear?.()
           // 同时清空后端内存 / 文件，否则刷新页面历史又会回来。
           Promise.resolve(api?.del?.('/logs/runtime')).catch(() => {})
           render()
         } else if (button.dataset.logsCopy !== undefined) {
-          const visible = entries.slice(-MAX_RENDER).map(item => `${formatTime(item.at)} [${item.level}] [${item.source}] ${item.text}`).join('\n')
+          const visible = [...entries].sort(compareEntries).slice(-MAX_RENDER).map(item => `${formatTime(item.at)} [${item.level}] [${item.source}] ${item.text}`).join('\n')
           try {
             await navigator.clipboard.writeText(visible)
             toast?.success?.('日志已复制到剪贴板')
@@ -857,7 +659,7 @@ export function apply(ctx) {
             toast?.info?.(`已生成 ${entries.length} 条日志，可手动选择复制`)
           }
         } else if (button.dataset.logsExport !== undefined) {
-          const text = entries.map(item => `${formatTime(item.at)} [${item.level}] [${item.source}] ${item.text}`).join('\n')
+          const text = [...entries].sort(compareEntries).map(item => `${formatTime(item.at)} [${item.level}] [${item.source}] ${item.text}`).join('\n')
           try {
             const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
             const url = URL.createObjectURL(blob)
@@ -913,7 +715,7 @@ export function apply(ctx) {
         autoBtn?.classList.toggle('on', autoScroll)
         updateJumpBtn()
       }
-      listEl?.addEventListener('scroll', onListScroll)
+      for (const host of scrollHosts()) host.addEventListener('scroll', onListScroll)
 
       // 级别勾选：可任意组合（例如只勾错误 + 调试），默认只有 info；改动持久化，
       // 下次打开 / 刷新页面（以及配置同步到其它端）后仍然保持。
@@ -982,14 +784,13 @@ export function apply(ctx) {
         closeRuntimeStream()
         document.removeEventListener('visibilitychange', onVisibilityChange)
         window.removeEventListener?.('focus', onVisible)
-        offRecord?.()
         offLevelWatch?.()
         offs.forEach(off => off?.())
         refreshBtn?.removeEventListener('click', onRefresh)
         jumpBtn?.removeEventListener('click', onJump)
         container.removeEventListener('click', onClick)
         for (const input of levelInputs) input.removeEventListener('change', onLevelChange)
-        listEl?.removeEventListener('scroll', onListScroll)
+        for (const host of scrollHosts()) host.removeEventListener('scroll', onListScroll)
         catSelect?.removeEventListener('change', render)
         searchInput?.removeEventListener('input', render)
       }

@@ -90,6 +90,9 @@ const DEFAULTS = {
   'general.minimizeOnClose': false,
   // 运行日志页默认只勾选 info；用户勾选组合会通过 preferences 跨端 / 跨重启保留。
   'logs.levels': ['info'],
+  // 前端插件日志回传后端的级别：info 时与终端默认显示一致，保证 WebUI
+  // （电脑端 / 手机端）与 CLI 读同一份 runtime.log；warn 更安静，debug 最完整。
+  'logs.clientForwardLevel': 'info',
   'plugins.disabled': [],
   'plugins.removed': [],
   'selectable.theme.activeId': 'light',

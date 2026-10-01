@@ -171,7 +171,9 @@ export const MOBILE_SHELL_CSS = `
   html[data-mobile-layout="1"] .record-cards{min-height:220px;max-height:56vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
   html[data-mobile-layout="1"] .record-source{min-height:240px;}
   html[data-mobile-layout="1"] .logs-toolbar{width:100%;}
-  html[data-mobile-layout="1"] .logs-list{height:min(56vh,540px);min-height:220px;max-height:56vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:auto;-webkit-overflow-scrolling:touch;}
+  /* 手机端日志列表不再单独固定高度：整页由 .settings-content 滚动，
+     避免外层划不动、只能在内层小窗口里翻日志。 */
+  html[data-mobile-layout="1"] .logs-list{height:auto;min-height:0;max-height:none;overflow:visible;}
   html[data-mobile-layout="1"] .h-resizer{display:none !important;}
   html[data-mobile-layout="1"] .composer{height:auto !important;min-height:52px;padding:7px 10px 9px;}
   html[data-mobile-layout="1"] .composer-tools{margin-bottom:4px;max-height:28px;}
@@ -223,7 +225,6 @@ export const MOBILE_SHELL_CSS = `
     -webkit-overflow-scrolling:touch;
     overscroll-behavior:contain;
   }
-  html[data-mobile-layout="1"] .logs-list,
   html[data-mobile-layout="1"] .record-list,
   html[data-mobile-layout="1"] .record-cards{
     touch-action:pan-y;

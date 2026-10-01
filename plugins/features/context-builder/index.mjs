@@ -29,6 +29,8 @@ export const optionalDepends = {
 export const inject = ['chat-store', 'config', 'tool-registry?']
 export const provides = [{ name: 'context-builder', type: 'singleton' }]
 
+import { parseTextToolCalls } from '../../../src/util/tool-text.mjs'
+
 /** 固定追加在 system prompt 最底部的「聊天模式说明」，只列当前真实注册的工具。 */
 const CHAT_MODE_TOOL_HINTS = {
   chat_send: '发送聊天消息（所有面向用户的普通回复都必须通过它发送；messages 数组，结束本轮 end=true；可带 attachments 图片 / 视频 / 文件 / 音频）',
@@ -37,8 +39,11 @@ const CHAT_MODE_TOOL_HINTS = {
   media_play: '一步点歌：搜索 + 自动挑选 + 发到当前渠道（QQ 语音优先）',
   media_send: '把 B站 / 抖音链接下载后发送到当前渠道或指定渠道（视频 / 语音 / 图文 / 文件；QQ 官方机器人支持视频与文件）',
   read_document: '读取资料原文',
-  read_messages: '读取历史聊天记录 / 图片；semantic 参数会走长期记忆库的向量语义检索',
-  search_memory: '按语义搜索角色的长期记忆概括（每条约 10 轮），默认 1 条；同渠道附带原文，跨渠道默认只给概括；怀疑自己应该记得某事时可主动调用一次，再 chat_send',
+  read_messages: '读取历史聊天记录 / 图片原文；只有确实缺上下文、需要精确证据，或用户明确让翻记录时才用。semantic 参数会走长期记忆库的向量语义检索',
+  search_memory: '检索角色长期聊天记忆概括（每条约 10 轮）。只在与当前窗口之外的历史明显相关（估计关联度 > 50%）时用：用户问“还记得 / 之前 / 以前”，或提到长期习惯 / 承诺 / 共同经历 / 久未联系的人或事，而当前上下文答不上来。问候 / 寒暄 / 日常闲聊 / 常识问答不要调用',
+  kb_search: '检索本地知识库（用户设定 / 资料 / 术语 / 明确要求记住的知识）。用户问知识库里的设定或资料、或让你从知识库找东西时用；不要拿它当聊天记忆或联网搜索',
+  web_search: '联网搜索实时 / 外部信息（新闻、最新数据、网站内容、模型不知道或可能过时的事实）。用户要求查最新、看网上怎么说，或问题必须依赖实时外网信息时用；日常闲聊与已有常识不要用',
+  browser: '带登录态打开网页 / 操作浏览器（需要登录、点击、翻页才能拿到的外网内容）。简单搜索优先 web_search',
   read_forward: '分页读取合并转发聊天记录（默认只看预览；更多内容按 offset/limit 读取，避免上下文爆炸）',
   napcat_card: '处理 QQ 卡片消息（群邀请 / 推荐联系人 / 绑定关系）：查看详情，或在有请求 flag 时同意 / 拒绝',
   napcat_group_send: '群内 @成员 / @全体 / 发送群消息',
@@ -68,11 +73,11 @@ const chatModeGuide = (tools = [], { requireToolCall = true } = {}) => {
 const TOOL_RULES = [
   '你只能通过工具与用户聊天，不能直接输出面向用户的正文；普通 assistant 正文不会被当作聊天消息。需要回复时必须调用 chat_send。',
   '协议记忆：历史里 role=assistant 且带 tool_calls 的，才是你过去真正调用过的工具；role=tool 是工具返回的调用结果。没有 tool_calls 的普通 assistant 正文只是历史展示内容，不代表本轮回复方式，更不能据此认为应该继续输出 assistant 正文。',
-  '标准聊天工作流：读取当前用户消息后，先判断需不需要召回长期记忆；需要就先调用 search_memory，再调用 chat_send 把自然回复放进 messages 数组，并设置 end=true 结束本轮。',
-  '允许并鼓励主动检索长期记忆：当用户提到习惯 / 日常 / 人物 / 事件 / 偏好、可能以前聊过，或隔了较长时间再次开口、你怀疑自己应该记得时，先用一段语义描述调用一次 search_memory（默认 top_summaries=1）再回复。主动记忆召回不算“反复读取历史”，每轮最多一次；搜不到就按当前上下文正常回复。',
-  '每次模型回合只调用必要的最少工具；不要为了“了解情况”反复调用 read_messages，也不要把一次普通私聊拆成很多轮。search_memory 是推荐的记忆召回动作，应与最终的 chat_send 配合完成一次回复。',
-  '只有确实缺少必要上下文、或用户明确要求查看历史 / 资料 / 跨渠道操作时才调用 read_messages（默认当前渠道，可搜索关键词 / 序号 / 时间段 / semantic 语义）；同一轮最多读取一次，尽量用关键词、limit 和时间范围缩小结果。',
-  '无论用户是否明说“还记得吗”，只要你怀疑自己可能知道相关旧信息，都可以先 search_memory；当用户问“我们之前聊过什么”“你还记得吗”“找以前有关某件事的对话”时更应优先调用。不要直接说“我没有记忆”。',
+  '标准聊天工作流：读取当前用户消息后，先判断是否真的需要额外信息：需要过往聊天记忆才用 search_memory；需要本地知识库设定 / 资料才用 kb_search；需要实时外部信息才用 web_search / browser；需要当前或历史聊天原文时才用 read_messages。绝大多数日常对话不需要任何检索，直接调用 chat_send 回复。',
+  'search_memory 只在你能判断当前消息与当前聊天窗口之外的历史关联度超过 50% 时才调用：用户明确问“还记得 / 之前 / 以前 / 我们聊过”，或消息提到长期习惯、承诺、共同经历、久未联系的人或事，而最近上下文不足以回答。如果估计低于 50%，或只是问候 / 寒暄 / 日常玩笑 / 当前话题追问 / 常识问答时不要调用；每轮最多一次，搜不到就直接按当前上下文回复。',
+  '工具选择要精确，不要把不同能力混用：search_memory = 你与用户过去的聊天记忆；kb_search = 本地知识库（用户设定 / 资料 / 明确要求记住的知识）；web_search / browser = 联网实时信息；read_messages = 聊天记录原文。日常闲聊里不要习惯性调用检索工具。',
+  'read_messages 只在确实缺少必要上下文、需要精确原文证据，或用户明确要求查看历史 / 资料 / 跨渠道操作时调用（默认当前渠道，可用关键词 / 序号 / 时间段 / semantic 语义缩小结果）；同一轮最多读取一次，不要为了“确认一下”反复读取。',
+  '用户明确问“我们之前聊过什么”“你还记得吗”“找以前有关某件事的对话”时，应调用 search_memory；用户要求“查聊天记录 / 搜某个关键词 / 看某句话前后的内容”时，应调用 read_messages。不要为了礼貌性确认去检索，也不要直接说“我没有记忆”。',
   'search_memory / read_messages(semantic) 命中的概括如果来自其它渠道，原文属于隐私内容：工具默认只返回概括；模型不应猜测原文，应先向用户说明需要授权，用户确认后再显式请求展开。',
   '从旧 App / QQ 导入的历史记录默认不会自动进入最近上下文；当用户问起导入的旧记录、让你“查聊天记录 / 搜某个关键词 / 看某句话前后的内容”时，必须调用 read_messages 检索，不要凭空回答，也不要说自己看不到历史。',
   '需要发送长资料时调用 send_document：原文进入资料库，并按「聊天记录转发」发到渠道（第一条是标题，往下是正文；多篇资料用 documents 一次发，各自一条转发）；需要重读原文时调用 read_document。转发正文已经发过，不要再用 chat_send 重复一遍。',
@@ -481,6 +486,158 @@ export function apply(ctx) {
     return name || idLabel || ''
   }
 
+  /** 解析工具调用参数；兼容对象与 JSON 字符串。 */
+  const parseToolArguments = raw => {
+    if (raw && typeof raw === 'object') return raw
+    try {
+      return raw ? JSON.parse(raw) : {}
+    } catch (_) {
+      return {}
+    }
+  }
+
+  /** chat_send 参数里的消息原文：多条短消息按换行拼回 assistant.content。 */
+  const chatSendTextFromArgs = args => {
+    const input = args?.messages ?? args?.message ?? args?.content
+    const list = Array.isArray(input) ? input : input === undefined || input === null ? [] : [input]
+    const texts = []
+    for (const item of list) {
+      if (typeof item === 'string') {
+        if (item.trim()) texts.push(item)
+        continue
+      }
+      if (item && typeof item === 'object') {
+        const text = String(item.content ?? item.text ?? '').trim()
+        if (text) texts.push(text)
+      }
+    }
+    return texts.join('\n')
+  }
+
+  const replyToolNames = new Set(['chat_send'])
+
+  /**
+   * 历史消息里的“回复工具”统一成：
+   *   assistant.content = 消息原文
+   *   assistant.tool_calls = [chat_send 调用]
+   *   紧跟一条 role=tool 的 chat_send 结果
+   * 其它检索 / 读取类工具的结果只在同一轮实时上下文里返回，不再进入历史。
+   */
+  const historyReplyPair = (call, args, resultContent, reasoning) => {
+    const name = String(call?.function?.name || '')
+    if (name === 'chat_send') {
+      const hasMedia = ['images', 'videos', 'files', 'audios', 'attachments'].some(key =>
+        Array.isArray(args?.[key]) ? args[key].length > 0 : args?.[key] !== undefined && args?.[key] !== null,
+      )
+      const content = chatSendTextFromArgs(args) || (hasMedia ? '[媒体消息]' : '[空消息]')
+      const assistant = {
+        role: 'assistant',
+        content,
+        tool_calls: [{ ...call, function: { name: 'chat_send', arguments: call.function?.arguments || '{}' } }],
+      }
+      if (reasoning !== undefined && reasoning !== null) assistant.reasoning_content = String(reasoning)
+      return [
+        assistant,
+        {
+          role: 'tool',
+          tool_call_id: String(call.id || ''),
+          name: 'chat_send',
+          content: String(resultContent || '{"ok":true,"end":true}'),
+        },
+      ]
+    }
+    if (name === 'send_document') {
+      const title = String(args?.title || args?.documents?.[0]?.title || args?.docs?.[0]?.title || '').trim() || '未命名资料'
+      const summary = String(args?.summary || args?.documents?.[0]?.summary || args?.docs?.[0]?.summary || '').trim()
+      return [{ role: 'assistant', content: `[资料消息] ${title}${summary ? `：${summary}` : ''}` }]
+    }
+    return []
+  }
+
+  /** 把 store 里的原始工具协议轨迹转成“只带 assistant + chat_send 结果”的历史。 */
+  const transformTranscriptMessages = (messages = []) => {
+    const list = Array.isArray(messages) ? messages : []
+    const toolResultById = new Map()
+    const textualResults = new Map()
+    for (const message of list) {
+      if (message?.role === 'tool') {
+        const id = String(message.tool_call_id || '')
+        if (id) toolResultById.set(id, String(message.content || ''))
+        continue
+      }
+      if (message?.role !== 'user') continue
+      const match = String(message.content || '').match(/^\[工具结果\]\s*([A-Za-z0-9_.-]+)\s*=>\s*([\s\S]*)$/)
+      if (!match) continue
+      const queue = textualResults.get(match[1]) || []
+      queue.push(match[2])
+      textualResults.set(match[1], queue)
+    }
+    const knownToolNames = (toolRegistry?.list?.() || []).map(tool => String(tool?.name || '')).filter(Boolean)
+    const textualCallsOf = (message, content) => {
+      if (!content || !/<\s*\/?\s*(?:tool_call|function_call|invoke|parameter|tool_calls)|\|DSLM\|/i.test(content)) return []
+      try {
+        return parseTextToolCalls(content, knownToolNames) || []
+      } catch (_) {
+        return []
+      }
+    }
+    const out = []
+    for (const message of list) {
+      if (message?.role === 'user') {
+        // 文本工具协议把工具结果伪装成 user 消息，这里已经合并进 assistant/tool 对，不再保留。
+        if (/^\[工具结果\]/.test(String(message.content || ''))) continue
+        out.push(message)
+        continue
+      }
+      if (message?.role === 'tool') continue
+      if (message?.role !== 'assistant') continue
+      const content = String(message.content ?? '')
+      const calls = Array.isArray(message.tool_calls) && message.tool_calls.length
+        ? message.tool_calls
+        : textualCallsOf(message, content)
+      if (calls.length) {
+        for (const call of calls) {
+          const name = String(call?.function?.name || '')
+          if (!replyToolNames.has(name) && name !== 'send_document') continue
+          const args = parseToolArguments(call.function?.arguments)
+          let resultContent = toolResultById.get(String(call.id || '')) || ''
+          if (name === 'chat_send' && !resultContent) {
+            const queue = textualResults.get('chat_send') || []
+            resultContent = queue.shift() || '{"ok":true,"end":true}'
+          }
+          out.push(...historyReplyPair(call, args, resultContent, message.reasoning_content))
+        }
+        continue
+      }
+      // 纯文本 assistant（严格模式兜底 / 旧版本历史）保留原文；工具标记原文绝不展示。
+      if (content.trim() && !/<\s*\/?\s*(?:tool_call|function_call)|<\|DSLM/i.test(content)) {
+        out.push({ role: 'assistant', content })
+      }
+    }
+    return out
+  }
+
+  /** toModelMessage 里给可见 chat_send 消息留的“待补 tool 结果”标记。 */
+  const materializeReplyPairs = history => {
+    const out = []
+    for (const wire of Array.isArray(history) ? history : []) {
+      const pair = wire?.__nfReplyPair
+      if (pair && wire.role === 'assistant') {
+        const { __nfReplyPair, ...assistant } = wire
+        out.push(assistant)
+        out.push({
+          role: 'tool',
+          tool_call_id: String(pair.tool_call_id || ''),
+          name: String(pair.name || 'chat_send'),
+          content: String(pair.result || '{"ok":true,"end":true}'),
+        })
+      } else {
+        out.push(wire)
+      }
+    }
+    return out
+  }
+
   /** 一条消息 -> 模型消息；不可对话的消息返回 null */
   const toModelMessage = (message, context = {}) => {
     if (!message) return null
@@ -496,8 +653,31 @@ export function apply(ctx) {
           ...reasoningField,
         }
       }
-      if (!String(message.content || '').trim()) return null
-      return { role: 'assistant', content: String(message.content), ...reasoningField }
+      const content = String(message.content || '')
+      if (!content.trim()) return null
+      // 历史里由 chat_send 发出的消息：assistant 字段保留消息原文，同时带一条
+      // chat_send 工具调用，再由 materializeReplyPairs 补上对应的 tool 结果。
+      // 这样模型回忆过去时看到的是“我说过什么”，而不是只有空的 tool 结果。
+      if (message.meta?.via === 'chat_send') {
+        const messageId = String(message.message_id || message.id || '')
+        if (messageId) {
+          const toolCallId = `hist_chat_send_${messageId}`
+          const parts = content.split(/\r?\n+/).map(part => part.trim()).filter(Boolean)
+          const callArgs = JSON.stringify({ messages: parts.length ? parts : [content], end: true })
+          return {
+            role: 'assistant',
+            content,
+            tool_calls: [{ id: toolCallId, type: 'function', function: { name: 'chat_send', arguments: callArgs } }],
+            ...reasoningField,
+            __nfReplyPair: {
+              tool_call_id: toolCallId,
+              name: 'chat_send',
+              result: JSON.stringify({ ok: true, message_ids: [messageId], end: true }),
+            },
+          }
+        }
+      }
+      return { role: 'assistant', content, ...reasoningField }
     }
     if (message.role !== 'user') return null
     const text = String(message.content ?? '')
@@ -816,10 +996,17 @@ export function apply(ctx) {
       // 注意：旧版本升级上来的轨迹 / 渠道 skipUserAppend 轮次、重新生成轮次里可能
       // 没有 user wire；这里按每轮 at 把对应的可见用户消息补回对应轮次，避免模型
       // “前脚刚问、后脚就忘”式失忆。
-      const transcriptTurns =
+      const rawTranscriptTurns =
         channelOnly || typeof store.transcriptTurns !== 'function'
           ? []
           : store.transcriptTurns(useChannelId, { limitTurns: Math.min(20, currentChannelRounds + 1) })
+      // 历史构建规则：同一轮里的中间工具结果（search_memory / read_messages /
+      // kb_search / web_search 等）只静默留在 store 轨迹里，不再回传给模型；
+      // 回传的只有 assistant 消息和 chat_send 的 assistant.tool_calls + 工具结果。
+      const transcriptTurns = rawTranscriptTurns.map(turn => ({
+        at: String(turn?.at || ''),
+        messages: transformTranscriptMessages(turn?.messages),
+      }))
       // 当前渠道可见消息始终读取，用于补旧轨迹中缺失的 user wire、提取当前轮，
       // 以及渠道记忆与工作记忆的重合去重；channel-only 渠道则由 transcriptTurns 为空、走可见消息路径。
       const visibleAll = store.messagesOf(useChannelId)
@@ -1105,6 +1292,9 @@ export function apply(ctx) {
         }
         history = takeLastRounds([...historyParts, ...channelHistory], maxRounds)
       }
+      // 可见消息路径里的 chat_send 回复会带 __nfReplyPair 标记，这里统一补成
+      // 合法的 assistant.tool_calls + role=tool 序列，与轨迹路径保持同一份结构。
+      history = materializeReplyPairs(history)
       // 统一标注“当前要回复的消息”。跨渠道工作记忆即使碰巧同 message_id
       // 也绝不标记为当前请求。
       if (currentUserId) {

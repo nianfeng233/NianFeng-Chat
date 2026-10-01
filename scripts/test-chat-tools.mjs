@@ -276,9 +276,10 @@ async function main() {
   check('模型请求带上了工具定义', Array.isArray(captured?.options?.tools) && captured.options.tools.some(tool => tool.function?.name === 'chat_send'), JSON.stringify(captured?.options?.tools?.map(tool => tool.function?.name)))
   check('system 段落包含人设与工具规则', captured?.messages?.[0]?.role === 'system' && captured.messages[0].content.includes('冒烟测试角色') && captured.messages[0].content.includes('chat_send'), captured?.messages?.[0]?.content?.slice(0, 80))
   check(
-    'system 段落鼓励主动调用 search_memory',
-    captured?.messages?.[0]?.content?.includes('允许并鼓励主动检索长期记忆') &&
-      captured.messages[0].content.includes('search_memory'),
+    'system 段落收窄 search_memory 调用条件，并区分知识库 / 联网',
+    captured?.messages?.[0]?.content?.includes('估计低于 50%') &&
+      captured.messages[0].content.includes('kb_search = 本地知识库') &&
+      captured.messages[0].content.includes('web_search / browser = 联网实时信息'),
     captured?.messages?.[0]?.content?.slice(0, 120),
   )
   check(
@@ -1523,15 +1524,32 @@ async function main() {
   )
   store.clearTranscript(channelOrphan.channelId)
   store.appendTranscript(channelOrphan.channelId, [
-    { role: 'assistant', content: null, tool_calls: [{ id: 'call-good', type: 'function', function: { name: 'read_messages', arguments: '{}' } }] },
-    { role: 'tool', tool_call_id: 'call-good', name: 'read_messages', content: '{"ok":true}' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call-read', type: 'function', function: { name: 'read_messages', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call-read', name: 'read_messages', content: '{"ok":true,"messages":[{"content":"历史原文"}]}' },
   ])
-  const builtGood = builder.build({ conversationId: convOrphan.id, roleId: 'role-orphan' })
+  const builtDrop = builder.build({ conversationId: convOrphan.id, roleId: 'role-orphan' })
   check(
-    '合法工具序列保留',
-    builtGood.messages.some(message => message.role === 'assistant' && message.tool_calls?.length) &&
-      builtGood.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call-good'),
-    JSON.stringify(builtGood.messages.map(message => message.role)),
+    '中间工具（read_messages 等）的历史结果不回传给模型',
+    !builtDrop.messages.some(message => message.role === 'tool') &&
+      !builtDrop.messages.some(message => message.role === 'assistant' && message.tool_calls?.length),
+    JSON.stringify(builtDrop.messages.map(message => ({ role: message.role, name: message.name, tool_call_id: message.tool_call_id }))),
+  )
+  store.clearTranscript(channelOrphan.channelId)
+  store.appendTranscript(channelOrphan.channelId, [
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call-reply', type: 'function', function: { name: 'chat_send', arguments: '{"messages":["旧回复原文"],"end":true}' } }],
+    },
+    { role: 'tool', tool_call_id: 'call-reply', name: 'chat_send', content: '{"ok":true,"message_ids":["m-old-1"],"end":true}' },
+  ])
+  const builtReply = builder.build({ conversationId: convOrphan.id, roleId: 'role-orphan' })
+  check(
+    '历史只保留 assistant 原文 + chat_send 工具结果',
+    builtReply.messages.some(
+      message => message.role === 'assistant' && String(message.content || '').includes('旧回复原文') && message.tool_calls?.[0]?.function?.name === 'chat_send',
+    ) && builtReply.messages.some(message => message.role === 'tool' && message.tool_call_id === 'call-reply' && String(message.content || '').includes('m-old-1')),
+    JSON.stringify(builtReply.messages.map(message => ({ role: message.role, content: message.content, name: message.name }))),
   )
 
   console.log('\n⑩j2 渠道 skipUserAppend：用户发言必须写进工具轨迹')

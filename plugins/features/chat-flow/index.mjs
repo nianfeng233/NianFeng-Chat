@@ -485,6 +485,102 @@ export function apply(ctx) {
     }
   }
 
+  /** 日志展示用：压成一行并限长，避免工具参数 / 结果把终端刷爆。 */
+  const oneLine = (value, max = 160) =>
+    String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max)
+
+  const chatSendContentsOf = args => {
+    const input = args?.messages ?? args?.message ?? args?.content
+    const list = Array.isArray(input) ? input : input === undefined || input === null ? [] : [input]
+    return list
+      .map(item => (typeof item === 'string' ? item : item?.content ?? item?.text ?? ''))
+      .map(item => String(item || '').trim())
+      .filter(Boolean)
+  }
+
+  /** [工具调用] 的人类可读摘要：让人一眼看出模型拿工具做了什么。 */
+  const toolArgSummary = (name, args = {}) => {
+    try {
+      if (name === 'search_memory') {
+        const query = args.semantic ?? args.query ?? args.keywords ?? ''
+        return query ? `：记忆检索「${oneLine(query, 80)}」` : ''
+      }
+      if (name === 'read_messages') {
+        const what = args.semantic ?? args.query ?? (args.seq ? `序号 ${args.seq}` : '')
+        return what ? `：读取聊天记录「${oneLine(what, 80)}」` : '：读取聊天记录'
+      }
+      if (name === 'kb_search') {
+        const query = args.query ?? args.semantic ?? ''
+        return query ? `：知识库检索「${oneLine(query, 80)}」` : '：浏览知识库'
+      }
+      if (name === 'web_search') {
+        return args.query ? `：联网搜索「${oneLine(args.query, 80)}」` : '：联网搜索'
+      }
+      if (name === 'browser') {
+        return args.url ? `：访问网页 ${oneLine(args.url, 100)}` : '：操作浏览器'
+      }
+      if (name === 'chat_send') {
+        const list = chatSendContentsOf(args)
+        return `：发送 ${list.length || 1} 条短消息${list[0] ? `「${oneLine(list[0], 60)}」` : ''}`
+      }
+      if (name === 'send_document') {
+        const title = args.title || args.documents?.[0]?.title || args.docs?.[0]?.title || ''
+        return `：发送资料${title ? `《${oneLine(title, 60)}》` : ''}`
+      }
+      if (name === 'read_document') return args.doc_id ? `：读取资料 ${oneLine(args.doc_id, 60)}` : '：读取资料'
+      if (name === 'read_forward') return '：读取合并转发记录'
+    } catch (_) {
+      /* 摘要失败不影响工具执行 */
+    }
+    const raw = (() => {
+      try {
+        return JSON.stringify(args || {})
+      } catch (_) {
+        return ''
+      }
+    })()
+    return raw && raw !== '{}' ? `：${oneLine(raw, 160)}` : ''
+  }
+
+  /** [工具结果] 的人类可读摘要：把工具返回的关键信息留一行在日志里。 */
+  const toolResultSummary = (name, output) => {
+    if (!output || typeof output !== 'object') return ''
+    if (output.ok === false) return `原因：${oneLine(output.error || output.code || '未知错误', 180)}`
+    if (name === 'chat_send') {
+      const count = Array.isArray(output.message_ids) ? output.message_ids.length : 0
+      const duplicates = Array.isArray(output.duplicates) ? output.duplicates.length : 0
+      return `已发送 ${count} 条${duplicates ? ` · 去重 ${duplicates} 条` : ''}`
+    }
+    if (name === 'send_document') return `已发送 ${Number(output.count) || 0} 篇资料${output.title ? `《${oneLine(output.title, 60)}》` : ''}`
+    if (name === 'search_memory') {
+      const hit = Number(output.returned_summaries) || 0
+      const first = output.summaries?.[0]?.summary || ''
+      return `命中 ${hit} 条概括${first ? `：${oneLine(first, 120)}` : ''}`
+    }
+    if (name === 'read_messages') {
+      const count = Number(output.returned ?? output.count ?? output.messages?.length) || 0
+      return `返回 ${count} 条记录`
+    }
+    if (name === 'kb_search') {
+      const count = Number(output.total ?? output.returned ?? output.entries?.length) || 0
+      return `知识库命中 ${count} 条`
+    }
+    if (name === 'web_search' || name === 'browser') {
+      return oneLine(output.title || output.summary || output.url || '', 140) || '联网工具已完成'
+    }
+    const raw = (() => {
+      try {
+        return JSON.stringify(output)
+      } catch (_) {
+        return ''
+      }
+    })()
+    return raw ? oneLine(raw, 180) : ''
+  }
+
   async function finalizeFallback(entry, conversationId, text, reasoning = '') {
     const draft = ensureDraft(entry, conversationId)
     if (!draft) return
@@ -523,6 +619,7 @@ export function apply(ctx) {
       })
       if (output?.ok && Array.isArray(output.message_ids) && output.message_ids.length) {
         attachCallInfo(conversationId, output.message_ids, entry.lastRound)
+        ctx.logger.info(`[回复] chat_send 兜底发送 ${output.message_ids.length} 条：${oneLine(text, 140)}`)
       }
       return output || { ok: false, error: 'chat_send 未返回结果。' }
     } catch (err) {
@@ -691,6 +788,12 @@ export function apply(ctx) {
         channelName: requestStartChannelType === 'nova' ? '' : String(conv.name || '').slice(0, 40),
         channelType: requestStartChannelType,
       })
+      // 信息级日志补齐四件事里的第一件：哪个渠道 / 谁发了什么消息后开始处理。
+      // 外部渠道另有 channel-base 的 [收到消息]，这里给 WebUI 与统一时序兜底。
+      ctx.logger.info(
+        `[请求开始] 开始处理请求 · ${requestStartChannelType} · ${oneLine(requestStartMessage?.sender_name || who.userName || '用户', 40)}：` +
+          `${oneLine(requestStartMessage?.content || text || '（图片 / 附件）', 120)}`,
+      )
 
       // 图片 hydration 可能等几秒：先发状态 / 开始生成事件（停止按钮立即出现），
       // 但必须在构造 user wire 之前完成，协议轨迹里的用户消息才带得上图片。
@@ -794,7 +897,7 @@ export function apply(ctx) {
           round,
         }
         ctx.logger.info(
-          `第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
+          `[模型生成] 第 ${round} 轮模型返回：${roundThinkingMs}ms · ` +
             `工具 ${(result.toolCalls || []).length} 个 · 正文 ${String(result.text || '').length} 字 · 推理 ${String(result.reasoning || '').length} 字` +
             `${result.reason ? ` · finish=${result.reason}` : ''}`,
         )
@@ -968,7 +1071,7 @@ export function apply(ctx) {
           const args = parseArgs(call.function.arguments)
           emitToolStatus(conversationId, call.function.name)
           const toolStartedAt = Date.now()
-          ctx.logger.info(`调用工具 ${call.function.name}：${JSON.stringify(args).slice(0, 300)}`)
+          ctx.logger.info(`[工具调用] 调用工具 ${call.function.name}${toolArgSummary(call.function.name, args)}`)
           const output = await Promise.race([
             tools.execute(call.function.name, args, {
               conversationId,
@@ -987,10 +1090,24 @@ export function apply(ctx) {
             }),
           ])
           if (entry.cancelled) throw abortError()
+          const resultSummary = toolResultSummary(call.function.name, output)
           ctx.logger.info(
-            `工具 ${call.function.name} 完成：${Date.now() - toolStartedAt}ms · ${output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'}` +
+            `[工具结果] 工具 ${call.function.name} 完成：${Date.now() - toolStartedAt}ms · ${
+              output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'
+            }` +
+              `${resultSummary ? ` · ${resultSummary}` : ''}` +
               `${Array.isArray(output?.message_ids) && output.message_ids.length ? ` · 消息 ${output.message_ids.length} 条` : ''}`,
           )
+          // 用户最关心“模型到底回了什么”：chat_send / send_document 成功时单独
+          // 打一条 [回复]，日志页不必展开工具 JSON 才能看到正文。
+          if (output?.ok !== false && call.function.name === 'chat_send') {
+            const contents = chatSendContentsOf(args)
+            const count = Array.isArray(output?.message_ids) ? output.message_ids.length : contents.length
+            ctx.logger.info(`[回复] chat_send 已发送 ${count} 条：${contents.length ? contents.map(item => oneLine(item, 120)).join(' / ') : '（附件消息）'}`)
+          } else if (output?.ok !== false && call.function.name === 'send_document') {
+            const title = output?.title || args?.title || args?.documents?.[0]?.title || args?.docs?.[0]?.title || ''
+            ctx.logger.info(`[回复] send_document 已发送资料${title ? `《${oneLine(title, 80)}》` : ''}`)
+          }
           attachCallInfo(conversationId, output?.message_ids, entry.lastRound)
           // 工具结果本身只发文本：把 output.images 从 JSON 里剥离，避免 base64
           // 混进 role=tool 的 content；图片随后作为一条 user 多模态消息单独注入。
@@ -1048,7 +1165,7 @@ export function apply(ctx) {
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
       const totalMs = Date.now() - startedAt
-      ctx.logger.info(`本轮结束：总耗时 ${totalMs}ms · 模型思考 ${entry.thinkingMs || 0}ms`)
+      ctx.logger.info(`[本轮结束] 总耗时 ${totalMs}ms · 模型思考 ${entry.thinkingMs || 0}ms`)
       events.emit('chat:request-done', {
         conversationId,
         elapsed: totalMs,
@@ -1139,6 +1256,10 @@ export function apply(ctx) {
         channelName: requestStartChannelType === 'nova' ? '' : String(conv.name || '').slice(0, 40),
         channelType: requestStartChannelType,
       })
+      ctx.logger.info(
+        `[请求开始] 开始处理请求 · ${requestStartChannelType} · ${oneLine(userMessage?.sender_name || who.userName || '用户', 40)}：` +
+          `${oneLine(userMessage?.content || text || '（图片 / 附件）', 120)}`,
+      )
       const roundStartedAt = Date.now()
       const result = await attemptStream(entry, conversationId, modelMessages, generationOptions(conv))
       const roundThinkingMs = Date.now() - roundStartedAt
@@ -1154,6 +1275,7 @@ export function apply(ctx) {
         if (config.get('chat.stream', true) === false) messages.appendChunk(conversationId, placeholder.id, result.text)
         store?.stampMessage?.(conversationId, placeholder.id)
         entry.finalWire = { role: 'assistant', content: result.text || placeholder.content }
+          ctx.logger.info(`[回复] ${oneLine(result.text || placeholder.content, 160)}`)
         messages.finish(conversationId, placeholder.id, {
           content: result.text || placeholder.content,
           meta: { ...(placeholder.meta || {}), elapsed: Date.now() - startedAt, ...(callMeta(entry.lastRound) || {}) },
@@ -1166,7 +1288,7 @@ export function apply(ctx) {
       if (running.get(conversationId) === entry) running.delete(conversationId)
       emitStatus(conversationId, 'idle')
       const totalMs = Date.now() - startedAt
-      ctx.logger.info(`旧版链路结束：总耗时 ${totalMs}ms`)
+      ctx.logger.info(`[本轮结束] 旧版链路结束：总耗时 ${totalMs}ms`)
       events.emit('chat:request-done', {
         conversationId,
         elapsed: totalMs,

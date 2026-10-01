@@ -2909,9 +2909,9 @@ export const plugins = [
   },
   {
     "id": "settings-item-logs",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "displayName": "视图 · 运行日志",
-    "description": "独立运行日志视图：模型调用阶段、工具 / 渠道消息 / 权限确认与后端运行日志。",
+    "description": "独立运行日志视图：直接读取后端 runtime.log，统一展示模型 / 工具 / 渠道 / 权限与运行日志。",
     "author": "念风内核",
     "core": false,
     "enabled": true,
@@ -2930,7 +2930,6 @@ export const plugins = [
     },
     "inject": [
       "view-router",
-      "logs?",
       "api?",
       "event-bus",
       "config?",

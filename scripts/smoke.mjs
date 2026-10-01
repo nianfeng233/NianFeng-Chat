@@ -1666,7 +1666,8 @@ async function main() {
       !!document.querySelector('[data-logs-cat]') &&
       !!document.querySelector('[data-logs-search]'),
   )
-  check('运行日志页能显示已收集的日志', document.querySelectorAll('.logs-row').length > 0, String(document.querySelectorAll('.logs-row').length))
+  const initialLogRows = await waitFor(() => document.querySelectorAll('.logs-row').length > 0, { timeout: 3000 }).catch(() => false)
+  check('运行日志页能显示后端已收集的日志', !!initialLogRows, String(document.querySelectorAll('.logs-row').length))
 
   // 自由勾选：info + debug 的组合应写入 config，并在页面重开后保持。
   const debugLevelInput = levelInput('debug')

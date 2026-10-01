@@ -169,7 +169,9 @@ composer ──message:send──▶ chat-permissions（敏感确认拦截）
 session-service 在新增 / 更新消息后防抖写回 /api/sessions/:id
 ```
 
-> 工具调用历史使用合法的 `assistant.tool_calls` + `role=tool` 结构，只在处理本轮的内存中流转；
+> 同一轮工具调用使用合法的 `assistant.tool_calls` + `role=tool` 结构，工具结果原样回到本轮内存上下文；
+> 原始工具结果只静默写入 `chat-store` 的工具协议轨迹。构建下一轮历史时只带回 assistant 原文 + `chat_send`
+> 工具结果，`read_messages` / `search_memory` / 知识库 / 联网等中间工具结果不再回传模型。
 > 聊天记录库保存的是工具最终发给用户的消息（含完整渠道元数据），而不是工具调用协议本身。
 
 ### 会话持久化（在线 / 离线）

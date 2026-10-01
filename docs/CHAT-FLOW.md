@@ -45,7 +45,9 @@
   │         · chat_send      发送聊天消息（end=true 结束本轮）
   │         · send_document  资料入库；渠道侧按「聊天记录转发」发送（首条标题 + 正文）
   │         · read_document  按 token 分段加载资料原文
-  │       assistant.tool_calls + role=tool 结果回填到本轮 messages
+  │       同一轮：assistant.tool_calls + role=tool 结果原样回填本轮 messages
+  │       跨轮历史：只保留 assistant 原文 + chat_send 工具结果；检索 / 读取类
+  │       工具结果静默留在轨迹库，构建下一轮上下文时不再返回
   │       chat_send / send_document 返回 end=true -> 结束
   │       模型不返回 tool_calls 时的兼容处理：
   │         · 正文含 <tool_call> JSON / DSML·DSLM 标记 -> 解析成工具调用继续执行

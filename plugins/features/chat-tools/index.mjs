@@ -617,7 +617,18 @@ export function apply(ctx) {
       truncated,
       summaries,
       query: semantic,
-      embedding: result.embedding || undefined,
+      embedding: result.embedding
+          ? {
+              configured: result.embedding.configured === true,
+              applied: result.embedding.applied === true,
+              provider: result.embedding.provider || '',
+              model: result.embedding.model || '',
+              dimension: Number(result.embedding.dimension) || 0,
+              // 不把上游超时等原始 error 透给模型：后端日志会记录原因，这里只
+              // 告诉模型本次是“语义+关键词”还是“仅关键词”，检索仍然成功。
+              retrieval: result.embedding.applied === true ? 'semantic+keyword' : 'keyword',
+            }
+          : undefined,
     }
     if (items.length) {
       payload.messages = items
@@ -1173,7 +1184,7 @@ export function apply(ctx) {
       'search_memory',
       {
         description:
-          '长期记忆语义检索：先用一段语义描述在角色的记忆库里查找相关的概括（每条约 10 轮对话压缩而成），再按需展开概括底下的原文。默认只返回最相关的 1 条概括；top_summaries 可指定返回几条供模型比对；同一渠道的概括会附带原文，跨渠道 / 群聊场景默认只返回概括，并把原文标记为隐私内容，只有显式传 include_messages=true 才会请求授权并展开。可用 keywords 叠加关键词精筛、time_start / time_end 限定时间。用户问“我们之前聊过什么 / 你还记得吗 / 找以前某段对话”时优先用本工具；日常聊天里只要你怀疑自己应该记得用户说过的习惯 / 日常 / 人物 / 事件，也可以主动调用一次，不要反复调用 read_messages。搜不到结果就按当前上下文正常回复，不要为了“确认一下”连续重复调用。',
+          '长期记忆语义检索：在角色的记忆库里查找相关的概括（每条约 10 轮对话压缩而成），再按需展开概括底下的原文。默认只返回最相关的 1 条概括；top_summaries 可指定返回几条供模型比对；同一渠道的概括会附带原文，跨渠道 / 群聊默认只返回概括并标记隐私，显式传 include_messages=true 才会请求授权展开。可用 keywords 叠加关键词精筛、time_start / time_end 限定时间。用户问“我们之前聊过什么 / 你还记得吗 / 找以前某段对话”时调用；仅在用户明确回忆或消息与窗口外历史明显相关时才用，普通问候 / 寒暄 / 日常闲聊 / 当前话题追问 / 常识问答不要调用，也不要为了“确认一下”反复检索。',
         parameters: {
           type: 'object',
           properties: {

@@ -53,6 +53,12 @@ const MAX_SUMMARY_CHARS = 4000
 /** 概括请求最多携带的提示字符数；超长窗口按每条消息均匀压缩，而不是整段丢掉后面的消息。 */
 const MAX_PROMPT_CHARS = 32000
 const MAX_PROMPT_MESSAGE_CHARS = 4000
+/** 查询向量化只等这么久：超时立即降级 BM25，不能把 60s 网络超时拖到聊天工具上。 */
+const QUERY_EMBEDDING_TIMEOUT_MS = 8000
+/** 后台补旧记忆向量的超时；不阻塞检索请求。 */
+const BACKFILL_EMBEDDING_TIMEOUT_MS = 20000
+/** 一次后台补向量的条数，避免配置刚接上时瞬间打爆 embedding 服务。 */
+const BACKFILL_EMBEDDING_BATCH = 8
 const SUMMARY_MAX_TOKENS = 1200
 const MAX_SEARCH_TOP_K = 20
 const BM25_K1 = 1.5
@@ -168,6 +174,7 @@ function hybridRank(records, queryText, queryEmbedding, queryTokens) {
   }
   const hasVector = vectorRank.size > 0
   const ids = new Set([...keywordRank.keys(), ...vectorRank.keys()])
+  const byId = new Map(records.map(item => [item.id, item]))
   const fused = []
   for (const id of ids) {
     const kw = keywordRank.get(id)
@@ -175,7 +182,7 @@ function hybridRank(records, queryText, queryEmbedding, queryTokens) {
     const score =
       (kw ? 1 / (RRF_K + kw.rank + 1) : 0) +
       (hasVector && vec ? 1 / (RRF_K + vec.rank + 1) : 0)
-    const doc = records.find(item => item.id === id)
+    const doc = byId.get(id)
     if (!doc) continue
     fused.push({
       doc,
@@ -763,6 +770,56 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 旧记忆（写入时还没配置向量模型）的后台补向量。
+   * 之前放在 search() 里同步补 30 条，网络一慢就会把 /api/memory/search 拖到
+   * 前端 60s 超时；现在挪到检索返回之后异步做，且一次只补一小批。
+   */
+  const embeddingBackfillKeys = new Set()
+  function queueEmbeddingBackfill(roleId, scopeKey) {
+    const config = embeddingConfig()
+    if (!config.provider || !config.model) return
+    const key = `${roleId}:${scopeKey}`
+    if (embeddingBackfillKeys.has(key)) return
+    embeddingBackfillKeys.add(key)
+    const timer = setTimeout(async () => {
+      try {
+        ensureRepository()
+        const missing = repo
+          .list({ roleId, scope: scopeKey })
+          .filter(record => !Array.isArray(record.embedding) || !record.embedding.length)
+          .slice(0, BACKFILL_EMBEDDING_BATCH)
+        if (!missing.length) return
+        const result = await models.embed({
+          provider: config.provider,
+          model: config.model,
+          input: missing.map(record => record.summary),
+          timeoutMs: BACKFILL_EMBEDDING_TIMEOUT_MS,
+        })
+        let changed = 0
+        for (let i = 0; i < missing.length; i += 1) {
+          const vector = result.embeddings[i]
+          if (!Array.isArray(vector) || !vector.length) continue
+          const record = missing[i]
+          record.embedding = vector
+          record.embedding_provider = result.provider
+          record.embedding_model = result.model
+          record.embedding_dim = vector.length
+          record.updated_at = nowIso()
+          repo.save(record)
+          changed += 1
+        }
+        await rememberEmbeddingDimension(result.dimension)
+        if (changed) ctx.logger?.debug?.(`[memories] 已在后台补齐 ${changed} 条旧记忆的向量`)
+      } catch (err) {
+        ctx.logger?.debug?.(`[memories] 后台补向量失败（不影响检索）：${err?.message || err}`)
+      } finally {
+        embeddingBackfillKeys.delete(key)
+      }
+    }, 1200)
+    timer.unref?.()
+  }
+
   async function embedText(text) {
     const config = embeddingConfig()
     if (!config.provider || !config.model) return null
@@ -1188,31 +1245,26 @@ export function apply(ctx, config = {}) {
     const config = embeddingConfig()
     if (combinedQuery && config.provider && config.model) {
       try {
-        // 若早期概括是在没有向量模型时写入的，这里顺手补一次向量（每次最多 30 条），
-        // 避免用户后来才配置 embedding 时旧记忆永远检索不到。
-        const missing = records.filter(record => !Array.isArray(record.embedding) || !record.embedding.length).slice(0, 30)
+        // 只向量化当前查询，并给一个很短的超时：上游慢 / 挂起时立即降级 BM25。
+        // 早期无向量记录改到后台异步补，绝不在检索链路里同步等一批 embedding。
         const result = await models.embed({
           provider: config.provider,
           model: config.model,
-          input: [combinedQuery, ...missing.map(record => record.summary)],
+          input: [combinedQuery],
+          timeoutMs: QUERY_EMBEDDING_TIMEOUT_MS,
         })
-        queryEmbedding = result.embeddings[0]
-        for (let i = 0; i < missing.length; i += 1) {
-          const vector = result.embeddings[i + 1]
-          if (!Array.isArray(vector) || !vector.length) continue
-          const record = missing[i]
-          record.embedding = vector
-          record.embedding_provider = result.provider
-          record.embedding_model = result.model
-          record.embedding_dim = vector.length
-          record.updated_at = nowIso()
-          repo.save(record)
-        }
+        queryEmbedding = Array.isArray(result.embeddings?.[0]) ? result.embeddings[0] : null
         await rememberEmbeddingDimension(result.dimension)
       } catch (err) {
         embeddingError = String(err?.message || err)
-        ctx.logger?.warn?.(`[memories] 查询向量化失败，本次降级为 BM25 关键词检索：${embeddingError}`)
+        ctx.logger?.warn?.(
+          `[memories] 查询向量化失败，本次降级为 BM25 关键词检索（不影响本轮回复）：${embeddingError}`,
+        )
       }
+    }
+    // 返回前顺手排一个后台补向量任务：不 await、不阻塞本次检索。
+    if (config.provider && config.model && records.some(record => !Array.isArray(record.embedding) || !record.embedding.length)) {
+      queueEmbeddingBackfill(roleId, scopeKey)
     }
     const ranked = hybridRank(records, combinedQuery, queryEmbedding, queryTokens)
     const topK = clampNumber(input.topSummaries ?? input.top_summaries ?? input.topK ?? input.top_k, 1, MAX_SEARCH_TOP_K, 3)
