@@ -13,7 +13,7 @@
  *   - 未标记的终端（源码 / 手动启动）在等待后不会被误杀。
  */
 import { spawn } from 'node:child_process'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessAlive, settleLauncherShell } from '../server/update-helper.mjs'
@@ -104,6 +104,22 @@ const resultGone = await settleLauncherShell({
   logFile,
 })
 check('旧窗口已经退出时返回成功且不影响后续更新', resultGone === true, JSON.stringify({ result: resultGone }))
+
+console.log('\n④ 自动拉起窗口的防残留回归（源码约束）')
+const packageReleaseSource = await readFile(join(ROOT, 'scripts/package-release.mjs'), 'utf8')
+const updateHelperSource = await readFile(join(ROOT, 'server/update-helper.mjs'), 'utf8')
+check(
+  '发布包启动脚本：更新助手拉起的窗口退出后关闭控制台',
+  packageReleaseSource.includes("if defined NIANFENG_UPDATE_HELPER exit %NIANFENG_EXIT%"),
+)
+check(
+  '更新助手拉起可见窗口时使用 cmd /C，避免留下旧提示符窗口',
+  updateHelperSource.includes("['/c', 'start', '', 'cmd.exe', '/c', script]"),
+)
+check(
+  '旧启动窗口未关闭时跳过替换启动脚本，避免旧 cmd 内存报错',
+  updateHelperSource.includes('keepLauncherScripts') && updateHelperSource.includes('本次跳过替换启动脚本'),
+)
 
 await rm(dataDir, { recursive: true, force: true }).catch(() => {})
 

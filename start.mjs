@@ -379,7 +379,7 @@ function visibleLaunchTarget() {
 async function launchVisibleTarget(target) {
   if (!target?.file || process.platform !== 'win32') return false
   try {
-    const child = spawn('cmd.exe', ['/c', 'start', '', target.file], {
+    const child = spawn('cmd.exe', ['/c', 'start', '', 'cmd.exe', '/c', target.file], {
       cwd: target.cwd,
       detached: true,
       stdio: 'ignore',

@@ -295,6 +295,28 @@ async function ensurePidGone(plan, pid, { timeoutMs = 90000, label = '旧实例'
   return true
 }
 
+/** 读取进程命令行：用于识别“没有环境标记但确实是念风启动脚本”的旧自动窗口。 */
+async function readProcessCommandLine(plan, pid) {
+  if (process.platform !== 'win32' || !pid) return ''
+  const dir = dirname(plan?.planFile || process.argv[2] || plan?.workDir || process.cwd())
+  const outFile = join(dir, `process-${pid}-cmdline.txt`)
+  const command =
+    `$ErrorActionPreference='SilentlyContinue'; ` +
+    `try { $p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; ` +
+    `if ($p -and $p.CommandLine) { Set-Content -LiteralPath '${escapePowerShellLiteral(outFile)}' -Value $p.CommandLine -Encoding UTF8 } } catch {}`
+  await runCommand(plan, 'powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+    timeoutMs: 8000,
+  }).catch(() => {})
+  try {
+    const text = await readFile(outFile, 'utf8')
+    await rm(outFile, { force: true }).catch(() => {})
+    return text.trim()
+  } catch (_) {
+    await rm(outFile, { force: true }).catch(() => {})
+    return ''
+  }
+}
+
 /**
  * 旧实例退出后，处理承载它的启动窗口。
  *
@@ -347,15 +369,38 @@ async function settleLauncherShell(plan) {
     }
   }
 
-  // 未标记为专用启动窗口（源码 / 手动运行）：给双击启动的 cmd 自然退出的时间，
-  // 但绝不主动结束可能正在被用户使用的终端。
+  // 未标记为专用启动窗口（源码 / 手动运行 / 旧版本自动窗口）：先给自然退出的时间；
+  // 仍存活时尽量识别它是不是念风启动脚本所在的终端，避免误关用户正在使用的普通终端。
   const deadline = Date.now() + 5000
   while (Date.now() < deadline && isProcessAlive(shellPid)) await sleep(200)
   if (!isProcessAlive(shellPid)) {
     await logLine(plan, '旧启动窗口已随旧实例自动关闭')
     return true
   }
-  await logLine(plan, '旧终端仍在运行，但未标记为念风启动脚本；跳过自动关闭，避免误关用户正在使用的终端')
+  const commandLine = plan?.launchScript ? await readProcessCommandLine(plan, shellPid) : ''
+  const looksLikeLauncher =
+    plan?.kind === 'web-deploy'
+      ? /启动念风(?:-无浏览器|-更新)?\.cmd/i.test(commandLine)
+      : /(?:^|[\\/\s"])(?:start|serve)\.cmd(?:"|\s|$)/i.test(commandLine)
+  if (looksLikeLauncher) {
+    await writeUpdateStatus(plan, {
+      phase: 'stop',
+      phaseText: '正在关闭旧启动窗口',
+      message: '识别到旧念风启动窗口仍停留在提示符，正在关闭后继续更新…',
+      received: plan?._status?.received || 0,
+      total: plan?._status?.total || 0,
+      percent: plan?._status?.percent || 0,
+    })
+    try {
+      await killProcess(plan, shellPid, '启动窗口')
+      await logLine(plan, `已关闭未标记但命令行匹配启动脚本的旧窗口（PID ${shellPid}）：${commandLine.slice(0, 200)}`)
+      return true
+    } catch (err) {
+      await logLine(plan, `识别到旧启动窗口但未能关闭（不影响更新继续）：${err?.message || err}`)
+      return false
+    }
+  }
+  await logLine(plan, '旧终端仍在运行，且命令行未匹配念风启动脚本；跳过自动关闭，避免误关用户正在使用的终端')
   return false
 }
 
@@ -570,11 +615,13 @@ async function launchVisible(plan, fallbackCwd) {
       '  echo 念风已退出（退出码 %NIANFENG_EXIT%），窗口将在 10 秒后自动关闭…',
       '  timeout /t 10 /nobreak >nul',
       ')',
+      'rem 更新助手拉起的专用窗口：退出后直接关闭控制台，避免旧窗口残留到下一次更新',
+      'if defined NIANFENG_UPDATE_HELPER exit %NIANFENG_EXIT%',
       '',
     ]
     await writeFile(script, lines.join('\r\n'), 'utf8')
   }
-  const child = await spawnDetachedChecked('cmd.exe', ['/c', 'start', '', script], { cwd: target.cwd })
+  const child = await spawnDetachedChecked('cmd.exe', ['/c', 'start', '', 'cmd.exe', '/c', script], { cwd: target.cwd })
   child.on('error', () => {})
   child.unref()
   await sleep(400)
@@ -701,7 +748,14 @@ async function applyWebUpdate(plan) {
   const sourceDir = await normalizeExtractRoot(extractDir)
   // 替换启动脚本前先处理旧启动窗口：避免旧 cmd.exe 正在读取
   // `启动念风.cmd` 时文件被替换，出现内存报错 / 卡在提示符。
-  await settleLauncherShell(plan)
+  const launcherSettled = await settleLauncherShell(plan)
+  if (!launcherSettled) {
+    plan.keepLauncherScripts = true
+    await logLine(
+      plan,
+      '旧启动窗口仍在运行：本次跳过替换启动脚本，避免旧 cmd 读取被替换的批处理时出现内存报错；下次更新/手动重启后会自然替换。',
+    )
+  }
   await writeUpdateStatus(plan, {
     phase: 'replace',
     phaseText: '正在替换程序文件',
@@ -716,7 +770,11 @@ async function applyWebUpdate(plan) {
     const sourceApp = join(sourceDir, 'app')
     if (!existsSync(sourceApp)) throw new Error('Web 部署包中缺少 app 目录')
     await replaceEntry(plan, sourceApp, join(homeDir, 'app'), 'Web app 目录')
-    await copyRootFiles(plan, sourceDir, homeDir, new Set(['app', 'runtime', 'user_data', 'data']))
+    const rootSkip = new Set(['app', 'runtime', 'user_data', 'data'])
+    if (plan.keepLauncherScripts) {
+      for (const name of ['启动念风.cmd', '启动念风-无浏览器.cmd', '启动念风-更新.cmd']) rootSkip.add(name)
+    }
+    await copyRootFiles(plan, sourceDir, homeDir, rootSkip)
     await logLine(plan, `Web 部署版已更新到：${homeDir}`)
     // 替换完成后再确认一次旧后端确实不在：避免极端情况下旧进程晚重启导致端口 / 内存冲突。
     await ensurePidGone(plan, plan.waitPid || plan.nodePid, { timeoutMs: 5000, label: '旧实例' })
@@ -737,6 +795,11 @@ async function applyWebUpdate(plan) {
     'tools',
     'user_data',
   ])
+  if (plan.keepLauncherScripts) {
+    // 旧终端可能正停在 start.cmd / serve.cmd 的提示符上；本次不覆盖它们。
+    preserve.add('start.cmd')
+    preserve.add('serve.cmd')
+  }
   await copyRootFiles(plan, sourceDir, rootDir, preserve)
   await logLine(plan, `Web 源码版已更新到：${rootDir}`)
   // 替换完成后再确认一次旧后端确实不在，再拉起新终端。
