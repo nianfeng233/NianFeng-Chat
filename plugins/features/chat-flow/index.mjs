@@ -501,6 +501,13 @@ export function apply(ctx) {
       .filter(Boolean)
   }
 
+  /** chat_send 是否带顶层媒体参数（仅用于日志摘要，不参与执行）。 */
+  const chatSendHasMediaOf = args =>
+    ['images', 'videos', 'files', 'audios', 'attachments'].some(key => {
+      const value = args?.[key]
+      return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null
+    })
+
   /** [工具调用] 的人类可读摘要：让人一眼看出模型拿工具做了什么。 */
   const toolArgSummary = (name, args = {}) => {
     try {
@@ -524,7 +531,12 @@ export function apply(ctx) {
       }
       if (name === 'chat_send') {
         const list = chatSendContentsOf(args)
-        return `：发送 ${list.length || 1} 条短消息${list[0] ? `「${oneLine(list[0], 60)}」` : ''}`
+        const end = args.end === true || args.end === 'true'
+        const hasMedia = chatSendHasMediaOf(args)
+        if (!list.length && !hasMedia) {
+          return end ? '：结束本轮（没有新增消息）' : '：没有可发送内容'
+        }
+        return `：发送 ${list.length || 1} 条短消息${list[0] ? `「${oneLine(list[0], 60)}」` : ''}${end ? '（end=true）' : '（end=false / 未设置）'}`
       }
       if (name === 'send_document') {
         const title = args.title || args.documents?.[0]?.title || args.docs?.[0]?.title || ''
@@ -550,9 +562,17 @@ export function apply(ctx) {
     if (!output || typeof output !== 'object') return ''
     if (output.ok === false) return `原因：${oneLine(output.error || output.code || '未知错误', 180)}`
     if (name === 'chat_send') {
-      const count = Array.isArray(output.message_ids) ? output.message_ids.length : 0
-      const duplicates = Array.isArray(output.duplicates) ? output.duplicates.length : 0
-      return `已发送 ${count} 条${duplicates ? ` · 去重 ${duplicates} 条` : ''}`
+      const count = Number(output.sent_count)
+      const sentCount = Number.isFinite(count) ? count : Array.isArray(output.message_ids) ? output.message_ids.length : 0
+      const duplicateCount = Number(output.duplicate_count)
+      const duplicates = Number.isFinite(duplicateCount)
+        ? duplicateCount
+        : Array.isArray(output.duplicates)
+          ? output.duplicates.length
+          : 0
+      const ended = output.turn_ended === true || output.end === true
+      if (!sentCount && ended) return '仅结束本轮（没有新增消息）'
+      return `已发送 ${sentCount} 条${duplicates ? ` · 去重 ${duplicates} 条` : ''}${ended ? ' · 已结束本轮' : ' · 本轮继续'}`
     }
     if (name === 'send_document') return `已发送 ${Number(output.count) || 0} 篇资料${output.title ? `《${oneLine(output.title, 60)}》` : ''}`
     if (name === 'search_memory') {
@@ -946,6 +966,7 @@ export function apply(ctx) {
                   `[系统纠正 ${emptyRetries}/${emptyRetryLimit}] 你刚才的回复为空：既没有正文也没有工具调用。\n` +
                   '当前是严格工具聊天模式，用户不会看到你的普通 assistant 正文，只有工具调用会被执行。\n' +
                   '必须调用回复工具：日常回复用 chat_send（messages 数组，结束本轮 end=true）；长文本 / 资料 / 大段代码用 send_document。\n' +
+                  '注意：本轮还没有发送任何面向用户的内容，不能用空 messages + end=true 跳过回复；必须把要说的内容放进工具参数。\n' +
                   '不要只输出思考 / 解释 / 计划，也不要直接输出 assistant 正文。\n' +
                   '如果接口不支持原生 function calling，chat_send 请只输出这一种格式：<tool_call>{"name":"chat_send","arguments":{"messages":["要发送的内容"],"end":true}}</tool_call>',
               })
@@ -1096,14 +1117,22 @@ export function apply(ctx) {
               output?.ok === false ? `失败 ${output.code || output.error || ''}` : '成功'
             }` +
               `${resultSummary ? ` · ${resultSummary}` : ''}` +
-              `${Array.isArray(output?.message_ids) && output.message_ids.length ? ` · 消息 ${output.message_ids.length} 条` : ''}`,
+              `${call.function.name !== 'chat_send' && Array.isArray(output?.message_ids) && output.message_ids.length ? ` · 消息 ${output.message_ids.length} 条` : ''}`,
           )
           // 用户最关心“模型到底回了什么”：chat_send / send_document 成功时单独
           // 打一条 [回复]，日志页不必展开工具 JSON 才能看到正文。
           if (output?.ok !== false && call.function.name === 'chat_send') {
             const contents = chatSendContentsOf(args)
-            const count = Array.isArray(output?.message_ids) ? output.message_ids.length : contents.length
-            ctx.logger.info(`[回复] chat_send 已发送 ${count} 条：${contents.length ? contents.map(item => oneLine(item, 120)).join(' / ') : '（附件消息）'}`)
+            const sentCount = Number(output?.sent_count)
+            const count = Number.isFinite(sentCount) ? sentCount : Array.isArray(output?.message_ids) ? output.message_ids.length : contents.length
+            const ended = output?.turn_ended === true || output?.end === true
+            if (count > 0) {
+              ctx.logger.info(`[回复] chat_send 已发送 ${count} 条：${contents.length ? contents.map(item => oneLine(item, 120)).join(' / ') : '（附件消息）'}`)
+            } else if (ended) {
+              ctx.logger.info('[回复] chat_send 仅结束本轮（没有新增消息）')
+            } else {
+              ctx.logger.info('[回复] chat_send 没有新增消息')
+            }
           } else if (output?.ok !== false && call.function.name === 'send_document') {
             const title = output?.title || args?.title || args?.documents?.[0]?.title || args?.docs?.[0]?.title || ''
             ctx.logger.info(`[回复] send_document 已发送资料${title ? `《${oneLine(title, 80)}》` : ''}`)

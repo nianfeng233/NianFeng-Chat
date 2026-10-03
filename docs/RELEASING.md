@@ -112,6 +112,7 @@ node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --
 
 预览与正式的完整顺序、分支与 tag 清理策略见 [`VERSIONING.md`](./VERSIONING.md)。
 如果 `gh` 未登录：`gh auth login`（推荐）或确保 SSH / PAT 凭据已配置。
+推送凭据、受限环境下的替代方案与推送后校验见 [`PUSHING.md`](./PUSHING.md)。
 
 ---
 
@@ -163,8 +164,9 @@ node scripts/publish-release.mjs --tag v1.2.0 --notes docs/releases/v1.2.0.md --
 3. 读 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) → 模块边界与数据流；
 4. 读 [`docs/PLUGIN-GUIDE.md`](PLUGIN-GUIDE.md) → 插件协议与扩展点；
 5. 读 [`docs/PLUGIN-LIST.md`](PLUGIN-LIST.md) → 现有插件清单；
-6. 运行 `npm install && npm test` → 确认基线全绿；
-7. 任何对外发布前，重复第 6 节流程，不要跳过 `prepare-publish.mjs`。
+6. 遇到 `git push` 相关任务读 [`docs/PUSHING.md`](PUSHING.md) → 凭据来源、受限环境规避与推送后校验；
+7. 运行 `npm install && npm test` → 确认基线全绿；
+8. 任何对外发布前，重复第 6 节流程，不要跳过 `prepare-publish.mjs`。
 
 ---
 

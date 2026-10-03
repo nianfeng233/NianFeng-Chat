@@ -659,6 +659,7 @@ export function apply(ctx) {
 
     const messageInput = args.messages ?? args.message ?? args.content
     const rawList = Array.isArray(messageInput) ? messageInput : messageInput === undefined || messageInput === null ? [] : [messageInput]
+    const requestedEnd = args.end === true || args.end === 'true'
     // 运行期兜底：chat_send 禁止在单条消息里用换行拆句，模型偶尔不遵守时
     // 直接按换行拆成多条独立消息，避免 QQ / 微信用一个气泡显示奇怪折行。
     const expandedList = []
@@ -701,72 +702,134 @@ export function apply(ctx) {
       if (simulate) events.emit('chat:typing', { conversationId, channelId, typing })
     }
     for (const raw of expandedList) {
+      if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
+      const item = typeof raw === 'string' ? { content: raw } : raw || {}
+      const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+      const attachments = await normalizeChatAttachments(item)
+      const images = attachments.filter(entry => entry.type === 'image')
+      const videos = attachments.filter(entry => entry.type === 'video')
+      const files = attachments.filter(entry => entry.type === 'file')
+      const audios = attachments.filter(entry => entry.type === 'audio')
+      if (!content && !attachments.length) continue
+      const existing = content ? context.sentContents?.get(content) : null
+      if (existing && !attachments.length) {
+        duplicates.push({ content, message_id: existing })
+        continue
+      }
+      const attachmentLabel = media => {
+        const name = media?.name || media?.id || media?.url || media?.file || ''
+        if (media?.type === 'video') return `[视频${name ? `：${name}` : ''}]`
+        if (media?.type === 'audio') return `[语音${name ? `：${name}` : ''}]`
+        if (media?.type === 'file') return `[文件${name ? `：${name}` : ''}]`
+        return '[图片]'
+      }
+      // 首条消息不延迟；从第二条开始，按字数计算 0.5s ~ 5s 的动态延迟
+      if (simulate && delivery.count > 0) {
+        emitTyping(true)
+        await sleep(typingDelayMs(content || attachmentLabel(attachments[0])), context.entry)
+        emitTyping(false)
         if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
-        const item = typeof raw === 'string' ? { content: raw } : raw || {}
-        const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-        const attachments = await normalizeChatAttachments(item)
-        const images = attachments.filter(entry => entry.type === 'image')
-        const videos = attachments.filter(entry => entry.type === 'video')
-        const files = attachments.filter(entry => entry.type === 'file')
-        const audios = attachments.filter(entry => entry.type === 'audio')
-        if (!content && !attachments.length) continue
-        const existing = content ? context.sentContents?.get(content) : null
-        if (existing && !attachments.length) {
-          duplicates.push({ content, message_id: existing })
-          continue
-        }
-        const attachmentLabel = media => {
-          const name = media?.name || media?.id || media?.url || media?.file || ''
-          if (media?.type === 'video') return `[视频${name ? `：${name}` : ''}]`
-          if (media?.type === 'audio') return `[语音${name ? `：${name}` : ''}]`
-          if (media?.type === 'file') return `[文件${name ? `：${name}` : ''}]`
-          return '[图片]'
-        }
-        // 首条消息不延迟；从第二条开始，按字数计算 0.5s ~ 5s 的动态延迟
-        if (simulate && delivery.count > 0) {
-          emitTyping(true)
-          await sleep(typingDelayMs(content || attachmentLabel(attachments[0])), context.entry)
-          emitTyping(false)
-          if (context.entry?.cancelled === true) return { ok: false, code: 'CHAT_ABORTED', error: '请求已取消' }
-        }
-        const message = store.append(conversationId, {
-          role: 'assistant',
-          content,
-          content_type: item.content_type || (!content && attachments.length ? attachments[0].type : 'text'),
-          sender_id: `role_${targetConv.id}`,
-          sender_name: targetConv.name,
-          is_bot: true,
-          source: 'nova',
-          visibility: 'shareable',
-          meta: {
-            via: 'chat_send',
-            round: context.round,
-            channel: channelId,
-            ...(context.reasoningContent && !reasoningAttached ? { reasoningContent: context.reasoningContent } : {}),
-            ...(images.length ? { images } : {}),
-            ...(videos.length ? { videos } : {}),
-            ...(files.length ? { files } : {}),
-            ...(audios.length ? { audios } : {}),
-          },
-        })
-        if (!message) continue
-        if (content) context.sentContents?.set(content, message.message_id)
-        reasoningAttached = true
-        delivery.count += 1
-        sent.push(message.message_id)
+      }
+      const message = store.append(conversationId, {
+        role: 'assistant',
+        content,
+        content_type: item.content_type || (!content && attachments.length ? attachments[0].type : 'text'),
+        sender_id: `role_${targetConv.id}`,
+        sender_name: targetConv.name,
+        is_bot: true,
+        source: 'nova',
+        visibility: 'shareable',
+        meta: {
+          via: 'chat_send',
+          round: context.round,
+          channel: channelId,
+          ...(context.reasoningContent && !reasoningAttached ? { reasoningContent: context.reasoningContent } : {}),
+          ...(images.length ? { images } : {}),
+          ...(videos.length ? { videos } : {}),
+          ...(files.length ? { files } : {}),
+          ...(audios.length ? { audios } : {}),
+        },
+      })
+      if (!message) continue
+      if (content) context.sentContents?.set(content, message.message_id)
+      if (context.entry) context.entry.sentReplyThisTurn = true
+      reasoningAttached = true
+      delivery.count += 1
+      sent.push(message.message_id)
     }
 
     if (!sent.length && !duplicates.length) {
-      return { ok: false, error: 'messages 不能为空：请传入要发送的文本（可多条），并设置 end 表示是否结束本轮。' }
+      if (requestedEnd) {
+        const sentAlready =
+          Number(delivery.count) > 0 ||
+          Number(context.delivery?.count) > 0 ||
+          Number(context.sentContents?.size) > 0 ||
+          context.entry?.sentReplyThisTurn === true
+        if (!sentAlready) {
+          return {
+            ok: false,
+            code: 'EMPTY_TURN',
+            error: '本轮还没有发送任何面向用户的内容，不能只用空 messages + end=true 结束本轮；请先调用 chat_send 发送要说的内容。',
+          }
+        }
+        // 纯结束信号：允许不产生任何新消息，只结束本轮。否则模型为了带上
+        // end=true，只能被迫再发一遍已经发过的内容，催生“同一件事说两次”。
+        return {
+          ok: true,
+          channel: channelId,
+          message_ids: [],
+          sent_count: 0,
+          turn_ended: true,
+          status: 'ended_without_new_messages',
+          note: '本轮已结束，没有新增消息。不要为了结束本轮而重复发送已经发过的内容。',
+          sent_at: store.toLocalIso(),
+          end: true,
+          delivery: 'none',
+        }
+      }
+      return {
+        ok: false,
+        error: 'messages 不能为空：请传入要发送的文本（可多条）；如果只是想结束本轮，请设置 end=true，messages 可省略或传空数组。',
+      }
+    }
+
+    const duplicateCount = duplicates.length
+    const status = sent.length
+      ? requestedEnd
+        ? 'sent_and_ended'
+        : 'sent_continuing'
+      : requestedEnd
+        ? 'duplicates_skipped_and_ended'
+        : 'duplicates_skipped_continuing'
+    const noteParts = []
+    if (sent.length) {
+      noteParts.push(
+        isExternalChannel(channelId)
+          ? `本次 ${sent.length} 条消息已经写入聊天记录并进入渠道外发队列，不要再次发送相同或近似重复的内容。`
+          : `本次 ${sent.length} 条消息已经真实发送并写入聊天记录，不要再次发送相同或近似重复的内容。`,
+      )
+    }
+    if (duplicateCount) {
+      noteParts.push(`其中 ${duplicateCount} 条内容与前面已经发送过的消息重复，已跳过，没有重复发送。`)
+    }
+    if (requestedEnd) {
+      noteParts.push('end=true：本轮已结束，不要再调用工具续说。')
+    } else {
+      noteParts.push('end=false / 未设置只表示本轮还没有结束，绝不代表消息没有发出。如果还有新的、不重复的内容，请只发送新增内容并设置 end=true；如果已经没有新内容，直接调用 chat_send 并传 end=true（messages 可省略或传空数组）结束本轮，不要重发旧内容。')
     }
 
     return {
       ok: true,
       channel: channelId,
       message_ids: sent,
-      duplicates: duplicates.length ? duplicates : undefined,
+      sent_count: sent.length,
+      duplicate_count: duplicateCount,
+      duplicates: duplicateCount ? duplicates : undefined,
+      turn_ended: requestedEnd,
+      status,
+      note: noteParts.join(' '),
       sent_at: store.toLocalIso(),
-      end: args.end === true || args.end === 'true',
+      end: requestedEnd,
       ...queuedDelivery(channelId),
     }
   }
@@ -856,6 +919,7 @@ export function apply(ctx) {
         },
       })
       delivery.count += 1
+      if (message && context.entry) context.entry.sentReplyThisTurn = true
       if (message) messageIds.push(message.message_id)
     }
 
@@ -1204,7 +1268,7 @@ export function apply(ctx) {
       'chat_send',
       {
         description:
-          '发送一条或多条短聊天消息，并可夹带图片 / 视频 / 语音 / 文件附件；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，单条消息正文不要包含换行符（\\n），想发两句就传两个数组项，否则同一气泡里会出现奇怪的折行；发完设置 end=true 结束本轮，end=false 表示继续下一轮工具调用。需要发送本地已下载或模型已知直链的媒体时，用 attachments（type=image/video/file/audio）或 videos / files 参数；NapCat 支持 图片/视频/语音/文件，QQ 官方机器人支持 图片/视频/语音/文件。用户让把某个视频 / 文件发到某渠道时，不要只发标题或链接，也不要说自己不会，直接把可下载的 https URL / 本地文件路径作为附件发出去。大段长文 / 资料仍用 send_document。',
+          '发送一条或多条短聊天消息，并可夹带图片 / 视频 / 语音 / 文件附件；普通聊天回复必须通过本工具，不要直接输出 assistant 正文。messages 数组每一项是一条独立消息，按 QQ / 微信真人聊天习惯分条发送，单条消息正文不要包含换行符（\\n），想发两句就传两个数组项，否则同一气泡里会出现奇怪的折行。工具结果会明确回执哪些内容已经真实发出；收到成功回执后绝不要重复发送相同或近似内容。发送完最后一批内容时必须把 end 设为 true 结束本轮；end=false 表示后续还会继续调用工具。如果本轮已经发过内容、已经没有新的不重复内容，直接调用本工具并传 end=true（messages 可省略或传空数组）结束本轮，不要为了补 end 而重发旧内容；本轮尚未发送任何内容时不能用空 messages + end=true 跳过回复。需要发送本地已下载或模型已知直链的媒体时，用 attachments（type=image/video/file/audio）或 videos / files 参数；NapCat 支持 图片/视频/语音/文件，QQ 官方机器人支持 图片/视频/语音/文件。用户让把某个视频 / 文件发到某渠道时，不要只发标题或链接，也不要说自己不会，直接把可下载的 https URL / 本地文件路径作为附件发出去。大段长文 / 资料仍用 send_document。',
         parameters: {
           type: 'object',
           properties: {
@@ -1212,7 +1276,7 @@ export function apply(ctx) {
             messages: {
               type: 'array',
               items: { type: 'string' },
-              description: '短聊天消息列表，每个数组项会作为独立消息发出。多条消息请拆开，例如 ["你好","有什么事？"]；单条消息正文禁止使用换行符（\\n），不要用换行把多句话塞进一条。日常聊天一般不需要句尾句号，更像 QQ / 微信真人输入；不要加编号、前缀或解释。',
+              description: '短聊天消息列表，每个数组项会作为独立消息发出。多条消息请拆开，例如 ["你好","有什么事？"]；单条消息正文禁止使用换行符（\\n），不要用换行把多句话塞进一条。纯结束本轮（end=true）时可省略或传空数组，不会产生新消息，仅限本轮已经发送过内容之后使用；正常发送时必须至少包含一条非空内容或附件。日常聊天一般不需要句尾句号，更像 QQ / 微信真人输入；不要加编号、前缀或解释。',
             },
             images: {
               type: 'array',
@@ -1251,7 +1315,7 @@ export function apply(ctx) {
                 required: ['type'],
               },
             },
-            end: { type: 'boolean', description: 'true=发送后结束本轮；false=发送后继续下一步。' },
+            end: { type: 'boolean', description: '是否结束本轮。发送完最后一批内容时必须传 true；已经发过内容、只想结束本轮时也传 true，此时 messages 可省略或传空数组；本轮尚未发送任何内容时不能用空 messages + end=true 跳过回复。false=后续还会继续调用工具。' },
           },
         },
       },

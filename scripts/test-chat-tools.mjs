@@ -484,6 +484,50 @@ async function main() {
     JSON.stringify({ mediaSend, message: mediaMessage }),
   )
 
+  console.log('\n⑥d chat_send 回执与纯结束信号（空 messages + end=true）')
+  const endConv = sessions.create({ name: '结束信号测试', meta: { roleId: 'role-test' } })
+  const endChannel = store.channelForConversation(endConv.id)
+  const endContext = {
+    conversationId: endConv.id,
+    channelId: endChannel.channelId,
+    roleId: 'role-test',
+    userId: 'web-user',
+    sentContents: new Map(),
+  }
+  // 模拟“模型忘了传 end”：必须明确回执消息已发出、但本轮尚未结束。
+  const omittedEndSend = await tools.execute('chat_send', { messages: ['只发送一次'] }, endContext)
+  const beforeEndSignal = sessions.messages(endConv.id).filter(message => message.role === 'assistant').length
+  // 已无新内容时，允许空 messages + end=true 只结束本轮，不产生新消息。
+  const endSignal = await tools.execute('chat_send', { end: true }, endContext)
+  const afterEndSignal = sessions.messages(endConv.id).filter(message => message.role === 'assistant').length
+  check(
+    'chat_send 返回明确回执：已发送 1 条且本轮未结束',
+    omittedEndSend?.ok === true &&
+      omittedEndSend.sent_count === 1 &&
+      omittedEndSend.message_ids?.length === 1 &&
+      omittedEndSend.turn_ended === false &&
+      omittedEndSend.status === 'sent_continuing',
+    JSON.stringify(omittedEndSend),
+  )
+  check(
+    'chat_send 空 messages + end=true 只结束本轮，不重复发消息',
+    endSignal?.ok === true &&
+      endSignal.sent_count === 0 &&
+      endSignal.turn_ended === true &&
+      endSignal.end === true &&
+      endSignal.status === 'ended_without_new_messages' &&
+      afterEndSignal === beforeEndSignal,
+    JSON.stringify({ endSignal, beforeEndSignal, afterEndSignal }),
+  )
+  // 新的一轮还没有发过任何内容时，空 end 不能拿来跳过回复（防止模型沉默结束）。
+  const freshEndContext = { ...endContext, sentContents: new Map() }
+  const emptyTurnEnd = await tools.execute('chat_send', { end: true }, freshEndContext)
+  check(
+    '本轮尚未发送内容时空 end 会被拒绝',
+    emptyTurnEnd?.ok === false && emptyTurnEnd.code === 'EMPTY_TURN',
+    JSON.stringify(emptyTurnEnd),
+  )
+
   console.log('\n⑦ 工作记忆 + 渠道记忆合并')
   const conv2 = sessions.create({ name: '另一个 Nova 渠道', meta: { roleId: 'role-test' } })
   const channel2 = store.channelForConversation(conv2.id)

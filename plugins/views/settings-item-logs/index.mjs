@@ -39,8 +39,12 @@ const LEVEL_ORDER = ['error', 'warn', 'info', 'debug']
 const DEFAULT_LEVELS = ['error', 'warn', 'info']
 const MAX_ENTRIES = 4000
 const MAX_RENDER = 1200
+// 首次进入 / 手动刷新时先拉最新一小段立刻上屏，再在后台分页回填更早的历史；
+// 增量轮询仍然按大页拉取，减少请求次数。
 const PAGE_LIMIT = 2000
-const FULL_LIMIT = 4000
+const FIRST_PAGE_LIMIT = 400
+const HISTORY_PAGE_LIMIT = 600
+const MAX_BOOTSTRAP_PAGES = 12
 
 const escapeHtml = value =>
   String(value ?? '')
@@ -400,6 +404,16 @@ export function apply(ctx) {
         updateJumpBtn()
       }
 
+      /** 首屏分页每拉回一段就立即上屏，不等 80ms debounce，避免大日志量时用户干等。 */
+      const renderNow = () => {
+        if (renderTimer) {
+          clearTimeout(renderTimer)
+          renderTimer = null
+        }
+        if (!active || paused) return
+        render()
+      }
+
       const pullBackend = async () => {
         // 新后端已经有 /api/logs/runtime 全量日志（HTTP 请求也会写进去），
         // 旧 /api/logs 请求日志只在没有 runtime 接口时兜底，避免两套数据混排。
@@ -522,70 +536,118 @@ export function apply(ctx) {
         const fetchRuntimeOnce = async ({ force = false, allowRetry = true } = {}) => {
           if (!active || !api) return { ok: false, error: '后端未连接' }
           try {
-          if (force) {
-            latestRuntimeId = 0
-            runtimeSeen = new Set()
-          }
-          let added = 0
-          let latest = 0
-          let full = force || latestRuntimeId <= 0
-          // 一次接口最多 4000 行；如果刚好被 limit 截断，继续用 after 追下一段，
-          // 避免一次爆发的大量日志把中间行漏掉。
-          for (let page = 0; page < 6; page += 1) {
-            const params = new URLSearchParams()
-            params.set('limit', String(full ? FULL_LIMIT : PAGE_LIMIT))
-            if (!full) params.set('after', String(latestRuntimeId))
-            params.set('_', String(Date.now())) // 防止代理 / 浏览器缓存旧响应
-            const data = await api.get(`/logs/runtime?${params.toString()}`)
-            runtimeAvailable = true
-            backendFile = data?.file || backendFile
-            const instance = String(data?.instance || '')
-            const instanceChanged = !!(instance && runtimeInstance && instance !== runtimeInstance)
-            if (instance) runtimeInstance = instance
-            if (data?.consoleLevel) backendConsoleLevel = normalizeLevel(data.consoleLevel)
-            latest = Number(data?.latestId) || 0
-            backendTotal = Number(data?.total) || 0
-            // 后端进程换了，或日志被清空后 id 回退：清掉增量游标，从头完整拉取。
-            if (instanceChanged || (latest > 0 && latest < latestRuntimeId)) {
-              if (!allowRetry) return { ok: false, error: '后端日志实例已切换，请重试' }
+            if (force) {
               latestRuntimeId = 0
               runtimeSeen = new Set()
-              if (instanceChanged) {
+            }
+
+            let added = 0
+            let latest = 0
+
+            const readPage = async ({ limit, before = 0, after = 0 }) => {
+              const params = new URLSearchParams()
+              params.set('limit', String(limit))
+              if (before > 0) params.set('before', String(before))
+              if (after > 0) params.set('after', String(after))
+              params.set('_', String(Date.now())) // 防止代理 / 浏览器缓存旧响应
+              const data = await api.get(`/logs/runtime?${params.toString()}`)
+              runtimeAvailable = true
+              backendFile = data?.file || backendFile
+              const instance = String(data?.instance || '')
+              const instanceChanged = !!(instance && runtimeInstance && instance !== runtimeInstance)
+              if (instance) runtimeInstance = instance
+              if (data?.consoleLevel) backendConsoleLevel = normalizeLevel(data.consoleLevel)
+              latest = Number(data?.latestId) || 0
+              backendTotal = Number(data?.total) || 0
+              if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
+              const lines = Array.isArray(data?.lines) ? data.lines : []
+              // 后端进程换了，或日志被清空后 id 回退：清掉增量游标，从头完整拉取。
+              if (instanceChanged || (latest > 0 && latest < latestRuntimeId)) {
+                latestRuntimeId = 0
+                runtimeSeen = new Set()
+                if (instanceChanged) {
                   resetLogEntries()
                   scheduleRuntimeReconnect(0)
                 }
+                const restart = new Error('后端日志实例已切换，请重试')
+                restart.runtimeRestart = true
+                throw restart
+              }
+              return lines
+            }
+
+            const applyLines = lines => {
+              let count = 0
+              for (const line of lines) {
+                if (addRuntimeLine(line)) count += 1
+              }
+              added += count
+              const pageLatest = lines.reduce((max, line) => Math.max(max, Number(line?.id) || 0), 0)
+              // 只把游标推进到本轮真正拿到的最后一条，不能直接跳到后端 latestId：
+              // after 分页返回的是“最早的一段”，若一次积压超过 limit，直接跳 latest
+              // 会永久漏掉中间日志。
+              if (pageLatest > latestRuntimeId) latestRuntimeId = pageLatest
+              return count
+            }
+
+            const initial = force || latestRuntimeId <= 0
+            if (initial) {
+              // 首次 / 刷新先拉最新的一小段并立即显示；更早历史在后面的循环里分页回填。
+              const newest = await readPage({ limit: FIRST_PAGE_LIMIT })
+              applyLines(newest)
+              renderNow()
+              let oldestId = newest.reduce((min, line) => {
+                const id = Number(line?.id) || 0
+                return id > 0 && (min === 0 || id < min) ? id : min
+              }, 0)
+              let needOlder = newest.length >= FIRST_PAGE_LIMIT && oldestId > 1
+              for (let page = 0; needOlder && page < MAX_BOOTSTRAP_PAGES; page += 1) {
+                const older = await readPage({ limit: HISTORY_PAGE_LIMIT, before: oldestId })
+                if (!older.length) break
+                const pageOldestId = older.reduce((min, line) => {
+                  const id = Number(line?.id) || 0
+                  return id > 0 && (min === 0 || id < min) ? id : min
+                }, 0)
+                // 没有取得更早的 id 就停下，避免 before 分页原地打转。
+                if (pageOldestId <= 0 || pageOldestId >= oldestId) break
+                applyLines(older)
+                oldestId = pageOldestId
+                scheduleRender()
+                needOlder = older.length >= HISTORY_PAGE_LIMIT && oldestId > 1
+              }
+            }
+
+            // 从已知最大 id 向后追新。每页拿到就先调度渲染，积压很多也不会等全部拉完。
+            let forwardCaughtUp = initial && latest > 0 && latestRuntimeId >= latest
+            for (let page = 0; page < MAX_BOOTSTRAP_PAGES; page += 1) {
+              if (latestRuntimeId <= 0 || forwardCaughtUp) break
+              const cursor = latestRuntimeId
+              const next = await readPage({ limit: PAGE_LIMIT, after: cursor })
+              if (!next.length) break
+              applyLines(next)
+              scheduleRender()
+              if (latestRuntimeId <= cursor) break
+              forwardCaughtUp = latest > 0 && latestRuntimeId >= latest
+            }
+
+            // 自愈：后端返回的 total 大于本轮已见过的 id 数量，说明分页拉取不完整
+            // （代理截断 / 请求中断 / 旧游标遗漏）。立即重新分页补一次。
+            if (backendTotal > runtimeSeen.size && allowRetry) {
               return fetchRuntimeOnce({ force: true, allowRetry: false })
             }
-            const dataLines = Array.isArray(data?.lines) ? data.lines : []
-            for (const line of dataLines) {
-              if (addRuntimeLine(line)) added += 1
+            renderNow()
+            return { ok: true, added, latest, total: backendTotal, seen: runtimeSeen.size, instance: runtimeInstance }
+          } catch (err) {
+            if (err?.runtimeRestart) {
+              if (!allowRetry) return { ok: false, error: err.message || '后端日志实例已切换，请重试' }
+              return fetchRuntimeOnce({ force: true, allowRetry: false })
             }
-            const pageLatest = dataLines.reduce((max, line) => Math.max(max, Number(line?.id) || 0), 0)
-            // 只把游标推进到本轮真正拿到的最后一条，不能直接跳到后端 latestId：
-            // after 分页返回的是“最早的一段”，若一次积压超过 limit，直接跳 latest
-            // 会永久漏掉中间日志。for 循环会继续用新的 after 追到 latestId 为止。
-            if (pageLatest > latestRuntimeId) latestRuntimeId = pageLatest
-            if (backendFileEl && backendFile) backendFileEl.textContent = ` 后端日志文件：${backendFile}`
-            const limit = full ? FULL_LIMIT : PAGE_LIMIT
-            // 拉满说明这段之后可能还有；若已经追平 latestId 则结束。
-            if (dataLines.length < limit || latest <= 0 || latestRuntimeId >= latest) break
-            full = false
+            // 旧后端没有该接口时保留本地日志订阅兜底。
+            runtimeAvailable = false
+            scheduleRender()
+            return { ok: false, error: err?.message || String(err) }
           }
-          // 自愈：后端返回的 total 大于本轮已见过的 id 数量，说明上次全量拉取不完整
-          // （代理截断 / 请求中断 / 旧游标遗漏）。立即强制全量重拉一次，避免浏览器
-          // 只显示一小段日志，点刷新才恢复。
-          if (backendTotal > runtimeSeen.size && allowRetry) {
-            return fetchRuntimeOnce({ force: true, allowRetry: false })
-          }
-          scheduleRender()
-          return { ok: true, added, latest, total: backendTotal, seen: runtimeSeen.size, instance: runtimeInstance }
-        } catch (err) {
-          // 旧后端没有该接口时保留本地日志订阅兜底。
-          runtimeAvailable = false
-          scheduleRender()
-          return { ok: false, error: err?.message || String(err) }
         }
-      }
 
       // 把全部 fetch 串起来，避免手动刷新和 3 秒轮询并发时互相覆盖游标。
       let runtimePull = Promise.resolve()

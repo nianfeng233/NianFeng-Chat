@@ -20,7 +20,7 @@ import { createCompat } from './compat.mjs'
 import { ConflictError } from './errors.mjs'
 import { isPluginInScope } from './plugin-scope.mjs'
 
-export const VERSION = '2.2.1-preview.10'
+export const VERSION = '2.2.1-preview.11'
 
 export const STATUS = {
   PENDING: 'pending',
