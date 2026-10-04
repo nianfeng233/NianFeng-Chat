@@ -246,6 +246,45 @@ async function main() {
       }).trigger === false,
   )
 
+  const napcatPrivateChannel = (mode, targetIds) => ({
+    meta: { category: 'private', targetType: 'private', targetMode: mode, targetIds, rules: {} },
+  })
+  const whitelistDecision = napcatService.decide(napcatPrivateChannel('whitelist', ['10042']), { senderId: '10042', messageType: 'private' })
+  const whitelistOutside = napcatService.decide(napcatPrivateChannel('whitelist', ['10042']), { senderId: '10099', messageType: 'private' })
+  check(
+    'NapCat 私聊白名单：名单内触发回复',
+    whitelistDecision.trigger === true && whitelistDecision.write === true,
+    JSON.stringify(whitelistDecision),
+  )
+  check(
+    'NapCat 私聊白名单：名单外静默入库不回复',
+    whitelistOutside.trigger === false && whitelistOutside.ignore === false && whitelistOutside.write === true,
+    JSON.stringify(whitelistOutside),
+  )
+  const blacklistBlocked = napcatService.decide(napcatPrivateChannel('blacklist', ['10042']), { senderId: '10042', messageType: 'private' })
+  const blacklistPass = napcatService.decide(napcatPrivateChannel('blacklist', ['10042']), { senderId: '10099', messageType: 'private' })
+  check(
+    'NapCat 私聊黑名单：名单内静默入库不回复',
+    blacklistBlocked.trigger === false && blacklistBlocked.ignore === false && blacklistBlocked.write === true,
+    JSON.stringify(blacklistBlocked),
+  )
+  check(
+    'NapCat 私聊黑名单：名单外正常触发',
+    blacklistPass.trigger === true && blacklistPass.write === true,
+    JSON.stringify(blacklistPass),
+  )
+  check(
+    'NapCat 私聊黑名单：留空视为回复所有 QQ',
+    napcatService.decide(napcatPrivateChannel('blacklist', []), { senderId: '10099', messageType: 'private' }).trigger === true,
+  )
+  check(
+    'NapCat targetOf 暴露私聊名单模式',
+    (() => {
+      const target = napcatService.targetOf(napcatPrivateChannel('blacklist', ['10042', '10099']))
+      return target.mode === 'blacklist' && target.ids?.[0] === '10042' && target.ids?.[1] === '10099'
+    })(),
+  )
+
   const qqbotService = ctx.inject('qqbot-channel')
   check('QQ官方机器人 扩展服务 qqbot-channel 可用', typeof qqbotService?.decide === 'function' && typeof qqbotService?.bindingsOf === 'function')
   const qqbotRulesBase = {
@@ -1040,6 +1079,22 @@ async function main() {
     ncProbabilityNumber.dispatchEvent({ type: 'input' })
   }
   check('NapCat 回复概率支持手动输入数值', String(ncProbabilityNumber?.value || '') === '37' && String(ncProbability?.value || '') === '37')
+  ncCreateDialog?.querySelector('[data-nc-category-tab="private"]')?.click()
+  const ncTargetMode = ncCreateDialog?.querySelector('[data-nc-target-mode]')
+  check(
+    'NapCat 私聊提供白名单 / 黑名单目标模式',
+    ncTargetMode?.hidden === false && Array.from(ncTargetMode?.querySelectorAll('option') || []).length === 2,
+  )
+  if (ncTargetMode) {
+    ncTargetMode.value = 'blacklist'
+    ncTargetMode.dispatchEvent({ type: 'change' })
+  }
+  check(
+    'NapCat 黑名单模式提示留空回复所有 QQ 且命中静默入库',
+    String(ncCreateDialog?.querySelector('[data-nc-target-label]')?.textContent || '').includes('黑名单') &&
+      String(ncCreateDialog?.querySelector('[data-nc-target]')?.placeholder || '').includes('留空') &&
+      String(ncCreateDialog?.querySelector('[data-nc-target-help]')?.textContent || '').includes('静默'),
+  )
   ncCreateDialog?.querySelector('[data-nc-cancel]')?.click()
   await sleep(20)
 

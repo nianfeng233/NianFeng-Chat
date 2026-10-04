@@ -7,6 +7,7 @@
  *   - Reverse WebSocket 握手 / get_login_info / 收消息 / 发消息
  *   - 同一 NapCat 地址 + token 自动复用，不创建重复连接
  *   - 群消息路由（群号 + sender 卡片 / 昵称 / QQ 号）
+ *   - 私聊白名单 / 黑名单目标路由（名单内 / 名单外 / 留空回复全部）
  *   - 引用回复 + 艾特触发者的 OneBot segment 结构
  *
  * 用法：npm run test:napcat
@@ -630,6 +631,134 @@ async function main() {
       privateForwardAction?.params?.user_id === 10002 &&
         String(privateForwardAction?.params?.messages?.[0]?.data?.content?.[0]?.data?.text || '').includes('私聊转发正文'),
       JSON.stringify(privateForwardAction?.params || {}).slice(0, 240),
+    )
+
+    // 4b-2) 私聊黑名单模式：名单外正常路由；名单内也进入收件箱，由前端静默入库但不回复。
+    const blacklistChannelId = 'napcat-test-private-blacklist'
+    const blacklistSync = await request('/napcat/channels/sync', {
+      method: 'POST',
+      body: {
+        channelId: blacklistChannelId,
+        channelName: '测试私聊黑名单渠道',
+        roleId: 'role-1',
+        instanceId,
+        category: 'private',
+        targetType: 'private',
+        targetMode: 'blacklist',
+        targetIds: ['10003'],
+        targetId: '',
+        identityMode: 'owner',
+        rules: {},
+        permissions: { read: true, reply: true, context: true, crossRead: false, crossSend: false, confirm: true },
+      },
+    })
+    check(
+      '私聊黑名单模式同步成功',
+      blacklistSync.data?.ok === true &&
+        blacklistSync.data?.channel?.targetMode === 'blacklist' &&
+        blacklistSync.data?.channel?.targetId === '' &&
+        blacklistSync.data?.channel?.targetIds?.[0] === '10003',
+      JSON.stringify(blacklistSync.data),
+    )
+
+    pushEvent({
+      post_type: 'message',
+      message_type: 'private',
+      sub_type: 'friend',
+      message_id: 2002,
+      user_id: 10004,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      raw_message: '黑名单外消息',
+      message: [{ type: 'text', data: { text: '黑名单外消息' } }],
+      sender: { user_id: 10004, nickname: '好友乙' },
+    })
+    const blacklistOutside = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(blacklistChannelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '2002')?.message || null
+    })
+    check('黑名单模式收到名单外 QQ 的私聊', blacklistOutside?.peerId === '10004', JSON.stringify(blacklistOutside))
+
+    pushEvent({
+      post_type: 'message',
+      message_type: 'private',
+      sub_type: 'friend',
+      message_id: 2003,
+      user_id: 10003,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      raw_message: '黑名单内消息',
+      message: [{ type: 'text', data: { text: '黑名单内消息' } }],
+      sender: { user_id: 10003, nickname: '好友丙' },
+    })
+    const blacklistBlocked = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(blacklistChannelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '2003')?.message || null
+    })
+    check('黑名单命中的 QQ 也会进入收件箱（供前端静默入库）', blacklistBlocked?.peerId === '10003', JSON.stringify(blacklistBlocked))
+
+    const privateInboxAfter = await request(`/napcat/inbox?channelId=${encodeURIComponent(privateChannelId)}`)
+    check(
+      '白名单渠道不会收到名单外私聊',
+      !(privateInboxAfter.data?.messages || []).some(item => item.message?.messageId === '2002' || item.message?.messageId === '2003'),
+      JSON.stringify(privateInboxAfter.data?.messages || []),
+    )
+
+    // 黑名单留空 = 接收该账号下所有私聊，等价于“回复所有 QQ”。
+    const allPrivateChannelId = 'napcat-test-private-all'
+    const allPrivateSync = await request('/napcat/channels/sync', {
+      method: 'POST',
+      body: {
+        channelId: allPrivateChannelId,
+        channelName: '测试私聊全部渠道',
+        roleId: 'role-1',
+        instanceId,
+        category: 'private',
+        targetType: 'private',
+        targetMode: 'blacklist',
+        targetIds: [],
+        targetId: '',
+        identityMode: 'owner',
+        rules: {},
+        permissions: { read: true, reply: true, context: true, crossRead: false, crossSend: false, confirm: true },
+      },
+    })
+    check(
+      '空黑名单模式表示回复所有 QQ',
+      allPrivateSync.data?.ok === true && allPrivateSync.data?.channel?.targetMode === 'blacklist' && allPrivateSync.data?.channel?.targetIds?.length === 0,
+      JSON.stringify(allPrivateSync.data),
+    )
+    pushEvent({
+      post_type: 'message',
+      message_type: 'private',
+      sub_type: 'friend',
+      message_id: 2004,
+      user_id: 10005,
+      self_id: 10001,
+      time: Math.floor(Date.now() / 1000),
+      raw_message: '任意好友消息',
+      message: [{ type: 'text', data: { text: '任意好友消息' } }],
+      sender: { user_id: 10005, nickname: '好友丁' },
+    })
+    const allPrivateInbox = await waitFor(async () => {
+      const inbox = await request(`/napcat/inbox?channelId=${encodeURIComponent(allPrivateChannelId)}`)
+      return (inbox.data?.messages || []).find(item => item.message?.messageId === '2004')?.message || null
+    })
+    check('空黑名单模式接收新的 QQ 私聊', allPrivateInbox?.peerId === '10005', JSON.stringify(allPrivateInbox))
+
+    // 黑名单/全部模式下，前端会把当前入站发送者作为 targetId 交给发送接口。
+    const blacklistSendBefore = actions.length
+    const blacklistSend = await request('/napcat/send', {
+      method: 'POST',
+      body: { channelId: blacklistChannelId, targetId: '10004', text: '回复黑名单外的 QQ' },
+    })
+    check('黑名单模式发送接口返回成功', blacklistSend.data?.ok === true, JSON.stringify(blacklistSend.data))
+    const blacklistSendAction = await waitFor(() => actions.slice(blacklistSendBefore).find(item => item.action === 'send_private_msg') || null)
+    check(
+      '黑名单模式按当前入站发送者发送',
+      blacklistSendAction?.params?.user_id === 10004 &&
+        (blacklistSendAction?.params?.message || []).some(segment => segment.type === 'text' && segment.data?.text === '回复黑名单外的 QQ'),
+      JSON.stringify(blacklistSendAction?.params || {}),
     )
 
     // 4c) 助手直接输出 CQ 码 / [at:qq] 简写时转换为真实消息段

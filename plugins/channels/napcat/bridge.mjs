@@ -127,6 +127,22 @@ function toNumericId(value) {
   return text
 }
 
+/** 把前端传来的单个 QQ / 数组 / 逗号分隔列表统一为去重的数字 QQ 列表。 */
+function toNumericIdList(value) {
+  const raw = Array.isArray(value) ? value : [value]
+  const result = []
+  const seen = new Set()
+  for (const item of raw) {
+    for (const part of String(item ?? '').split(/[,，\s]+/)) {
+      const id = toNumericId(part)
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      result.push(id)
+    }
+  }
+  return result.slice(0, 200)
+}
+
 function cqUnescape(value) {
   return String(value ?? '')
     .replace(/&amp;/g, '&')
@@ -765,8 +781,12 @@ export function apply(ctx) {
     const targetType = input.targetType === 'group' ? 'group' : 'private'
     const categoryRaw = String(input.category || '')
     const category = ['private', 'group', 'privacy'].includes(categoryRaw) ? categoryRaw : targetType === 'group' ? 'group' : 'private'
+    // 私聊 / 隐私支持白名单与黑名单两种目标模式；群聊固定使用群号精确匹配。
+    const targetMode = targetType === 'private' && input.targetMode === 'blacklist' ? 'blacklist' : 'whitelist'
+    const targetIds = toNumericIdList(Array.isArray(input.targetIds) && input.targetIds.length ? input.targetIds : input.targetId)
     const rules = input.rules && typeof input.rules === 'object' ? input.rules : {}
     const permissions = input.permissions && typeof input.permissions === 'object' ? input.permissions : {}
+    const contextMessages = Math.max(0, Math.min(1000, Math.floor(Number(rules.contextMessages) || 0)))
     return {
       channelId: String(input.channelId || '').trim(),
       channelName: safeString(input.channelName || '', 80),
@@ -774,7 +794,10 @@ export function apply(ctx) {
       instanceId: String(input.instanceId || '').trim(),
       category,
       targetType,
-      targetId: toNumericId(input.targetId) || String(input.targetId || '').trim().slice(0, 40),
+      targetMode,
+      targetIds,
+      // 白名单首项作为兼容旧逻辑的主目标；黑名单全部由 targetIds 承载，主目标留空。
+      targetId: targetType === 'private' && targetMode === 'blacklist' ? '' : targetIds[0] || '',
       identityMode: input.identityMode === 'guest' ? 'guest' : 'owner',
       rules: {
         blacklist: (Array.isArray(rules.blacklist) ? rules.blacklist : [])
@@ -792,6 +815,8 @@ export function apply(ctx) {
         quote: rules.quote !== false,
         mention: rules.mention !== false,
         silentContext: rules.silentContext !== false,
+        contextMessages,
+        contextRounds: Number(rules.contextRounds) || 0,
       },
       permissions,
       trustedUserIds: (Array.isArray(input.trustedUserIds) ? input.trustedUserIds : [])
@@ -1578,6 +1603,14 @@ export function apply(ctx) {
     return Object.values(data.channels).filter(channel => {
       if (!channel || channel.instanceId !== String(instanceId)) return false
       if (channel.targetType !== message.messageType) return false
+      // 群聊仍然精确匹配群号；私聊 / 隐私：
+      //  - 白名单：只接收名单内 QQ，用于只回复指定的人；
+      //  - 黑名单：接收该账号下所有私聊，名单内 QQ 由前端判定为静默入库但不回复。
+      if (message.messageType === 'private') {
+        if (channel.targetMode === 'blacklist') return true
+        const ids = Array.isArray(channel.targetIds) && channel.targetIds.length ? channel.targetIds : channel.targetId ? [channel.targetId] : []
+        return ids.some(id => String(id) === String(message.peerId))
+      }
       return String(channel.targetId) === String(message.peerId)
     })
   }
@@ -2292,7 +2325,21 @@ export function apply(ctx) {
     if (!connectionAlive(rt)) return { ok: false, code: 'OFFLINE', error: 'NapCat 连接未就绪，请先在渠道详情里完成连接' }
 
     const targetType = body.targetType === 'group' || (!body.targetType && channel?.targetType === 'group') ? 'group' : 'private'
-    const targetId = toNumericId(body.targetId ?? channel?.targetId)
+    // 普通回复由前端直接带上当前私聊发送者；这里再兜底：
+    //  - 白名单 / 群聊使用配置里的主目标；
+    //  - 黑名单（可回复全部）优先取该渠道最近入站的私聊发送者。
+    let targetId = toNumericId(body.targetId ?? (targetType === 'group' || channel?.targetMode !== 'blacklist' ? channel?.targetId : ''))
+    if (!targetId && targetType === 'private') {
+      for (let index = inbox.length - 1; index >= 0; index -= 1) {
+        const item = inbox[index]
+        if (item.channelId !== channelId) continue
+        const peerId = toNumericId(item.message?.peerId)
+        if (peerId) {
+          targetId = peerId
+          break
+        }
+      }
+    }
     if (!targetId) return { ok: false, code: 'BAD_TARGET', error: '目标 QQ 号 / 群号不合法' }
 
     const text = String(body.text || '')
@@ -2681,8 +2728,15 @@ export function apply(ctx) {
     const instanceId = String(body.instanceId || '').trim()
     if (!instanceId || !data.instances[instanceId]) return httpApi.sendError(res, 400, '请先选择 / 创建可用的 NapCat 连接')
     const targetType = body.targetType === 'group' ? 'group' : 'private'
-    const targetId = toNumericId(body.targetId)
-    if (!targetId) return httpApi.sendError(res, 400, targetType === 'group' ? '群号不合法' : '目标 QQ 号不合法')
+    const targetMode = targetType === 'private' && body.targetMode === 'blacklist' ? 'blacklist' : 'whitelist'
+    const requestedTargetIds = toNumericIdList(Array.isArray(body.targetIds) && body.targetIds.length ? body.targetIds : body.targetId)
+    const targetIds = targetType === 'group' ? requestedTargetIds.slice(0, 1) : requestedTargetIds
+    if (targetType === 'group' && targetIds.length !== 1) {
+      return httpApi.sendError(res, 400, '群号不合法')
+    }
+    if (targetType === 'private' && targetMode === 'whitelist' && !targetIds.length) {
+      return httpApi.sendError(res, 400, '请至少填写一个目标 QQ 号')
+    }
     if (targetType === 'group' && body.category !== 'group') {
       return httpApi.sendError(res, 400, '群聊目标必须使用群聊分类')
     }
@@ -2692,16 +2746,23 @@ export function apply(ctx) {
       channelId,
       instanceId,
       targetType,
-      targetId,
+      targetMode,
+      targetIds,
+      targetId: targetType === 'group' ? targetIds[0] : targetMode === 'blacklist' ? '' : targetIds[0] || '',
       updatedAt: Date.now(),
     })
     data.channels[channelId] = channel
-    upsertDiscover(instanceId, {
-      type: targetType,
-      peerId: targetId,
-      name: discoverName(instanceId, targetType, targetId) || (targetType === 'group' ? `群 ${targetId}` : `QQ ${targetId}`),
-      bound: true,
-    })
+    // 黑名单按模式覆盖全部私聊，不把具体 QQ 标记为目标；白名单 / 群聊仍逐目标登记。
+    if (channel.targetType !== 'private' || channel.targetMode !== 'blacklist') {
+      for (const id of channel.targetIds || []) {
+        upsertDiscover(instanceId, {
+          type: channel.targetType,
+          peerId: id,
+          name: discoverName(instanceId, channel.targetType, id) || (channel.targetType === 'group' ? '群 ' + id : 'QQ ' + id),
+          bound: true,
+        })
+      }
+    }
     schedulePersist()
     broadcastDiscover(instanceId)
     httpApi.sendJson(res, 200, { ok: true, channel, instance: publicInstance(data.instances[instanceId]) })
@@ -2717,10 +2778,13 @@ export function apply(ctx) {
     for (let index = inbox.length - 1; index >= 0; index--) {
       if (inbox[index].channelId === channelId) inbox.splice(index, 1)
     }
-    if (channel?.instanceId) {
+    if (channel?.instanceId && channel.targetMode !== 'blacklist') {
       try {
-        const key = discoverKey(channel.targetType, channel.targetId)
-        if (data.discover[channel.instanceId]?.[key]) data.discover[channel.instanceId][key].bound = false
+        const ids = Array.isArray(channel.targetIds) && channel.targetIds.length ? channel.targetIds : channel.targetId ? [channel.targetId] : []
+        for (const id of ids) {
+          const key = discoverKey(channel.targetType, id)
+          if (data.discover[channel.instanceId]?.[key]) data.discover[channel.instanceId][key].bound = false
+        }
       } catch (_) {
         /* ignore */
       }

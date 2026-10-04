@@ -6,7 +6,8 @@
  * NapCatQQ 渠道插件（OneBot 11）。
  *
  *  - 安装后「渠道 → 添加渠道」出现「NapCat」；
- *  - 支持私聊 / 群聊 / 隐私三类。私聊与隐私填写目标 QQ 号，群聊填写群号；
+ *  - 支持私聊 / 群聊 / 隐私三类。私聊与隐私支持白名单模式（只回复名单内 QQ）
+ *    和黑名单模式（名单内 QQ 不回复，留空回复全部 QQ）；群聊填写群号；
  *  - 同一个 NapCat 登录 QQ 只需要建立一条连接，多个渠道可以复用；
  *  - QQ 名、QQ 号、群号、群昵称、实际昵称都会写入消息身份与上下文；
  *  - 群聊支持黑名单 / 仅艾特 / 回复概率 / 引用回复 / 艾特触发者 / 静默上下文；
@@ -93,7 +94,7 @@ const PERMISSION_SCOPES = {
 }
 const permissionMetaFor = category => PERMISSION_META.filter(([key]) => (PERMISSION_SCOPES[key] || ['private', 'group', 'privacy']).includes(category))
 const CATEGORY_HELP = {
-  private: '私聊：目标 QQ 的消息进入所选角色的角色级工作记忆，可参与跨渠道协作。',
+  private: '私聊：白名单只回复名单内 QQ；黑名单接收该账号全部私聊、排除名单内 QQ，未触发的消息静默入库。',
   group: '群聊：只使用本群最近若干条消息作为上下文；使用独立的群聊触发与回复规则。',
   privacy: '隐私：独立单会话，不与其它渠道互读 / 互发；适合不希望消息进入角色工作记忆的用途。',
 }
@@ -214,6 +215,26 @@ export function apply(ctx) {
   }
   const targetTypeOf = channel => (channel?.meta?.targetType === 'group' || categoryOf(channel) === 'group' ? 'group' : 'private')
   const targetIdOf = channel => String(channel?.meta?.targetId || '').trim()
+  const targetModeOf = channel => (channel?.meta?.targetMode === 'blacklist' ? 'blacklist' : 'whitelist')
+  /** 目标名单统一解析：支持数组、单个 QQ、逗号 / 空格分隔的列表，忽略非法项并去重。 */
+  const normalizeTargetIds = value => {
+    const raw = Array.isArray(value) ? value : [value]
+    const result = []
+    const seen = new Set()
+    for (const item of raw) {
+      for (const part of String(item || '').split(/[,，\s]+/)) {
+        const id = part.trim()
+        if (!/^\d{3,20}$/.test(id) || seen.has(id)) continue
+        seen.add(id)
+        result.push(id)
+      }
+    }
+    return result.slice(0, 200)
+  }
+  const targetIdsOf = channel => {
+    const explicit = Array.isArray(channel?.meta?.targetIds) ? channel.meta.targetIds : []
+    return normalizeTargetIds(explicit.length ? explicit : channel?.meta?.targetId || '')
+  }
   const instanceIdOf = channel => String(channel?.meta?.instanceId || '').trim()
   const groupRulesOf = channel => {
     const rules = { ...DEFAULT_GROUP_RULES, ...(channel?.meta?.rules || {}) }
@@ -384,10 +405,18 @@ export function apply(ctx) {
 
   function targetDisplayName(channel) {
     const type = targetTypeOf(channel)
-    const id = targetIdOf(channel)
+    const mode = targetModeOf(channel)
+    const ids = targetIdsOf(channel)
+    const id = targetIdOf(channel) || ids[0] || ''
     const alias = String(channel?.meta?.targetName || '').trim()
-    if (alias) return alias
-    return type === 'group' ? `群 ${id}` : `QQ ${id}`
+    if (type === 'group') return alias || `群 ${id}`
+    if (mode === 'blacklist') {
+      if (!ids.length) return '全部 QQ'
+      const shown = ids.slice(0, 3).join('、')
+      return `QQ 黑名单（${shown}${ids.length > 3 ? ` 等 ${ids.length} 人` : ''}）`
+    }
+    if (ids.length > 1) return `QQ 白名单（${ids.slice(0, 3).join('、')}${ids.length > 3 ? ` 等 ${ids.length} 人` : ''}）`
+    return alias || `QQ ${id}`
   }
 
   function bindingSummary(channel) {
@@ -435,7 +464,9 @@ export function apply(ctx) {
       napcatChannelId: channel.id,
       napcatInstanceId: instanceIdOf(channel),
       napcatTargetType: targetType,
+      napcatTargetMode: targetModeOf(channel),
       napcatTargetId: targetIdOf(channel),
+      napcatTargetIds: targetIdsOf(channel),
       napcatTargetName: label,
       hiddenFromSessionList: true,
       channelConversation: true,
@@ -525,7 +556,9 @@ export function apply(ctx) {
         instanceId: meta.instanceId,
         category: categoryOf(channel),
         targetType: targetTypeOf(channel),
-        targetId: targetIdOf(channel),
+        targetMode: targetModeOf(channel),
+        targetIds: targetIdsOf(channel),
+        targetId: targetIdOf(channel) || (targetModeOf(channel) !== 'blacklist' ? targetIdsOf(channel)[0] || '' : ''),
         identityMode: meta.identityMode === 'guest' ? 'guest' : 'owner',
         rules: groupRulesOf(channel),
         permissions: permissionsOf(channel),
@@ -725,7 +758,28 @@ export function apply(ctx) {
     const whitelistAllowed = () => !!senderId && whitelist.includes(senderId)
     let decision = null
     if (category !== 'group') {
-      decision = { trigger: true, ignore: false, reason: 'private', rules }
+      const targetMode = targetModeOf(channel)
+      const targetIds = targetIdsOf(channel)
+      if (targetMode === 'blacklist') {
+        const blocked = !!senderId && targetIds.includes(senderId)
+        decision = {
+          trigger: !blocked,
+          ignore: false,
+          reason: blocked ? 'private-blacklist' : 'private',
+          rules,
+          // 命中私聊黑名单时仍然静默入库，只是不触发模型回复。
+          write: true,
+        }
+      } else {
+        const allowed = !!senderId && targetIds.includes(senderId)
+        decision = {
+          trigger: allowed,
+          ignore: false,
+          reason: allowed ? 'private' : 'private-whitelist-outside',
+          rules,
+          write: true,
+        }
+      }
     } else if (message.mentionedSelf === true) {
       // @ 机器人始终优先回复（可再受“艾特白名单”限制）；
       // “仅 @ 时回复”关闭后，只影响未 @ 的普通消息是否按概率触发。
@@ -760,6 +814,7 @@ export function apply(ctx) {
           ignore: intercepted.ignore === true,
           reason: intercepted.reason || decision.reason,
           rules: intercepted.rules || rules,
+          write: intercepted.write === false ? false : intercepted.write === true || decision.write === true,
         }
       }
     } catch (_) {
@@ -777,13 +832,16 @@ export function apply(ctx) {
    */
   async function deliverOutbound({ channel, conversationId, message }) {
     const targetType = targetTypeOf(channel)
-    const targetId = targetIdOf(channel)
     const instanceId = instanceIdOf(channel)
     if (!instanceId) return { ok: false, error: 'NapCat 渠道未绑定连接' }
-    if (!targetId) return { ok: false, error: 'NapCat 渠道未配置目标 QQ / 群号' }
-
     const active = activeTurns.get(conversationId)
     const inbound = active && String(active.channel?.id || '') === String(channel.id) ? active.message : null
+    // 私聊回复都发给当前入站发送者：白名单就是名单本人，黑名单则覆盖所有未被拉黑的 QQ。
+    const targetId =
+      targetType === 'private'
+        ? String(inbound?.senderId || inbound?.peerId || targetIdOf(channel) || '').trim()
+        : targetIdOf(channel)
+    if (!targetId) return { ok: false, error: 'NapCat 渠道未配置目标 QQ / 群号' }
     const rules = groupRulesOf(channel)
     const content = buildOutboundContent(message)
     const forwarding = Array.isArray(content.forward) && content.forward.length > 0
@@ -880,8 +938,14 @@ export function apply(ctx) {
     const channel = findChannel(channelId)
     if (!isNapcatChannel(channel)) return
     if (payload?.instanceId && instanceIdOf(channel) && String(payload.instanceId) !== instanceIdOf(channel)) return
-    if (String(message.messageType || '') !== targetTypeOf(channel)) return
-    if (targetIdOf(channel) && String(message.peerId || '') !== targetIdOf(channel)) return
+    const channelTargetType = targetTypeOf(channel)
+    if (String(message.messageType || '') !== channelTargetType) return
+    if (channelTargetType === 'group') {
+      if (targetIdOf(channel) && String(message.peerId || '') !== targetIdOf(channel)) return
+    } else if (targetModeOf(channel) !== 'blacklist' && !targetIdsOf(channel).includes(String(message.peerId || ''))) {
+      // 白名单只处理名单内消息；黑名单会收到全部私聊，命中名单的在下面静默写入但不触发。
+      return
+    }
 
     let seen = handledInbound.get(channelId)
     if (!seen) {
@@ -946,7 +1010,7 @@ export function apply(ctx) {
     }
 
     // 群聊黑名单由后端路由进来后在这里静默忽略；其它情况默认保留全部群消息形成最近 N 条上下文（N 可配置）。
-    const shouldWrite = decision.trigger || decision.rules.silentContext !== false
+    const shouldWrite = decision.trigger || decision.write === true || decision.rules.silentContext !== false
     if (!shouldWrite) logReceived(`未写入上下文：${decision.reason || '规则未触发'}`)
     const text = String(message.text || '').trim() || (Array.isArray(message.images) && message.images.length ? '[图片]' : '')
     const senderIds = Array.isArray(channel.meta?.trustedUserIds) ? channel.meta.trustedUserIds.map(item => String(item || '').trim()).filter(Boolean) : []
@@ -1240,7 +1304,17 @@ export function apply(ctx) {
           ? tab
           : 'private'
     const targetType = category === 'group' ? 'group' : 'private'
-    const targetId = String(editing ? meta.targetId || '' : preset?.targetId || '')
+    const targetMode = editing ? targetModeOf(source) : preset?.targetMode === 'blacklist' ? 'blacklist' : 'whitelist'
+    const existingTargetIds = targetIdsOf(source)
+    const targetId = String(
+      editing
+        ? targetType === 'group'
+          ? meta.targetId || ''
+          : targetMode === 'blacklist' || existingTargetIds.length > 1
+            ? existingTargetIds.join(',')
+            : meta.targetId || existingTargetIds[0] || ''
+        : preset?.targetId || '',
+    )
     const targetName = String(editing ? meta.targetName || '' : preset?.targetName || '')
     const permissions = permissionsOf(source)
     const rules = groupRulesOf(source)
@@ -1289,12 +1363,24 @@ export function apply(ctx) {
             <div class="nc-field-help" data-nc-category-help>${CATEGORY_HELP[category] || CATEGORY_HELP.private}</div>
           </label>
           <label class="nc-field">
-            <span data-nc-target-label>${targetType === 'group' ? '群聊目标群号' : '私聊目标 QQ 号'}</span>
+            <span data-nc-target-label>${targetType === 'group' ? '群聊目标群号' : targetMode === 'blacklist' ? '不回复的 QQ 号（黑名单）' : '目标 QQ 号（白名单）'}</span>
+            <select data-nc-target-mode ${targetType === 'group' ? 'hidden' : ''}>
+              <option value="whitelist" ${targetMode === 'whitelist' ? 'selected' : ''}>白名单模式 · 只回复名单里的 QQ</option>
+              <option value="blacklist" ${targetMode === 'blacklist' ? 'selected' : ''}>黑名单模式 · 名单里的 QQ 不回复（留空回复所有 QQ）</option>
+            </select>
             <div class="nc-grid-3">
-              <input data-nc-target maxlength="30" value="${escapeHtml(targetId)}" placeholder="${targetType === 'group' ? '例如：123456789' : '例如：10001'}" />
+              <input data-nc-target maxlength="500" value="${escapeHtml(targetId)}" placeholder="${
+                targetType === 'group' ? '例如：123456789' : targetMode === 'blacklist' ? '留空 = 回复所有 QQ；也可填 12345,67890' : '例如：10001（多个用逗号分隔）'
+              }" />
               <button class="outline-btn" data-nc-pick-target title="从该 NapCat 连接收到过的会话 / 好友 / 群里选择目标，省得手动输入">从已发现会话选择…</button>
             </div>
-            <div class="nc-field-help" data-nc-target-help>这里填<b>要接入聊天的目标</b>：私聊 / 隐私填对方的 QQ 号，群聊填群号。只有这个目标的消息会进入本渠道。</div>
+            <div class="nc-field-help" data-nc-target-help>${
+              targetType === 'group'
+                ? '这里填<b>要接入聊天的群号</b>；只有这个群的消息会进入本渠道。'
+                : targetMode === 'blacklist'
+                  ? '名单里的 QQ 不会被回复，但消息仍会静默写入本渠道记录；留空则回复该账号下所有 QQ 的私聊。'
+                  : '这里填<b>要接入聊天的对方 QQ 号</b>；只有名单里的 QQ 私聊会进入本渠道。多个 QQ 用逗号 / 空格分隔。'
+            }</div>
           </label>
         </div>
         <input type="hidden" data-nc-target-name value="${escapeHtml(targetName)}" />
@@ -1434,6 +1520,7 @@ export function apply(ctx) {
     const permNote = overlay.querySelector('[data-nc-perm-note]')
     const targetInput = overlay.querySelector('[data-nc-target]')
     const targetLabel = overlay.querySelector('[data-nc-target-label]')
+    const targetModeSelect = overlay.querySelector('[data-nc-target-mode]')
     const targetNameInput = overlay.querySelector('[data-nc-target-name]')
     const instanceSelect = overlay.querySelector('[data-nc-instance]')
     const instanceStatus = overlay.querySelector('[data-nc-instance-status]')
@@ -1510,6 +1597,29 @@ export function apply(ctx) {
       }
     }
 
+    const syncTargetMode = () => {
+      const isGroup = categorySelect.value === 'group'
+      const mode = targetModeSelect.value === 'blacklist' ? 'blacklist' : 'whitelist'
+      targetModeSelect.hidden = isGroup
+      if (isGroup) {
+        targetLabel.textContent = '群聊目标群号'
+        targetInput.placeholder = '例如：123456789'
+        if (targetHelp) targetHelp.innerHTML = '这里填<b>要接入聊天的群号</b>；只有这个群的消息会进入本渠道，其它群不会触发模型。'
+        return
+      }
+      const isPrivacy = categorySelect.value === 'privacy'
+      targetLabel.textContent = mode === 'blacklist' ? '不回复的 QQ 号（黑名单）' : '目标 QQ 号（白名单）'
+      targetInput.placeholder = mode === 'blacklist' ? '留空 = 回复所有 QQ；也可填 12345,67890' : '例如：10001（多个用逗号分隔）'
+      if (targetHelp) {
+        targetHelp.innerHTML =
+          mode === 'blacklist'
+            ? `名单里的 QQ 不会被回复，但消息仍会静默写入${isPrivacy ? '隐私' : '本'}渠道记录；留空则回复该账号下所有 QQ 的私聊。`
+            : isPrivacy
+              ? '这里填<b>隐私会话对应的 QQ 号</b>；只有名单里的 QQ 消息会进入本渠道，该渠道有独立记录，不参与角色工作记忆，也不能和其它渠道互读 / 互发。'
+              : '这里填<b>要接入聊天的对方 QQ 号</b>；只有名单里的 QQ 私聊会进入本渠道。多个 QQ 用逗号 / 空格分隔。'
+      }
+    }
+
     const syncCategory = () => {
       const value = categorySelect.value
       const isGroup = value === 'group'
@@ -1517,8 +1627,7 @@ export function apply(ctx) {
       const activeCategory = isGroup ? 'group' : isPrivacy ? 'privacy' : 'private'
       groupRulesPanel.hidden = !isGroup
       identityRow.hidden = isGroup
-      targetLabel.textContent = isGroup ? '群聊目标群号' : isPrivacy ? '隐私目标 QQ 号' : '私聊目标 QQ 号'
-      targetInput.placeholder = isGroup ? '例如：123456789' : '例如：10001'
+      syncTargetMode()
       if (categoryHelp) categoryHelp.textContent = CATEGORY_HELP[activeCategory] || CATEGORY_HELP.private
       for (const tab of categoryTabs) tab.classList.toggle('active', tab.dataset.ncCategoryTab === activeCategory)
       // 按分类隐藏无意义的权限项，但保留在 DOM 里，保存时仍能保留原有的勾选状态。
@@ -1532,13 +1641,6 @@ export function apply(ctx) {
           : isGroup
             ? '群聊只使用本群记录，因此「参与工作记忆」已隐藏。'
             : '私聊可使用全部权限；跨渠道操作仍可能要求二次确认。'
-      }
-      if (targetHelp) {
-        targetHelp.innerHTML = isGroup
-          ? '这里填<b>要接入聊天的群号</b>；只有这个群的消息会进入本渠道，其它群不会触发模型。'
-          : isPrivacy
-            ? '这里填<b>隐私会话对应的 QQ 号</b>；该渠道有独立记录，不会参与角色工作记忆，也不能和其它渠道互读 / 互发。'
-            : '这里填<b>要接入聊天的对方 QQ 号</b>；只有这个 QQ 的私聊消息会进入本渠道。'
       }
       if (isGroup) targetNameInput.value = ''
     }
@@ -1579,6 +1681,11 @@ export function apply(ctx) {
         syncCategory()
       })
     }
+    targetModeSelect.addEventListener('change', () => {
+      // 切换名单模式后，之前从发现列表选中的昵称不再代表当前名单语义，避免显示误导。
+      targetNameInput.value = ''
+      syncTargetMode()
+    })
     requireAtInput.addEventListener('change', syncProbability)
     probabilityInput.addEventListener('input', syncProbability)
     probabilityNumberInput.addEventListener('input', onProbabilityNumber)
@@ -1600,6 +1707,7 @@ export function apply(ctx) {
         return
       }
       const type = categorySelect.value === 'group' ? 'group' : 'private'
+      const pickingMode = targetModeSelect.value === 'blacklist' ? 'blacklist' : 'whitelist'
       openDiscoverPicker({
         instanceId: selected,
         type,
@@ -1607,7 +1715,16 @@ export function apply(ctx) {
           if (!item) return
           if (type === 'group' && item.type !== 'group') return
           if (type !== 'group' && item.type !== 'private') return
-          targetInput.value = String(item.peerId || '')
+          const peerId = String(item.peerId || '').trim()
+          if (!peerId) return
+          if (type !== 'group' && pickingMode === 'blacklist') {
+            const ids = normalizeTargetIds(targetInput.value)
+            if (!ids.includes(peerId)) ids.push(peerId)
+            targetInput.value = ids.join(',')
+            targetNameInput.value = ''
+            return
+          }
+          targetInput.value = peerId
           targetNameInput.value = String(item.name || '')
         },
       })
@@ -1621,8 +1738,21 @@ export function apply(ctx) {
       if (!nextRoleId) return setError('请先选择一个角色；没有角色时可先到「会话」里创建一个角色。')
       const nextCategory = TAB_ORDER.includes(categorySelect.value) ? categorySelect.value : 'private'
       const nextTargetType = nextCategory === 'group' ? 'group' : 'private'
-      const nextTargetId = String(targetInput.value || '').trim()
-      if (!/^\d{3,20}$/.test(nextTargetId)) return setError(nextTargetType === 'group' ? '请填写合法的群号（数字）。' : '请填写合法的目标 QQ 号（数字）。')
+      const nextTargetMode = nextTargetType === 'group' ? 'whitelist' : targetModeSelect.value === 'blacklist' ? 'blacklist' : 'whitelist'
+      const nextTargetText = String(targetInput.value || '').trim()
+      let nextTargetIds = []
+      if (nextTargetType === 'group') {
+        if (!/^\d{3,20}$/.test(nextTargetText)) return setError('请填写合法的群号（数字）。')
+        nextTargetIds = [nextTargetText]
+      } else {
+        const targetTokens = nextTargetText.split(/[,，\s]+/).filter(Boolean)
+        if (targetTokens.some(token => !/^\d{3,20}$/.test(token))) {
+          return setError('请填写合法的 QQ 号（数字），多个 QQ 用逗号 / 空格分隔。')
+        }
+        nextTargetIds = [...new Set(targetTokens)]
+        if (nextTargetMode === 'whitelist' && !nextTargetIds.length) return setError('白名单模式至少需要填写一个目标 QQ 号。')
+      }
+      const nextTargetId = nextTargetIds[0] || ''
       const nextIdentityMode = identitySelect.value === 'guest' ? 'guest' : 'owner'
       const requestedContextMessages = Math.floor(Number(contextMessagesInput?.value))
       const nextRules = {
@@ -1674,14 +1804,24 @@ export function apply(ctx) {
         }
         const targetName =
           String(targetNameInput.value || '').trim() ||
-          (nextTargetType === 'group' ? `群 ${nextTargetId}` : `QQ ${nextTargetId}`)
+          (nextTargetType === 'group'
+            ? `群 ${nextTargetId}`
+            : nextTargetMode === 'blacklist'
+              ? nextTargetIds.length
+                ? `黑名单 ${nextTargetIds.length} 人`
+                : '全部 QQ'
+              : nextTargetIds.length > 1
+                ? `白名单 ${nextTargetIds.length} 人`
+                : `QQ ${nextTargetId}`)
         const nextMeta = {
           ...meta,
           kind: TYPE_ID,
           roleId: nextRoleId,
           category: nextCategory,
           targetType: nextTargetType,
-          targetId: nextTargetId,
+          targetMode: nextTargetMode,
+          targetIds: nextTargetIds,
+          targetId: nextTargetType === 'group' || nextTargetMode === 'whitelist' ? nextTargetId : '',
           targetName,
           instanceId: nextInstanceId,
           identityMode: nextIdentityMode,
@@ -1751,6 +1891,7 @@ export function apply(ctx) {
 
     // DOM 垫片 / 旧浏览器对 selected 属性的默认值同步不完整，显式赋值一次。
     categorySelect.value = TAB_ORDER.includes(category) ? category : 'private'
+    targetModeSelect.value = targetMode === 'blacklist' ? 'blacklist' : 'whitelist'
     modeSelect.value = modeSelect.value === 'reverse' ? 'reverse' : 'forward'
     instanceSelect.value = selectedInstanceId
     requireAtInput.checked = rules.requireAt !== false
@@ -1924,6 +2065,8 @@ export function apply(ctx) {
     const role = roleOf(channel)
     const category = categoryOf(channel)
     const targetType = targetTypeOf(channel)
+    const targetMode = targetModeOf(channel)
+    const targetIds = targetIdsOf(channel)
     const targetId = targetIdOf(channel)
     const permissions = permissionsOf(channel)
     const rules = groupRulesOf(channel)
@@ -1961,6 +2104,9 @@ export function apply(ctx) {
             </div>
           </div>`
         : ''
+    const usePeerIsBlocklist = category !== 'group' && targetMode === 'blacklist'
+    const usePeerLabel = usePeerIsBlocklist ? '加入黑名单' : '设为本渠道目标'
+    const usePeerTitle = usePeerIsBlocklist ? '把这条 QQ 加入当前渠道黑名单；命中后消息仍静默入库，但不触发回复' : '修改当前这个渠道的目标，不会新增渠道'
     const peerRows = peers.length
       ? peers
           .slice(0, 30)
@@ -1970,7 +2116,7 @@ export function apply(ctx) {
                 <div class="nc-row-name">
                   <span class="nc-tag ${item.type === 'group' ? '' : 'ok'}">${item.type === 'group' ? '群聊' : '私聊'}</span>
                   ${escapeHtml(item.name || (item.type === 'group' ? `群 ${item.peerId}` : `QQ ${item.peerId}`))}
-                  ${item.bound ? '<span class="nc-tag ok">已是目标</span>' : ''}
+                  ${item.bound ? `<span class="nc-tag ok">${usePeerIsBlocklist ? '已接入' : '已是目标'}</span>` : ''}
                 </div>
                 <div class="nc-row-id">${escapeHtml(String(item.peerId))} · ${escapeHtml(item.lastText || '暂无消息')} · ${Number(item.count) || 0} 条 · ${escapeHtml(
                   formatTime(item.lastAt),
@@ -1982,7 +2128,7 @@ export function apply(ctx) {
                 )}" data-nc-peer-name="${escapeHtml(item.name || '')}" title="用同一个 NapCat 连接新建另一个渠道，目标就是这条会话">新建渠道</button>
                 <button class="outline-btn" data-nc-action="use-peer" data-nc-peer-type="${escapeHtml(item.type)}" data-nc-peer-id="${escapeHtml(
                   String(item.peerId),
-                )}" data-nc-peer-name="${escapeHtml(item.name || '')}" title="修改当前这个渠道的目标，不会新增渠道">设为本渠道目标</button>
+                )}" data-nc-peer-name="${escapeHtml(item.name || '')}" title="${escapeHtml(usePeerTitle)}">${escapeHtml(usePeerLabel)}</button>
               </div>
             </div>`)
           .join('')
@@ -2025,7 +2171,15 @@ export function apply(ctx) {
               <span class="k">使用角色</span><span class="v">${escapeHtml(role?.name || '未绑定（请在编辑渠道里选择）')}</span>
               <span class="k">渠道分类</span><span class="v">${escapeHtml(TAB_LABELS[category] || category)}</span>
               <span class="k">目标类型</span><span class="v">${escapeHtml(SESSION_LABEL[targetType] || targetType)}</span>
-              <span class="k">目标 QQ / 群</span><span class="v">${escapeHtml(targetDisplayName(channel))} · ${escapeHtml(targetId)}</span>
+              ${
+                category === 'group'
+                  ? `<span class="k">目标 QQ / 群</span><span class="v">${escapeHtml(targetDisplayName(channel))} · ${escapeHtml(targetId)}</span>`
+                  : `<span class="k">${targetMode === 'blacklist' ? '黑名单' : '白名单'}</span><span class="v">${
+                      targetMode === 'blacklist'
+                        ? `${escapeHtml(targetIds.length ? targetIds.join('、') : '空（回复所有 QQ）')} · 名单内静默入库但不回复`
+                        : `${escapeHtml(targetIds.join('、') || '未配置')} · 只回复名单内 ${targetIds.length || 0} 个 QQ`
+                    }</span>`
+              }
               <span class="k">NapCat 连接</span><span class="v">${escapeHtml(instance?.remark || instanceIdOf(channel) || '未选择')}</span>
               <span class="k">机器人账号</span><span class="v">${escapeHtml(accountText)}</span>
               <span class="k">连接方式</span><span class="v">${escapeHtml(instance?.mode === 'reverse' ? 'Reverse WebSocket' : instance ? 'Forward WebSocket' : '—')}</span>
@@ -2065,7 +2219,7 @@ export function apply(ctx) {
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title">发现会话（点「设为目标」可切换本渠道目标）</div>
+          <div class="settings-section-title">发现会话（${usePeerIsBlocklist ? '点「加入黑名单」可追加到当前黑名单' : '点「设为目标」可切换本渠道目标'}）</div>
           <div class="settings-card" style="padding:12px 14px">
             ${peerRows}
           </div>
@@ -2179,17 +2333,46 @@ export function apply(ctx) {
         const peerId = String(button.dataset.ncPeerId || '').trim()
         const peerName = String(button.dataset.ncPeerName || '').trim()
         if (!peerId) return
-        const nextCategory = peerType === 'group' ? 'group' : categoryOf(current) === 'privacy' ? 'privacy' : 'private'
-        const nextMeta = { ...(current.meta || {}), category: nextCategory, targetType: peerType, targetId: peerId, targetName: peerName || current.meta?.targetName || '' }
+        let nextMeta = null
+        let successText = ''
+        if (peerType === 'private' && targetModeOf(current) === 'blacklist') {
+          // 当前是黑名单模式：把发现会话里的 QQ 追加进黑名单，并保留原渠道分类。
+          const ids = targetIdsOf(current)
+          const alreadyBlocked = ids.includes(peerId)
+          if (!alreadyBlocked) ids.push(peerId)
+          nextMeta = {
+            ...(current.meta || {}),
+            category: categoryOf(current) === 'privacy' ? 'privacy' : 'private',
+            targetType: 'private',
+            targetMode: 'blacklist',
+            targetIds: ids,
+            targetId: '',
+            targetName: String(current.meta?.targetName || '').trim() || '全部 QQ',
+          }
+          successText = alreadyBlocked ? '该 QQ 已在当前渠道黑名单里' : '已加入黑名单：消息静默入库，不触发回复'
+        } else {
+          const nextCategory = peerType === 'group' ? 'group' : categoryOf(current) === 'privacy' ? 'privacy' : 'private'
+          nextMeta = {
+            ...(current.meta || {}),
+            category: nextCategory,
+            targetType: peerType,
+            targetMode: 'whitelist',
+            targetIds: [peerId],
+            targetId: peerId,
+            targetName: peerName || current.meta?.targetName || '',
+          }
+          successText = peerType === 'group' ? '已把该群设为本渠道目标' : '已把该 QQ 设为本渠道目标'
+        }
         const fromTab = findTab(current.id)
+        const nextTab = nextMeta.category
         let saved = null
-        if (fromTab !== nextCategory) {
+        if (fromTab !== nextTab) {
           const moved = channels.removeChannel(fromTab, current.id)
           if (moved) {
-            const groups = channels.groups(nextCategory)
-            const group = groups[0] || channels.addGroup(nextCategory, '我的渠道')
-            saved = channels.addChannel(nextCategory, group.id, { ...moved, name: current.name, meta: nextMeta })
-            channels.activate(nextCategory, saved.id)
+            const groups = channels.groups(nextTab)
+            const group = groups[0] || channels.addGroup(nextTab, '我的渠道')
+            saved = channels.addChannel(nextTab, group.id, { ...moved, name: current.name, meta: nextMeta })
+            channels.activate(nextTab, saved.id)
           }
         } else {
           channels.updateChannel(fromTab, current.id, { meta: nextMeta })
@@ -2200,7 +2383,7 @@ export function apply(ctx) {
         await syncChannelToBridge(saved, { notify: true })
         await refreshDiscover()
         render()
-        toast.success(peerType === 'group' ? '已把该群设为本渠道目标' : '已把该 QQ 设为本渠道目标')
+        toast.success(successText)
       }
     }
     container.addEventListener('click', onClick)
@@ -2424,7 +2607,13 @@ export function apply(ctx) {
       instance: instanceId => findInstance(instanceId),
       rulesOf: channel => groupRulesOf(channel),
       decide: (channel, message) => triggerDecision(channel, message),
-      targetOf: channel => ({ type: targetTypeOf(channel), id: targetIdOf(channel), name: targetDisplayName(channel) }),
+      targetOf: channel => ({
+        type: targetTypeOf(channel),
+        mode: targetModeOf(channel),
+        id: targetIdOf(channel),
+        ids: targetIdsOf(channel),
+        name: targetDisplayName(channel),
+      }),
       send: body => bridgePost('/send', body),
       action: (instanceId, action, params) => bridgePost(`/instances/${encodeURIComponent(instanceId)}/action`, { action, params }),
       refresh: instanceId => (instanceId ? bridgePost(`/instances/${encodeURIComponent(instanceId)}/refresh`, {}) : refreshInstances()),
@@ -2451,10 +2640,13 @@ export function apply(ctx) {
     if (!lastInbound) return
     const actionText = payload.action === 'read' ? '读取另一个渠道的聊天记录' : '向另一个渠道发送消息'
     const targetName = payload.targetName || payload.targetChannel || '其它渠道'
+    const confirmTargetType = targetTypeOf(channel)
+    const confirmTargetId =
+      confirmTargetType === 'group' ? targetIdOf(channel) : String(lastInbound.meta?.peerId || lastInbound.meta?.senderId || targetIdOf(channel) || '').trim()
     bridgePost('/send', {
       channelId: channel.id,
-      targetType: targetTypeOf(channel),
-      targetId: targetIdOf(channel),
+      targetType: confirmTargetType,
+      targetId: confirmTargetId,
       quoteMsgId: '',
       mentionUserId: '',
       text: `检测到敏感跨渠道操作（${actionText}：${targetName}）。如果同意，请直接回复“确认”；回复其它内容将视为拒绝。`,
